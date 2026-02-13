@@ -1130,6 +1130,86 @@ func TestRunMainStackRunsStatusAndRebase(t *testing.T) {
 	}
 }
 
+func TestRunMainPrintsDefaultWorkspacePath(t *testing.T) {
+	repoRoot := t.TempDir()
+	worktreesRoot := filepath.Join(t.TempDir(), "worktrees")
+	app := "nixfiles"
+	defaultPath := filepath.Join(worktreesRoot, app, "default")
+	if err := os.MkdirAll(defaultPath, 0o755); err != nil {
+		t.Fatalf("mkdir default workspace: %v", err)
+	}
+
+	origCapture := commandCaptureFn
+	defer func() { commandCaptureFn = origCapture }()
+	commandCaptureFn = func(name string, args ...string) (string, error) {
+		if len(args) >= 3 && args[2] == "workspace" {
+			return "default\tabc111\nalpha\tdef222\n", nil
+		}
+		if len(args) >= 3 && args[2] == "log" {
+			return "def222\n", nil
+		}
+		return "", nil
+	}
+
+	out, err := captureStdout(func() error {
+		return runMain([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot})
+	})
+	if err != nil {
+		t.Fatalf("runMain failed: %v", err)
+	}
+	if strings.TrimSpace(out) != defaultPath {
+		t.Fatalf("expected %q got %q", defaultPath, strings.TrimSpace(out))
+	}
+}
+
+func TestRunMainPrintsRepoRootWhenAlreadyOnDefault(t *testing.T) {
+	repoRoot := t.TempDir()
+	origCapture := commandCaptureFn
+	defer func() { commandCaptureFn = origCapture }()
+	commandCaptureFn = func(name string, args ...string) (string, error) {
+		if len(args) >= 3 && args[2] == "workspace" {
+			return "default\tabc111\n", nil
+		}
+		if len(args) >= 3 && args[2] == "log" {
+			return "abc111\n", nil
+		}
+		return "", nil
+	}
+
+	out, err := captureStdout(func() error {
+		return runMain([]string{"--repo", repoRoot, "--app", "nixfiles", "--worktrees-root", filepath.Join(t.TempDir(), "worktrees")})
+	})
+	if err != nil {
+		t.Fatalf("runMain failed: %v", err)
+	}
+	if strings.TrimSpace(out) != repoRoot {
+		t.Fatalf("expected repoRoot %q got %q", repoRoot, strings.TrimSpace(out))
+	}
+}
+
+func TestResolveDefaultWorkspaceRootFromJjRepoLink(t *testing.T) {
+	repoRoot := t.TempDir()
+	defaultRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoRoot, ".jj"), 0o755); err != nil {
+		t.Fatalf("mkdir .jj: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(defaultRoot, ".jj"), 0o755); err != nil {
+		t.Fatalf("mkdir default .jj: %v", err)
+	}
+	linkTarget := filepath.Join(defaultRoot, ".jj", "repo")
+	if err := os.WriteFile(filepath.Join(repoRoot, ".jj", "repo"), []byte(linkTarget+"\n"), 0o644); err != nil {
+		t.Fatalf("write .jj/repo link file: %v", err)
+	}
+
+	got, ok := resolveDefaultWorkspaceRoot(repoRoot)
+	if !ok {
+		t.Fatalf("expected default workspace root to resolve")
+	}
+	if got != defaultRoot {
+		t.Fatalf("expected %q got %q", defaultRoot, got)
+	}
+}
+
 func TestRunMainStackNeedsOtherWorkspaces(t *testing.T) {
 	repoRoot := t.TempDir()
 	worktreesRoot := filepath.Join(t.TempDir(), "worktrees")

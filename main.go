@@ -77,6 +77,8 @@ func run(args []string) error {
 		return runTidy(args[1:])
 	case "cd":
 		return runCd(args[1:])
+	case "main":
+		return runMain(args[1:])
 	case "main-stack":
 		return runMainStack(args[1:])
 	case "help", "-h", "--help":
@@ -96,6 +98,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  select          Select workspace path interactively")
 	fmt.Fprintln(w, "  tidy            Select and remove defunct empty workspace dirs")
 	fmt.Fprintln(w, "  cd [name]       Print path for shell wrappers")
+	fmt.Fprintln(w, "  main            Print path for main workspace (default)")
 	fmt.Fprintln(w, "  main-stack      Run st on all workspaces, then rebase main")
 }
 
@@ -278,6 +281,65 @@ func runCd(args []string) error {
 		return runCreate(args)
 	}
 	return runSelect(args)
+}
+
+func runMain(args []string) error {
+	fs := flag.NewFlagSet("main", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var (
+		repoRootOverride string
+		appOverride      string
+		rootOverride     string
+		mainName         string
+	)
+	fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
+	fs.StringVar(&appOverride, "app", "", "app override")
+	fs.StringVar(&rootOverride, "worktrees-root", "", "worktrees root override")
+	fs.StringVar(&mainName, "name", "default", "main workspace name")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	repoRoot, err := resolveRepoRoot(repoRootOverride)
+	if err != nil {
+		return err
+	}
+	cfg, err := loadConfig(repoRoot)
+	if err != nil {
+		return err
+	}
+	if rootOverride != "" {
+		cfg.WorktreesRoot = expandPath(rootOverride)
+	}
+	app := deriveApp(repoRoot, appOverride)
+
+	refs, err := listWorkspaceRefs(repoRoot)
+	if err != nil {
+		return err
+	}
+	found := false
+	for _, ref := range refs {
+		if ref.Name == mainName {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("main workspace %q not found", mainName)
+	}
+
+	currentName := ""
+	if detected, detectErr := currentWorkspaceName(repoRoot, refs); detectErr == nil {
+		currentName = detected
+	}
+
+	target := workspacePathForName(repoRoot, cfg.WorktreesRoot, app, mainName, currentName)
+	if st, statErr := os.Stat(target); statErr != nil || !st.IsDir() {
+		return fmt.Errorf("main workspace path missing: %s", target)
+	}
+
+	fmt.Fprintln(stdoutWriter, target)
+	return nil
 }
 
 func runMainStack(args []string) error {
@@ -575,10 +637,40 @@ func listExistingWorkspacePaths(args []string) ([]string, error) {
 }
 
 func workspacePathForName(repoRoot string, worktreesRoot string, app string, name string, currentName string) string {
+	if name == "default" {
+		if root, ok := resolveDefaultWorkspaceRoot(repoRoot); ok {
+			return root
+		}
+	}
 	if currentName != "" && name == currentName {
 		return repoRoot
 	}
 	return filepath.Join(worktreesRoot, app, name)
+}
+
+func resolveDefaultWorkspaceRoot(repoRoot string) (string, bool) {
+	repoLink := filepath.Join(repoRoot, ".jj", "repo")
+	data, err := os.ReadFile(repoLink)
+	if err != nil {
+		return "", false
+	}
+	target := strings.TrimSpace(string(data))
+	if target == "" {
+		return "", false
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Clean(filepath.Join(filepath.Dir(repoLink), target))
+	}
+	target = filepath.Clean(target)
+	suffix := filepath.Join(".jj", "repo")
+	if !strings.HasSuffix(target, suffix) {
+		return "", false
+	}
+	root := filepath.Dir(filepath.Dir(target))
+	if st, err := os.Stat(root); err == nil && st.IsDir() {
+		return root, true
+	}
+	return "", false
 }
 
 func resolveRepoRoot(override string) (string, error) {
