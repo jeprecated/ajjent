@@ -1113,7 +1113,7 @@ func TestRunMainStackRunsStatusAndRebase(t *testing.T) {
 	var errOut bytes.Buffer
 	stderrWriter = &errOut
 
-	err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot})
+	err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--main", "main"})
 	if err != nil {
 		t.Fatalf("runMainStack failed: %v", err)
 	}
@@ -1239,7 +1239,7 @@ func TestRunMainStackNeedsOtherWorkspaces(t *testing.T) {
 	}
 	commandToStderrFn = func(name string, args ...string) error { return nil }
 
-	err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot})
+	err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--main", "main"})
 	if err == nil || !strings.Contains(err.Error(), "no other workspaces") {
 		t.Fatalf("expected no other workspaces error, got %v", err)
 	}

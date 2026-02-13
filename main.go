@@ -354,7 +354,7 @@ func runMainStack(args []string) error {
 	fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
 	fs.StringVar(&appOverride, "app", "", "app override")
 	fs.StringVar(&rootOverride, "worktrees-root", "", "worktrees root override")
-	fs.StringVar(&mainOverride, "main", "", "main workspace name")
+	fs.StringVar(&mainOverride, "main", "default", "main workspace name")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -382,10 +382,7 @@ func runMainStack(args []string) error {
 
 	mainName := strings.TrimSpace(mainOverride)
 	if mainName == "" {
-		mainName, err = currentWorkspaceName(repoRoot, refs)
-		if err != nil {
-			return err
-		}
+		mainName = "default"
 	}
 
 	fmt.Fprintf(stderrWriter, "Main workspace: %s\n", mainName)
