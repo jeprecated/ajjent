@@ -1,5 +1,5 @@
-dev_root: /home/jmo/Development
-worktrees_root: /home/jmo/Development/worktrees
+dev_root: ~/Development
+worktrees_root: ~/Development/worktrees
 name_strategy: first-unused
 name_list:
   - alpha

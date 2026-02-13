@@ -8,7 +8,7 @@
 
 ## Commands
 
-- `jjw create [name]` - Create a workspace and print its path
+- `jjw create [name]` - Create a workspace and print its path (shell wrapper can auto-`cd`)
 - `jjw list` - Print workspace paths for the current repo
 - `jjw select` - Interactively pick a workspace path
 - `jjw tidy` - Select and remove defunct empty workspace directories
@@ -31,14 +31,16 @@ State file (for `stateful` naming strategy):
 Example `config.yaml`:
 
 ```yaml
-dev_root: /home/jmo/Development
-worktrees_root: /home/jmo/Development/worktrees
+dev_root: ~/Development
+worktrees_root: ~/Development/worktrees
 name_strategy: first-unused
 name_list:
   - alpha
   - bravo
   - charlie
 ```
+
+With the zsh wrapper, `jjw create ...` and `jjw select` both `cd` into the returned workspace automatically.
 
 ## Notes
 
