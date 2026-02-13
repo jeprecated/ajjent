@@ -518,9 +518,18 @@ func runTidy(args []string) error {
 	}
 
 	app := deriveApp(repoRoot, appOverride)
-	activeNames, err := listWorkspaceNames(repoRoot)
+	refs, err := listWorkspaceRefs(repoRoot)
 	if err != nil {
 		return err
+	}
+	currentName := ""
+	if detected, detectErr := currentWorkspaceName(repoRoot, refs); detectErr == nil {
+		currentName = detected
+	}
+
+	activeNames := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		activeNames = append(activeNames, ref.Name)
 	}
 	active := make(map[string]struct{}, len(activeNames))
 	for _, n := range activeNames {
@@ -553,15 +562,42 @@ func runTidy(args []string) error {
 		candidates = append(candidates, full)
 	}
 
-	if len(candidates) == 0 {
+	deleted := make([]string, 0, len(candidates))
+	for _, path := range candidates {
+		if err := os.Remove(path); err != nil {
+			return fmt.Errorf("remove %s: %w", path, err)
+		}
+		deleted = append(deleted, path)
+	}
+
+	optional := make([]string, 0, len(refs))
+	pathToName := make(map[string]string, len(refs))
+	for _, ref := range refs {
+		if ref.Name == "default" || ref.Name == currentName {
+			continue
+		}
+		path := workspacePathForName(repoRoot, cfg.WorktreesRoot, app, ref.Name, currentName)
+		if st, statErr := os.Stat(path); statErr == nil && st.IsDir() {
+			optional = append(optional, path)
+			pathToName[path] = ref.Name
+		}
+	}
+
+	if len(optional) == 0 {
+		for _, path := range deleted {
+			fmt.Fprintln(stdoutWriter, path)
+		}
 		return nil
 	}
 
-	selected, err := selectMany(candidates)
+	selected, err := selectMany(optional)
 	if err != nil {
 		return err
 	}
 	if len(selected) == 0 {
+		for _, path := range deleted {
+			fmt.Fprintln(stdoutWriter, path)
+		}
 		return nil
 	}
 
@@ -576,12 +612,18 @@ func runTidy(args []string) error {
 	}
 
 	for _, path := range selected {
-		if err := os.Remove(path); err != nil {
+		if name, ok := pathToName[path]; ok {
+			if err := commandToStderrFn("jj", "-R", repoRoot, "workspace", "forget", name); err != nil {
+				return err
+			}
+		}
+		if err := os.RemoveAll(path); err != nil {
 			return fmt.Errorf("remove %s: %w", path, err)
 		}
+		deleted = append(deleted, path)
 	}
 
-	for _, path := range selected {
+	for _, path := range deleted {
 		fmt.Fprintln(stdoutWriter, path)
 	}
 	return nil

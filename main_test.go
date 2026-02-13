@@ -634,15 +634,16 @@ exit 2
 		t.Fatalf("runTidy failed: %v", err)
 	}
 
-	deleted := strings.TrimSpace(output)
-	if deleted != defunctA {
-		t.Fatalf("expected %q to be deleted, got %q", defunctA, deleted)
+	deleted := splitNonEmptyLines(output)
+	wantDeleted := []string{defunctA, defunctB}
+	if !reflect.DeepEqual(deleted, wantDeleted) {
+		t.Fatalf("unexpected deleted paths\nwant: %#v\ngot:  %#v", wantDeleted, deleted)
 	}
 	if _, err := os.Stat(defunctA); !os.IsNotExist(err) {
 		t.Fatalf("expected %s to be removed", defunctA)
 	}
-	if _, err := os.Stat(defunctB); err != nil {
-		t.Fatalf("expected %s to remain: %v", defunctB, err)
+	if _, err := os.Stat(defunctB); !os.IsNotExist(err) {
+		t.Fatalf("expected %s to be removed", defunctB)
 	}
 	if _, err := os.Stat(defunctNonEmpty); err != nil {
 		t.Fatalf("expected non-empty %s to remain: %v", defunctNonEmpty, err)
@@ -685,6 +686,90 @@ func TestRunTidyNoCandidates(t *testing.T) {
 	}
 	if strings.TrimSpace(output) != "" {
 		t.Fatalf("expected no output for no candidates, got %q", output)
+	}
+}
+
+func TestRunTidyOffersActiveNonDefaultForDeletion(t *testing.T) {
+	repoRoot := t.TempDir()
+	worktreesRoot := filepath.Join(t.TempDir(), "worktrees")
+	app := "nixfiles"
+	alphaPath := filepath.Join(worktreesRoot, app, "alpha")
+	betaPath := filepath.Join(worktreesRoot, app, "beta")
+	for _, p := range []string{alphaPath, betaPath} {
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", p, err)
+		}
+		if err := os.WriteFile(filepath.Join(p, "file"), []byte("x"), 0o644); err != nil {
+			t.Fatalf("write marker file: %v", err)
+		}
+	}
+
+	xdg := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(xdg, "jjw"), 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(xdg, "jjw", "config.yaml"), []byte("worktrees_root: "+worktreesRoot+"\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+
+	origCapture := commandCaptureFn
+	origRun := commandToStderrFn
+	origLookPath := lookPathFn
+	origRunFzf := runFzfFn
+	defer func() {
+		commandCaptureFn = origCapture
+		commandToStderrFn = origRun
+		lookPathFn = origLookPath
+		runFzfFn = origRunFzf
+	}()
+
+	commandCaptureFn = func(name string, args ...string) (string, error) {
+		if len(args) >= 3 && args[2] == "workspace" {
+			return "default\tabc111\nalpha\tdef222\nbeta\tghi333\n", nil
+		}
+		if len(args) >= 3 && args[2] == "log" {
+			return "abc111\n", nil
+		}
+		return "", nil
+	}
+
+	lookPathFn = func(file string) (string, error) {
+		if file == "fzf" {
+			return "/fake/fzf", nil
+		}
+		return "", os.ErrNotExist
+	}
+	runFzfFn = func(items []string, multi bool) (string, error) {
+		return alphaPath, nil
+	}
+
+	var forgetCalls []string
+	commandToStderrFn = func(name string, args ...string) error {
+		if len(args) >= 5 && args[2] == "workspace" && args[3] == "forget" {
+			forgetCalls = append(forgetCalls, args[4])
+		}
+		return nil
+	}
+
+	output, err := captureStdout(func() error {
+		return runTidy([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--yes"})
+	})
+	if err != nil {
+		t.Fatalf("runTidy failed: %v", err)
+	}
+
+	if got := strings.TrimSpace(output); got != alphaPath {
+		t.Fatalf("expected deleted output %q, got %q", alphaPath, got)
+	}
+	if !reflect.DeepEqual(forgetCalls, []string{"alpha"}) {
+		t.Fatalf("unexpected forget calls: %#v", forgetCalls)
+	}
+	if _, err := os.Stat(alphaPath); !os.IsNotExist(err) {
+		t.Fatalf("expected %s removed", alphaPath)
+	}
+	if _, err := os.Stat(betaPath); err != nil {
+		t.Fatalf("expected %s to remain: %v", betaPath, err)
 	}
 }
 
