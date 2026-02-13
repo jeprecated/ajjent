@@ -452,6 +452,69 @@ exit 2
 	}
 }
 
+func TestRunListSkipsCurrentWorkspaceByDefault(t *testing.T) {
+	repoRoot := t.TempDir()
+	worktreesRoot := filepath.Join(t.TempDir(), "worktrees")
+	xdg := t.TempDir()
+	bin := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+
+	jj := `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$1" == "-R" ]]; then
+  shift 2
+fi
+if [[ "$1" == "workspace" && "$2" == "list" ]]; then
+  printf 'default\nmeta\n'
+  exit 0
+fi
+if [[ "$1" == "log" ]]; then
+  printf 'abc111\n'
+  exit 0
+fi
+exit 2
+`
+	if err := writeExecutable(filepath.Join(bin, "jj"), jj); err != nil {
+		t.Fatalf("write fake jj: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(xdg, "jjw"), 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(xdg, "jjw", "config.yaml"), []byte("worktrees_root: "+worktreesRoot+"\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	origCapture := commandCaptureFn
+	defer func() { commandCaptureFn = origCapture }()
+	commandCaptureFn = func(name string, args ...string) (string, error) {
+		if len(args) >= 3 && args[0] == "-R" && args[2] == "workspace" {
+			return "default\tabc111\nmeta\tdef222\n", nil
+		}
+		if len(args) >= 4 && args[2] == "log" {
+			return "abc111\n", nil
+		}
+		return "", nil
+	}
+
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+
+	output, err := captureStdout(func() error {
+		return runList([]string{"--repo", repoRoot, "--app", "nixfiles"})
+	})
+	if err != nil {
+		t.Fatalf("runList failed: %v", err)
+	}
+
+	lines := splitNonEmptyLines(output)
+	want := []string{filepath.Join(worktreesRoot, "nixfiles", "meta")}
+	if !reflect.DeepEqual(lines, want) {
+		t.Fatalf("unexpected list output\nwant: %#v\ngot:  %#v", want, lines)
+	}
+}
+
 func TestRunSelectWithFakeFzf(t *testing.T) {
 	repoRoot := t.TempDir()
 	worktreesRoot := filepath.Join(t.TempDir(), "worktrees")

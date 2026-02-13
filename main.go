@@ -208,10 +208,12 @@ func runList(args []string) error {
 		repoRootOverride string
 		appOverride      string
 		rootOverride     string
+		includeAll       bool
 	)
 	fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
 	fs.StringVar(&appOverride, "app", "", "app override")
 	fs.StringVar(&rootOverride, "worktrees-root", "", "worktrees root override")
+	fs.BoolVar(&includeAll, "all", false, "include current workspace")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -229,12 +231,23 @@ func runList(args []string) error {
 	}
 
 	app := deriveApp(repoRoot, appOverride)
-	names, err := listWorkspaceNames(repoRoot)
+	refs, err := listWorkspaceRefs(repoRoot)
 	if err != nil {
 		return err
 	}
-	for _, name := range names {
-		fmt.Fprintln(stdoutWriter, filepath.Join(cfg.WorktreesRoot, app, name))
+
+	currentName := ""
+	if !includeAll {
+		if detected, detectErr := currentWorkspaceName(repoRoot, refs); detectErr == nil {
+			currentName = detected
+		}
+	}
+
+	for _, ref := range refs {
+		if !includeAll && ref.Name == currentName {
+			continue
+		}
+		fmt.Fprintln(stdoutWriter, workspacePathForName(repoRoot, cfg.WorktreesRoot, app, ref.Name, currentName))
 	}
 	return nil
 }
@@ -512,10 +525,12 @@ func listExistingWorkspacePaths(args []string) ([]string, error) {
 		repoRootOverride string
 		appOverride      string
 		rootOverride     string
+		includeAll       bool
 	)
 	fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
 	fs.StringVar(&appOverride, "app", "", "app override")
 	fs.StringVar(&rootOverride, "worktrees-root", "", "worktrees root override")
+	fs.BoolVar(&includeAll, "all", false, "include current workspace")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
@@ -533,20 +548,37 @@ func listExistingWorkspacePaths(args []string) ([]string, error) {
 	}
 
 	app := deriveApp(repoRoot, appOverride)
-	names, err := listWorkspaceNames(repoRoot)
+	refs, err := listWorkspaceRefs(repoRoot)
 	if err != nil {
 		return nil, err
 	}
 
+	currentName := ""
+	if !includeAll {
+		if detected, detectErr := currentWorkspaceName(repoRoot, refs); detectErr == nil {
+			currentName = detected
+		}
+	}
+
 	var paths []string
-	for _, name := range names {
-		p := filepath.Join(cfg.WorktreesRoot, app, name)
+	for _, ref := range refs {
+		if !includeAll && ref.Name == currentName {
+			continue
+		}
+		p := workspacePathForName(repoRoot, cfg.WorktreesRoot, app, ref.Name, currentName)
 		if st, statErr := os.Stat(p); statErr == nil && st.IsDir() {
 			paths = append(paths, p)
 		}
 	}
 	sort.Strings(paths)
 	return paths, nil
+}
+
+func workspacePathForName(repoRoot string, worktreesRoot string, app string, name string, currentName string) string {
+	if currentName != "" && name == currentName {
+		return repoRoot
+	}
+	return filepath.Join(worktreesRoot, app, name)
 }
 
 func resolveRepoRoot(override string) (string, error) {
@@ -620,6 +652,10 @@ func listWorkspaceRefs(repoRoot string) ([]workspaceRef, error) {
 			continue
 		}
 		parts := strings.Split(line, "\t")
+		if len(parts) == 1 {
+			refs = append(refs, workspaceRef{Name: strings.TrimSpace(parts[0]), TargetChange: ""})
+			continue
+		}
 		if len(parts) != 2 {
 			continue
 		}
