@@ -1012,6 +1012,109 @@ func TestRunHelpAndUnknown(t *testing.T) {
 	}
 }
 
+func TestRunMainStackRunsStatusAndRebase(t *testing.T) {
+	repoRoot := t.TempDir()
+	worktreesRoot := filepath.Join(t.TempDir(), "worktrees")
+	app := "nixfiles"
+	for _, name := range []string{"main", "feat-a", "feat-b"} {
+		if err := os.MkdirAll(filepath.Join(worktreesRoot, app, name), 0o755); err != nil {
+			t.Fatalf("mkdir workspace %s: %v", name, err)
+		}
+	}
+
+	origCapture := commandCaptureFn
+	origRun := commandToStderrFn
+	origStderr := stderrWriter
+	defer func() {
+		commandCaptureFn = origCapture
+		commandToStderrFn = origRun
+		stderrWriter = origStderr
+	}()
+
+	commandCaptureFn = func(name string, args ...string) (string, error) {
+		if len(args) >= 3 && args[0] == "-R" && args[2] == "workspace" {
+			return "feat-a\tabc111\nfeat-b\tabc222\nmain\tabc333\n", nil
+		}
+		if len(args) >= 4 && args[2] == "log" && args[3] == "-r" {
+			return "abc333\n", nil
+		}
+		return "", nil
+	}
+
+	var calls [][]string
+	commandToStderrFn = func(name string, args ...string) error {
+		calls = append(calls, append([]string{name}, args...))
+		return nil
+	}
+
+	var errOut bytes.Buffer
+	stderrWriter = &errOut
+
+	err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot})
+	if err != nil {
+		t.Fatalf("runMainStack failed: %v", err)
+	}
+
+	if len(calls) != 4 {
+		t.Fatalf("expected 4 jj calls (3 st + 1 rebase), got %d", len(calls))
+	}
+	if len(calls[3]) < 4 || calls[3][3] != "rebase" {
+		t.Fatalf("expected last call to be rebase, got %#v", calls[3])
+	}
+	joined := strings.Join(calls[3], " ")
+	if !strings.Contains(joined, "-d feat-a@") || !strings.Contains(joined, "-d feat-b@") {
+		t.Fatalf("expected rebase destinations for feature workspaces, got %q", joined)
+	}
+}
+
+func TestRunMainStackNeedsOtherWorkspaces(t *testing.T) {
+	repoRoot := t.TempDir()
+	worktreesRoot := filepath.Join(t.TempDir(), "worktrees")
+	app := "nixfiles"
+	if err := os.MkdirAll(filepath.Join(worktreesRoot, app, "main"), 0o755); err != nil {
+		t.Fatalf("mkdir main workspace: %v", err)
+	}
+
+	origCapture := commandCaptureFn
+	origRun := commandToStderrFn
+	defer func() {
+		commandCaptureFn = origCapture
+		commandToStderrFn = origRun
+	}()
+
+	commandCaptureFn = func(name string, args ...string) (string, error) {
+		if len(args) >= 3 && args[0] == "-R" && args[2] == "workspace" {
+			return "main\tabc333\n", nil
+		}
+		if len(args) >= 4 && args[2] == "log" && args[3] == "-r" {
+			return "abc333\n", nil
+		}
+		return "", nil
+	}
+	commandToStderrFn = func(name string, args ...string) error { return nil }
+
+	err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot})
+	if err == nil || !strings.Contains(err.Error(), "no other workspaces") {
+		t.Fatalf("expected no other workspaces error, got %v", err)
+	}
+}
+
+func TestCurrentWorkspaceNameNotDetected(t *testing.T) {
+	t.Parallel()
+
+	origCapture := commandCaptureFn
+	defer func() { commandCaptureFn = origCapture }()
+
+	commandCaptureFn = func(name string, args ...string) (string, error) {
+		return "zzz999\n", nil
+	}
+
+	_, err := currentWorkspaceName("/tmp/repo", []workspaceRef{{Name: "main", TargetChange: "abc111"}})
+	if err == nil {
+		t.Fatalf("expected workspace detection error")
+	}
+}
+
 func TestExistsAndExpandPath(t *testing.T) {
 	t.Parallel()
 

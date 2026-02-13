@@ -39,6 +39,11 @@ type state struct {
 	NextIndex int `json:"next_index"`
 }
 
+type workspaceRef struct {
+	Name         string
+	TargetChange string
+}
+
 const (
 	strategyFirstUnused = "first-unused"
 	strategyStateful    = "stateful"
@@ -72,6 +77,8 @@ func run(args []string) error {
 		return runTidy(args[1:])
 	case "cd":
 		return runCd(args[1:])
+	case "main-stack":
+		return runMainStack(args[1:])
 	case "help", "-h", "--help":
 		printUsage(stdoutWriter)
 		return nil
@@ -89,6 +96,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  select          Select workspace path interactively")
 	fmt.Fprintln(w, "  tidy            Select and remove defunct empty workspace dirs")
 	fmt.Fprintln(w, "  cd [name]       Print path for shell wrappers")
+	fmt.Fprintln(w, "  main-stack      Run st on all workspaces, then rebase main")
 }
 
 func runCreate(args []string) error {
@@ -257,6 +265,89 @@ func runCd(args []string) error {
 		return runCreate(args)
 	}
 	return runSelect(args)
+}
+
+func runMainStack(args []string) error {
+	fs := flag.NewFlagSet("main-stack", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var (
+		repoRootOverride string
+		appOverride      string
+		rootOverride     string
+		mainOverride     string
+	)
+	fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
+	fs.StringVar(&appOverride, "app", "", "app override")
+	fs.StringVar(&rootOverride, "worktrees-root", "", "worktrees root override")
+	fs.StringVar(&mainOverride, "main", "", "main workspace name")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	repoRoot, err := resolveRepoRoot(repoRootOverride)
+	if err != nil {
+		return err
+	}
+	cfg, err := loadConfig(repoRoot)
+	if err != nil {
+		return err
+	}
+	if rootOverride != "" {
+		cfg.WorktreesRoot = expandPath(rootOverride)
+	}
+	app := deriveApp(repoRoot, appOverride)
+
+	refs, err := listWorkspaceRefs(repoRoot)
+	if err != nil {
+		return err
+	}
+	if len(refs) == 0 {
+		return errors.New("no workspaces found")
+	}
+
+	mainName := strings.TrimSpace(mainOverride)
+	if mainName == "" {
+		mainName, err = currentWorkspaceName(repoRoot, refs)
+		if err != nil {
+			return err
+		}
+	}
+
+	fmt.Fprintf(stderrWriter, "Main workspace: %s\n", mainName)
+	for _, ref := range refs {
+		workspacePath := filepath.Join(cfg.WorktreesRoot, app, ref.Name)
+		fmt.Fprintf(stderrWriter, "\n== jj st: %s ==\n", ref.Name)
+		if st, statErr := os.Stat(workspacePath); statErr != nil || !st.IsDir() {
+			fmt.Fprintf(stderrWriter, "skip: workspace path missing: %s\n", workspacePath)
+			continue
+		}
+		if err := commandToStderrFn("jj", "-R", workspacePath, "st"); err != nil {
+			return err
+		}
+	}
+
+	var others []string
+	for _, ref := range refs {
+		if ref.Name != mainName {
+			others = append(others, ref.Name)
+		}
+	}
+	if len(others) == 0 {
+		return errors.New("no other workspaces to stack onto")
+	}
+
+	mainPath := filepath.Join(cfg.WorktreesRoot, app, mainName)
+	if st, statErr := os.Stat(mainPath); statErr != nil || !st.IsDir() {
+		return fmt.Errorf("main workspace path missing: %s", mainPath)
+	}
+
+	cmdArgs := []string{"-R", mainPath, "rebase", "-b", "@"}
+	for _, name := range others {
+		cmdArgs = append(cmdArgs, "-d", name+"@")
+	}
+
+	fmt.Fprintf(stderrWriter, "\n== Rebase main onto: %s ==\n", strings.Join(others, ", "))
+	return commandToStderrFn("jj", cmdArgs...)
 }
 
 func normalizeCreateArgs(args []string) ([]string, error) {
@@ -514,6 +605,44 @@ func listWorkspaceNames(repoRoot string) ([]string, error) {
 	}
 	sort.Strings(names)
 	return names, nil
+}
+
+func listWorkspaceRefs(repoRoot string) ([]workspaceRef, error) {
+	out, err := commandCaptureFn("jj", "-R", repoRoot, "workspace", "list", "-T", "name ++ \"\\t\" ++ target.change_id().short() ++ \"\\n\"")
+	if err != nil {
+		return nil, err
+	}
+
+	var refs []workspaceRef
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.Split(line, "\t")
+		if len(parts) != 2 {
+			continue
+		}
+		refs = append(refs, workspaceRef{Name: strings.TrimSpace(parts[0]), TargetChange: strings.TrimSpace(parts[1])})
+	}
+	sort.Slice(refs, func(i, j int) bool {
+		return refs[i].Name < refs[j].Name
+	})
+	return refs, nil
+}
+
+func currentWorkspaceName(repoRoot string, refs []workspaceRef) (string, error) {
+	out, err := commandCaptureFn("jj", "-R", repoRoot, "log", "-r", "@", "--no-graph", "-T", "change_id.short() ++ \"\\n\"")
+	if err != nil {
+		return "", err
+	}
+	current := strings.TrimSpace(out)
+	for _, ref := range refs {
+		if ref.TargetChange == current {
+			return ref.Name, nil
+		}
+	}
+	return "", errors.New("could not detect current workspace; pass --main")
 }
 
 func loadConfig(repoRoot string) (config, error) {

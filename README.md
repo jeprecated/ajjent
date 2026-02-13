@@ -13,6 +13,7 @@
 - `jjw select` - Interactively pick a workspace path
 - `jjw tidy` - Select and remove defunct empty workspace directories
 - `jjw cd [name]` - Print selected path, or create-and-print when `name` is provided
+- `jjw main-stack` - Run `jj st` across all repo workspaces, then rebase main onto all others
 
 ## Config
 
@@ -41,6 +42,8 @@ name_list:
 ```
 
 With the zsh wrapper, `jjw create ...` and `jjw select` both `cd` into the returned workspace automatically.
+
+For repos where you keep a dedicated main workspace, run `jjw main-stack` from that main directory to stack it on top of all other workspaces before building/testing.
 
 ## Notes
 
