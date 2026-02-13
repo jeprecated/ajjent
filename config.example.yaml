@@ -1,0 +1,9 @@
+dev_root: /home/jmo/Development
+worktrees_root: /home/jmo/Development/worktrees
+name_strategy: first-unused
+name_list:
+  - alpha
+  - bravo
+  - charlie
+  - delta
+  - echo
