@@ -1118,15 +1118,18 @@ func TestRunMainStackRunsStatusAndRebase(t *testing.T) {
 		t.Fatalf("runMainStack failed: %v", err)
 	}
 
-	if len(calls) != 4 {
-		t.Fatalf("expected 4 jj calls (3 st + 1 rebase), got %d", len(calls))
+	if len(calls) != 8 {
+		t.Fatalf("expected 8 jj calls (3 update-stale + 3 st + rebase + final update-stale), got %d", len(calls))
 	}
-	if len(calls[3]) < 4 || calls[3][3] != "rebase" {
-		t.Fatalf("expected last call to be rebase, got %#v", calls[3])
+	if len(calls[6]) < 4 || calls[6][3] != "rebase" {
+		t.Fatalf("expected rebase call at index 6, got %#v", calls[6])
 	}
-	joined := strings.Join(calls[3], " ")
+	joined := strings.Join(calls[6], " ")
 	if !strings.Contains(joined, "-d feat-a@") || !strings.Contains(joined, "-d feat-b@") {
 		t.Fatalf("expected rebase destinations for feature workspaces, got %q", joined)
+	}
+	if calls[7][3] != "workspace" || calls[7][4] != "update-stale" {
+		t.Fatalf("expected final update-stale call, got %#v", calls[7])
 	}
 }
 
@@ -1255,6 +1258,54 @@ func TestCurrentWorkspaceNameNotDetected(t *testing.T) {
 	_, err := currentWorkspaceName("/tmp/repo", []workspaceRef{{Name: "main", TargetChange: "abc111"}})
 	if err == nil {
 		t.Fatalf("expected workspace detection error")
+	}
+}
+
+func TestRunMainStackUsesRepoRootForDefaultWorkspace(t *testing.T) {
+	repoRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repoRoot, ".jj"), 0o755); err != nil {
+		t.Fatalf("mkdir .jj: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoRoot, ".jj", "repo"), []byte(filepath.Join(repoRoot, ".jj", "repo")+"\n"), 0o644); err != nil {
+		t.Fatalf("write .jj/repo: %v", err)
+	}
+	worktreesRoot := filepath.Join(t.TempDir(), "worktrees")
+	app := "nixfiles"
+	if err := os.MkdirAll(filepath.Join(worktreesRoot, app, "alpha"), 0o755); err != nil {
+		t.Fatalf("mkdir alpha workspace: %v", err)
+	}
+
+	origCapture := commandCaptureFn
+	origRun := commandToStderrFn
+	defer func() {
+		commandCaptureFn = origCapture
+		commandToStderrFn = origRun
+	}()
+
+	commandCaptureFn = func(name string, args ...string) (string, error) {
+		if len(args) >= 3 && args[2] == "workspace" {
+			return "default\tabc111\nalpha\tdef222\n", nil
+		}
+		if len(args) >= 3 && args[2] == "log" {
+			return "abc111\n", nil
+		}
+		return "", nil
+	}
+
+	var sawDefaultUpdate bool
+	commandToStderrFn = func(name string, args ...string) error {
+		if len(args) >= 4 && args[2] == "workspace" && args[3] == "update-stale" && args[1] == repoRoot {
+			sawDefaultUpdate = true
+		}
+		return nil
+	}
+
+	err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--main", "default"})
+	if err != nil {
+		t.Fatalf("runMainStack failed: %v", err)
+	}
+	if !sawDefaultUpdate {
+		t.Fatalf("expected default workspace update-stale to run at repo root")
 	}
 }
 

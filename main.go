@@ -391,10 +391,16 @@ func runMainStack(args []string) error {
 	fmt.Fprintf(stderrWriter, "Main workspace: %s\n", mainName)
 	for _, ref := range refs {
 		workspacePath := filepath.Join(cfg.WorktreesRoot, app, ref.Name)
+		if ref.Name == "default" {
+			workspacePath = workspacePathForName(repoRoot, cfg.WorktreesRoot, app, ref.Name, mainName)
+		}
 		fmt.Fprintf(stderrWriter, "\n== jj st: %s ==\n", ref.Name)
 		if st, statErr := os.Stat(workspacePath); statErr != nil || !st.IsDir() {
 			fmt.Fprintf(stderrWriter, "skip: workspace path missing: %s\n", workspacePath)
 			continue
+		}
+		if err := commandToStderrFn("jj", "-R", workspacePath, "workspace", "update-stale"); err != nil {
+			return err
 		}
 		if err := commandToStderrFn("jj", "-R", workspacePath, "st"); err != nil {
 			return err
@@ -411,7 +417,7 @@ func runMainStack(args []string) error {
 		return errors.New("no other workspaces to stack onto")
 	}
 
-	mainPath := filepath.Join(cfg.WorktreesRoot, app, mainName)
+	mainPath := workspacePathForName(repoRoot, cfg.WorktreesRoot, app, mainName, mainName)
 	if st, statErr := os.Stat(mainPath); statErr != nil || !st.IsDir() {
 		return fmt.Errorf("main workspace path missing: %s", mainPath)
 	}
@@ -422,7 +428,11 @@ func runMainStack(args []string) error {
 	}
 
 	fmt.Fprintf(stderrWriter, "\n== Rebase main onto: %s ==\n", strings.Join(others, ", "))
-	return commandToStderrFn("jj", cmdArgs...)
+	if err := commandToStderrFn("jj", cmdArgs...); err != nil {
+		return err
+	}
+
+	return commandToStderrFn("jj", "-R", mainPath, "workspace", "update-stale")
 }
 
 func normalizeCreateArgs(args []string) ([]string, error) {
