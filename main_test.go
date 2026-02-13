@@ -515,7 +515,7 @@ exit 2
 	}
 }
 
-func TestRunSelectWithFakeFzf(t *testing.T) {
+func TestRunSelectInteractivePrompt(t *testing.T) {
 	repoRoot := t.TempDir()
 	worktreesRoot := filepath.Join(t.TempDir(), "worktrees")
 	app := "myapp"
@@ -549,16 +549,25 @@ if [[ "$1" == "workspace" && "$2" == "list" ]]; then
 fi
 exit 2
 `
-	fzf := "#!/usr/bin/env bash\nset -euo pipefail\nIFS= read -r line || true\nprintf '%s\\n' \"$line\"\n"
 	if err := writeExecutable(filepath.Join(bin, "jj"), jj); err != nil {
 		t.Fatalf("write fake jj: %v", err)
-	}
-	if err := writeExecutable(filepath.Join(bin, "fzf"), fzf); err != nil {
-		t.Fatalf("write fake fzf: %v", err)
 	}
 
 	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
 	t.Setenv("XDG_CONFIG_HOME", xdg)
+	origStdin := stdinReader
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	stdinReader = r
+	defer func() {
+		stdinReader = origStdin
+	}()
+	if _, err := w.Write([]byte("1\n")); err != nil {
+		t.Fatalf("write stdin: %v", err)
+	}
+	_ = w.Close()
 
 	output, err := captureStdout(func() error {
 		return runSelect([]string{"--repo", repoRoot, "--app", app})
@@ -715,13 +724,11 @@ func TestRunTidyOffersActiveNonDefaultForDeletion(t *testing.T) {
 
 	origCapture := commandCaptureFn
 	origRun := commandToStderrFn
-	origLookPath := lookPathFn
-	origRunFzf := runFzfFn
+	origStdin := stdinReader
 	defer func() {
 		commandCaptureFn = origCapture
 		commandToStderrFn = origRun
-		lookPathFn = origLookPath
-		runFzfFn = origRunFzf
+		stdinReader = origStdin
 	}()
 
 	commandCaptureFn = func(name string, args ...string) (string, error) {
@@ -734,15 +741,15 @@ func TestRunTidyOffersActiveNonDefaultForDeletion(t *testing.T) {
 		return "", nil
 	}
 
-	lookPathFn = func(file string) (string, error) {
-		if file == "fzf" {
-			return "/fake/fzf", nil
-		}
-		return "", os.ErrNotExist
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
 	}
-	runFzfFn = func(items []string, multi bool) (string, error) {
-		return alphaPath, nil
+	stdinReader = r
+	if _, err := w.Write([]byte("1\n")); err != nil {
+		t.Fatalf("write stdin: %v", err)
 	}
+	_ = w.Close()
 
 	var forgetCalls []string
 	commandToStderrFn = func(name string, args ...string) error {
@@ -1530,25 +1537,22 @@ func TestRunCreateDirenvAllowFailureIgnored(t *testing.T) {
 	}
 }
 
-func TestSelectOneInjectedFzfNoSelection(t *testing.T) {
-	origLookPath := lookPathFn
-	origRunFzf := runFzfFn
+func TestSelectOneNoSelectionOnQuit(t *testing.T) {
+	origStdin := stdinReader
 	defer func() {
-		lookPathFn = origLookPath
-		runFzfFn = origRunFzf
+		stdinReader = origStdin
 	}()
-
-	lookPathFn = func(file string) (string, error) {
-		if file == "fzf" {
-			return "/fake/fzf", nil
-		}
-		return "", os.ErrNotExist
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
 	}
-	runFzfFn = func(items []string, multi bool) (string, error) {
-		return "", nil
+	stdinReader = r
+	if _, err := w.Write([]byte("q\n")); err != nil {
+		t.Fatalf("write stdin: %v", err)
 	}
+	_ = w.Close()
 
-	_, err := selectOne([]string{"/tmp/a", "/tmp/b"})
+	_, err = selectOne([]string{"/tmp/a", "/tmp/b"})
 	if err == nil || !strings.Contains(err.Error(), "no selection") {
 		t.Fatalf("expected no selection error, got %v", err)
 	}

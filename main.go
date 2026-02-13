@@ -1006,29 +1006,22 @@ func selectOne(items []string) (string, error) {
 	if len(items) == 1 {
 		return items[0], nil
 	}
-	if _, err := lookPathFn("fzf"); err == nil {
-		out, fzfErr := runFzfFn(items, false)
-		if fzfErr != nil {
-			return "", fzfErr
-		}
-		if out == "" {
-			return "", errors.New("no selection")
-		}
-		return out, nil
-	}
-
-	fmt.Fprintln(stderrWriter, "Select a workspace:")
+	fmt.Fprintln(stderrWriter, "Choose a workspace:")
 	for i, item := range items {
-		fmt.Fprintf(stderrWriter, "%d) %s\n", i+1, item)
+		fmt.Fprintf(stderrWriter, "  %2d) %s\n", i+1, item)
 	}
-	fmt.Fprint(stderrWriter, "Enter number: ")
+	fmt.Fprint(stderrWriter, "Selection (number, q to cancel): ")
 
 	reader := bufio.NewReader(stdinReader)
 	line, err := reader.ReadString('\n')
 	if err != nil {
 		return "", err
 	}
-	n, err := strconv.Atoi(strings.TrimSpace(line))
+	line = strings.TrimSpace(line)
+	if line == "" || strings.EqualFold(line, "q") || strings.EqualFold(line, "quit") {
+		return "", errors.New("no selection")
+	}
+	n, err := strconv.Atoi(line)
 	if err != nil || n < 1 || n > len(items) {
 		return "", errors.New("invalid selection")
 	}
@@ -1037,23 +1030,12 @@ func selectOne(items []string) (string, error) {
 
 func selectMany(items []string) ([]string, error) {
 	sort.Strings(items)
-	if _, err := lookPathFn("fzf"); err == nil {
-		out, fzfErr := runFzfFn(items, true)
-		if fzfErr != nil {
-			return nil, fzfErr
-		}
-		if out == "" {
-			return nil, nil
-		}
-		lines := splitNonEmptyLines(out)
-		return lines, nil
-	}
 
-	fmt.Fprintln(stderrWriter, "Select directories to delete (comma-separated numbers):")
+	fmt.Fprintln(stderrWriter, "Select workspaces to delete:")
 	for i, item := range items {
-		fmt.Fprintf(stderrWriter, "%d) %s\n", i+1, item)
+		fmt.Fprintf(stderrWriter, "  %2d) %s\n", i+1, item)
 	}
-	fmt.Fprint(stderrWriter, "Enter selections (or blank to cancel): ")
+	fmt.Fprint(stderrWriter, "Selection (e.g. 1,3-5, a=all, blank/q=cancel): ")
 
 	reader := bufio.NewReader(stdinReader)
 	line, err := reader.ReadString('\n')
@@ -1061,26 +1043,66 @@ func selectMany(items []string) ([]string, error) {
 		return nil, err
 	}
 	line = strings.TrimSpace(line)
-	if line == "" {
+	if line == "" || strings.EqualFold(line, "q") || strings.EqualFold(line, "quit") {
 		return nil, nil
 	}
+	if strings.EqualFold(line, "a") || strings.EqualFold(line, "all") {
+		return append([]string(nil), items...), nil
+	}
 
-	parts := strings.Split(line, ",")
+	indices, parseErr := parseSelectionIndices(line, len(items))
+	if parseErr != nil {
+		return nil, parseErr
+	}
+	selected := make([]string, 0, len(indices))
+	for _, idx := range indices {
+		selected = append(selected, items[idx])
+	}
+	return selected, nil
+}
+
+func parseSelectionIndices(input string, max int) ([]int, error) {
+	parts := strings.Split(input, ",")
 	seen := map[int]struct{}{}
-	selected := make([]string, 0, len(parts))
+	indices := make([]int, 0, len(parts))
 	for _, p := range parts {
-		n, convErr := strconv.Atoi(strings.TrimSpace(p))
-		if convErr != nil || n < 1 || n > len(items) {
-			return nil, fmt.Errorf("invalid selection: %q", p)
+		token := strings.TrimSpace(p)
+		if token == "" {
+			continue
+		}
+		if strings.Contains(token, "-") {
+			bounds := strings.SplitN(token, "-", 2)
+			if len(bounds) != 2 {
+				return nil, fmt.Errorf("invalid selection: %q", token)
+			}
+			start, errStart := strconv.Atoi(strings.TrimSpace(bounds[0]))
+			end, errEnd := strconv.Atoi(strings.TrimSpace(bounds[1]))
+			if errStart != nil || errEnd != nil || start < 1 || end < 1 || start > max || end > max || start > end {
+				return nil, fmt.Errorf("invalid selection: %q", token)
+			}
+			for n := start; n <= end; n++ {
+				idx := n - 1
+				if _, ok := seen[idx]; ok {
+					continue
+				}
+				seen[idx] = struct{}{}
+				indices = append(indices, idx)
+			}
+			continue
+		}
+
+		n, convErr := strconv.Atoi(token)
+		if convErr != nil || n < 1 || n > max {
+			return nil, fmt.Errorf("invalid selection: %q", token)
 		}
 		idx := n - 1
 		if _, ok := seen[idx]; ok {
 			continue
 		}
 		seen[idx] = struct{}{}
-		selected = append(selected, items[idx])
+		indices = append(indices, idx)
 	}
-	return selected, nil
+	return indices, nil
 }
 
 func confirmDelete(count int) (bool, error) {
