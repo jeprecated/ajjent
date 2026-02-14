@@ -1101,28 +1101,34 @@ func interactiveMultiSelect(items []string) ([]string, error) {
 	_, _ = fmt.Fprint(out, "\x1b[?25l")
 	defer func() {
 		_, _ = fmt.Fprint(out, "\x1b[?25h")
-		_, _ = fmt.Fprint(out, "\x1b[0m\n")
+		_, _ = fmt.Fprint(out, "\x1b[0m\r\n")
 	}()
 
 	selected := make(map[int]bool, len(items))
 	cursor := 0
+	lastRenderedRows := 0
 
 	render := func() {
-		_, _ = fmt.Fprint(out, "\x1b[2J\x1b[H")
-		_, _ = fmt.Fprintln(out, "Select workspaces to delete")
-		_, _ = fmt.Fprintln(out, "Up/Down: move  Space: toggle  Enter: confirm  q: cancel")
-		_, _ = fmt.Fprintln(out)
-		for i, item := range items {
-			pointer := " "
-			if i == cursor {
-				pointer = ">"
+		if lastRenderedRows > 0 {
+			_, _ = fmt.Fprintf(out, "\x1b[%dA", lastRenderedRows)
+			for i := 0; i < lastRenderedRows; i++ {
+				_, _ = fmt.Fprint(out, "\r\x1b[2K")
+				if i < lastRenderedRows-1 {
+					_, _ = fmt.Fprint(out, "\x1b[1B")
+				}
 			}
-			mark := "[ ]"
-			if selected[i] {
-				mark = "[x]"
+			if lastRenderedRows > 1 {
+				_, _ = fmt.Fprintf(out, "\x1b[%dA", lastRenderedRows-1)
 			}
-			_, _ = fmt.Fprintf(out, "%s %s %s\n", pointer, mark, item)
 		}
+
+		lines := buildMultiSelectLines(items, cursor, selected, terminalWidth(out))
+
+		for _, line := range lines {
+			_, _ = fmt.Fprintf(out, "%s\r\n", line)
+		}
+
+		lastRenderedRows = len(lines)
 	}
 
 	render()
@@ -1136,24 +1142,28 @@ func interactiveMultiSelect(items []string) ([]string, error) {
 		switch b {
 		case 'q', 'Q':
 			return nil, nil
+		case 'a', 'A':
+			invertSelections(selected, len(items))
+		case 'c', 'C':
+			return selectedItems(items, selected), nil
 		case 'k':
 			if cursor > 0 {
 				cursor--
 			}
 		case 'j':
-			if cursor < len(items)-1 {
+			if cursor < len(items) {
 				cursor++
 			}
 		case ' ':
-			selected[cursor] = !selected[cursor]
-		case '\r', '\n':
-			outItems := make([]string, 0, len(selected))
-			for i := 0; i < len(items); i++ {
-				if selected[i] {
-					outItems = append(outItems, items[i])
-				}
+			if cursor < len(items) {
+				selected[cursor] = !selected[cursor]
 			}
-			return outItems, nil
+		case '\r', '\n':
+			nextCursor, done := applyEnter(cursor, len(items), selected)
+			cursor = nextCursor
+			if done {
+				return selectedItems(items, selected), nil
+			}
 		case 0x1b:
 			next, err1 := reader.ReadByte()
 			if err1 != nil {
@@ -1172,7 +1182,7 @@ func interactiveMultiSelect(items []string) ([]string, error) {
 					cursor--
 				}
 			case 'B':
-				if cursor < len(items)-1 {
+				if cursor < len(items) {
 					cursor++
 				}
 			}
@@ -1180,6 +1190,107 @@ func interactiveMultiSelect(items []string) ([]string, error) {
 
 		render()
 	}
+}
+
+func buildMultiSelectLines(items []string, cursor int, selected map[int]bool, width int) []string {
+	lines := make([]string, 0, 3+len(items))
+	lines = appendWrappedLine(lines, "", "", "Select workspaces to delete", width)
+	lines = appendWrappedLine(lines, "", "", "Up/Down: move  Space: toggle  Enter: toggle+next/submit  a: invert  c: continue  q: cancel", width)
+	lines = append(lines, "")
+
+	for i, item := range items {
+		pointer := " "
+		if i == cursor {
+			pointer = ">"
+		}
+		mark := "[ ]"
+		if selected[i] {
+			mark = "[x]"
+		}
+
+		prefix := fmt.Sprintf("%s %s ", pointer, mark)
+		continuation := strings.Repeat(" ", len(prefix))
+		lines = appendWrappedLine(lines, prefix, continuation, item, width)
+	}
+
+	submitPointer := " "
+	if cursor == len(items) {
+		submitPointer = ">"
+	}
+	lines = append(lines, fmt.Sprintf("%s [ continue ]", submitPointer))
+
+	return lines
+}
+
+func selectedItems(items []string, selected map[int]bool) []string {
+	outItems := make([]string, 0, len(selected))
+	for i := 0; i < len(items); i++ {
+		if selected[i] {
+			outItems = append(outItems, items[i])
+		}
+	}
+	return outItems
+}
+
+func invertSelections(selected map[int]bool, itemCount int) {
+	for i := 0; i < itemCount; i++ {
+		selected[i] = !selected[i]
+	}
+}
+
+func applyEnter(cursor, itemCount int, selected map[int]bool) (nextCursor int, done bool) {
+	if cursor >= itemCount {
+		return cursor, true
+	}
+	selected[cursor] = !selected[cursor]
+	if cursor < itemCount {
+		cursor++
+	}
+	return cursor, false
+}
+
+func appendWrappedLine(lines []string, prefix, continuation, content string, width int) []string {
+	effectiveWidth := width
+	if effectiveWidth > 1 {
+		effectiveWidth--
+	}
+
+	prefixRunes := []rune(prefix)
+	contentRunes := []rune(content)
+	maxFirst := effectiveWidth - len(prefixRunes)
+	if effectiveWidth <= 0 || maxFirst <= 0 {
+		return append(lines, prefix+content)
+	}
+
+	maxNext := effectiveWidth - len([]rune(continuation))
+	if maxNext <= 0 {
+		maxNext = maxFirst
+	}
+
+	if len(contentRunes) <= maxFirst {
+		return append(lines, prefix+content)
+	}
+
+	lines = append(lines, prefix+string(contentRunes[:maxFirst]))
+	contentRunes = contentRunes[maxFirst:]
+	for len(contentRunes) > 0 {
+		take := maxNext
+		if len(contentRunes) < take {
+			take = len(contentRunes)
+		}
+		lines = append(lines, continuation+string(contentRunes[:take]))
+		contentRunes = contentRunes[take:]
+	}
+
+	return lines
+}
+
+func terminalWidth(f *os.File) int {
+	width, _, err := term.GetSize(int(f.Fd()))
+	if err != nil || width <= 0 {
+		return 0
+	}
+	return width
 }
 
 func parseSelectionIndices(input string, max int) ([]int, error) {
@@ -1228,6 +1339,10 @@ func parseSelectionIndices(input string, max int) ([]int, error) {
 
 func confirmDelete(count int) (bool, error) {
 	fmt.Fprintf(stderrWriter, "Delete %d workspace directorie(s)? [y/N]: ", count)
+	if canUseInteractiveConfirm() {
+		return confirmDeleteImmediate()
+	}
+
 	reader := bufio.NewReader(stdinReader)
 	line, err := reader.ReadString('\n')
 	if err != nil {
@@ -1235,6 +1350,67 @@ func confirmDelete(count int) (bool, error) {
 	}
 	answer := strings.ToLower(strings.TrimSpace(line))
 	return answer == "y" || answer == "yes", nil
+}
+
+func canUseInteractiveConfirm() bool {
+	in, ok := stdinReader.(*os.File)
+	if !ok {
+		return false
+	}
+	out, ok := stderrWriter.(*os.File)
+	if !ok {
+		return false
+	}
+	return term.IsTerminal(int(in.Fd())) && term.IsTerminal(int(out.Fd()))
+}
+
+func confirmDeleteImmediate() (bool, error) {
+	in := stdinReader.(*os.File)
+	out := stderrWriter.(*os.File)
+
+	fd := int(in.Fd())
+	oldState, err := term.MakeRaw(fd)
+	if err != nil {
+		return false, err
+	}
+	defer func() {
+		_ = term.Restore(fd, oldState)
+	}()
+
+	reader := bufio.NewReader(in)
+	for {
+		b, readErr := reader.ReadByte()
+		if readErr != nil {
+			return false, readErr
+		}
+
+		done, confirmed := interpretConfirmByte(b)
+		if !done {
+			continue
+		}
+
+		switch b {
+		case 'y', 'Y':
+			_, _ = fmt.Fprint(out, "y\r\n")
+		case 'n', 'N':
+			_, _ = fmt.Fprint(out, "n\r\n")
+		default:
+			_, _ = fmt.Fprint(out, "\r\n")
+		}
+
+		return confirmed, nil
+	}
+}
+
+func interpretConfirmByte(b byte) (done bool, confirmed bool) {
+	switch b {
+	case 'y', 'Y':
+		return true, true
+	case 'n', 'N', 'q', 'Q', '\r', '\n', 0x1b:
+		return true, false
+	default:
+		return false, false
+	}
 }
 
 func runFzf(items []string, multi bool) (string, error) {

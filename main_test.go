@@ -1103,6 +1103,171 @@ func TestSelectManyWithoutFzfPrompt(t *testing.T) {
 	}
 }
 
+func TestBuildMultiSelectLinesWrapsWithHangingIndent(t *testing.T) {
+	t.Parallel()
+
+	selected := map[int]bool{0: true}
+	lines := buildMultiSelectLines([]string{"abcdefghijklmnop"}, 0, selected, 20)
+
+	if len(lines) < 2 {
+		t.Fatalf("unexpected line count: got %d\nlines: %#v", len(lines), lines)
+	}
+	itemStart := -1
+	for i, line := range lines {
+		if strings.HasPrefix(line, "> [x] ") {
+			itemStart = i
+			break
+		}
+	}
+	if itemStart == -1 {
+		t.Fatalf("did not find selected item line in %#v", lines)
+	}
+	if lines[itemStart] != "> [x] abcdefghijklm" {
+		t.Fatalf("unexpected first item line: %q", lines[itemStart])
+	}
+	if lines[itemStart+1] != "      nop" {
+		t.Fatalf("unexpected wrapped continuation line: %q", lines[itemStart+1])
+	}
+
+	foundSubmit := false
+	for _, line := range lines {
+		if line == "  [ continue ]" || line == "> [ continue ]" {
+			foundSubmit = true
+			break
+		}
+	}
+	if !foundSubmit {
+		t.Fatalf("did not find submit row in %#v", lines)
+	}
+}
+
+func TestBuildMultiSelectLinesKeepsFullPath(t *testing.T) {
+	t.Parallel()
+
+	path := "/home/jmo/Development/worktrees/nixfiles/charlie"
+	lines := buildMultiSelectLines([]string{path}, 0, map[int]bool{}, 18)
+
+	start := -1
+	for i, line := range lines {
+		if strings.HasPrefix(line, "> [ ] ") {
+			start = i
+			break
+		}
+	}
+	if start == -1 {
+		t.Fatalf("did not find item start line in %#v", lines)
+	}
+
+	var rebuilt strings.Builder
+	for _, line := range lines[start:] {
+		if strings.HasSuffix(line, "[ continue ]") {
+			break
+		}
+		if strings.HasPrefix(line, "> [ ] ") {
+			rebuilt.WriteString(strings.TrimPrefix(line, "> [ ] "))
+			continue
+		}
+		rebuilt.WriteString(strings.TrimPrefix(line, "      "))
+	}
+
+	if rebuilt.String() != path {
+		t.Fatalf("path was truncated or altered\nwant: %q\ngot:  %q", path, rebuilt.String())
+	}
+}
+
+func TestBuildMultiSelectLinesWrapsHeaderText(t *testing.T) {
+	t.Parallel()
+
+	lines := buildMultiSelectLines([]string{"/tmp/a"}, 0, map[int]bool{}, 24)
+
+	if len(lines) < 8 {
+		t.Fatalf("expected wrapped header lines, got %d lines: %#v", len(lines), lines)
+	}
+	if lines[0] != "Select workspaces to de" {
+		t.Fatalf("unexpected first wrapped header line: %q", lines[0])
+	}
+	if lines[1] != "lete" {
+		t.Fatalf("unexpected second wrapped header line: %q", lines[1])
+	}
+}
+
+func TestBuildMultiSelectLinesCursorCanSelectSubmit(t *testing.T) {
+	t.Parallel()
+
+	lines := buildMultiSelectLines([]string{"/tmp/a", "/tmp/b"}, 2, map[int]bool{}, 80)
+	if lines[len(lines)-1] != "> [ continue ]" {
+		t.Fatalf("expected submit row selected, got %q", lines[len(lines)-1])
+	}
+}
+
+func TestApplyEnterTogglesAndAdvancesThenSubmits(t *testing.T) {
+	t.Parallel()
+
+	selected := map[int]bool{}
+	cursor, done := applyEnter(0, 2, selected)
+	if done {
+		t.Fatalf("should not be done on first item")
+	}
+	if cursor != 1 {
+		t.Fatalf("expected cursor 1, got %d", cursor)
+	}
+	if !selected[0] {
+		t.Fatalf("expected item 0 selected")
+	}
+
+	cursor, done = applyEnter(cursor, 2, selected)
+	if done {
+		t.Fatalf("should not be done on second item")
+	}
+	if cursor != 2 {
+		t.Fatalf("expected cursor on submit row (2), got %d", cursor)
+	}
+
+	cursor, done = applyEnter(cursor, 2, selected)
+	if !done {
+		t.Fatalf("expected done on submit row")
+	}
+}
+
+func TestInvertSelections(t *testing.T) {
+	t.Parallel()
+
+	selected := map[int]bool{1: true}
+	invertSelections(selected, 3)
+	if !selected[0] || selected[1] || !selected[2] {
+		t.Fatalf("unexpected selection after invert: %#v", selected)
+	}
+}
+
+func TestInterpretConfirmByte(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		b         byte
+		wantDone  bool
+		wantValue bool
+	}{
+		{name: "yes lower", b: 'y', wantDone: true, wantValue: true},
+		{name: "yes upper", b: 'Y', wantDone: true, wantValue: true},
+		{name: "no", b: 'n', wantDone: true, wantValue: false},
+		{name: "enter", b: '\n', wantDone: true, wantValue: false},
+		{name: "escape", b: 0x1b, wantDone: true, wantValue: false},
+		{name: "other key", b: 'x', wantDone: false, wantValue: false},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			done, value := interpretConfirmByte(tc.b)
+			if done != tc.wantDone || value != tc.wantValue {
+				t.Fatalf("interpretConfirmByte(%q) = (%v, %v), want (%v, %v)", tc.b, done, value, tc.wantDone, tc.wantValue)
+			}
+		})
+	}
+}
+
 func TestRunFzfCancelReturnsNoSelection(t *testing.T) {
 	bin := filepath.Join(t.TempDir(), "bin")
 	if err := os.MkdirAll(bin, 0o755); err != nil {
