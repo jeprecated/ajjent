@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 
+	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
 )
 
@@ -1031,6 +1032,17 @@ func selectOne(items []string) (string, error) {
 func selectMany(items []string) ([]string, error) {
 	sort.Strings(items)
 
+	if canUseInteractiveMultiSelect() {
+		selected, err := interactiveMultiSelect(items)
+		if err != nil {
+			return nil, err
+		}
+		if len(selected) > 0 {
+			return selected, nil
+		}
+		return nil, nil
+	}
+
 	fmt.Fprintln(stderrWriter, "Select workspaces to delete:")
 	for i, item := range items {
 		fmt.Fprintf(stderrWriter, "  %2d) %s\n", i+1, item)
@@ -1059,6 +1071,115 @@ func selectMany(items []string) ([]string, error) {
 		selected = append(selected, items[idx])
 	}
 	return selected, nil
+}
+
+func canUseInteractiveMultiSelect() bool {
+	in, ok := stdinReader.(*os.File)
+	if !ok {
+		return false
+	}
+	out, ok := stderrWriter.(*os.File)
+	if !ok {
+		return false
+	}
+	return term.IsTerminal(int(in.Fd())) && term.IsTerminal(int(out.Fd()))
+}
+
+func interactiveMultiSelect(items []string) ([]string, error) {
+	in := stdinReader.(*os.File)
+	out := stderrWriter.(*os.File)
+
+	fd := int(in.Fd())
+	oldState, err := term.MakeRaw(fd)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = term.Restore(fd, oldState)
+	}()
+
+	_, _ = fmt.Fprint(out, "\x1b[?25l")
+	defer func() {
+		_, _ = fmt.Fprint(out, "\x1b[?25h")
+		_, _ = fmt.Fprint(out, "\x1b[0m\n")
+	}()
+
+	selected := make(map[int]bool, len(items))
+	cursor := 0
+
+	render := func() {
+		_, _ = fmt.Fprint(out, "\x1b[2J\x1b[H")
+		_, _ = fmt.Fprintln(out, "Select workspaces to delete")
+		_, _ = fmt.Fprintln(out, "Up/Down: move  Space: toggle  Enter: confirm  q: cancel")
+		_, _ = fmt.Fprintln(out)
+		for i, item := range items {
+			pointer := " "
+			if i == cursor {
+				pointer = ">"
+			}
+			mark := "[ ]"
+			if selected[i] {
+				mark = "[x]"
+			}
+			_, _ = fmt.Fprintf(out, "%s %s %s\n", pointer, mark, item)
+		}
+	}
+
+	render()
+	reader := bufio.NewReader(in)
+	for {
+		b, readErr := reader.ReadByte()
+		if readErr != nil {
+			return nil, readErr
+		}
+
+		switch b {
+		case 'q', 'Q':
+			return nil, nil
+		case 'k':
+			if cursor > 0 {
+				cursor--
+			}
+		case 'j':
+			if cursor < len(items)-1 {
+				cursor++
+			}
+		case ' ':
+			selected[cursor] = !selected[cursor]
+		case '\r', '\n':
+			outItems := make([]string, 0, len(selected))
+			for i := 0; i < len(items); i++ {
+				if selected[i] {
+					outItems = append(outItems, items[i])
+				}
+			}
+			return outItems, nil
+		case 0x1b:
+			next, err1 := reader.ReadByte()
+			if err1 != nil {
+				return nil, nil
+			}
+			if next != '[' {
+				return nil, nil
+			}
+			arrow, err2 := reader.ReadByte()
+			if err2 != nil {
+				return nil, nil
+			}
+			switch arrow {
+			case 'A':
+				if cursor > 0 {
+					cursor--
+				}
+			case 'B':
+				if cursor < len(items)-1 {
+					cursor++
+				}
+			}
+		}
+
+		render()
+	}
 }
 
 func parseSelectionIndices(input string, max int) ([]int, error) {
