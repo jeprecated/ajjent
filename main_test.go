@@ -736,6 +736,9 @@ func TestRunTidyOffersActiveNonDefaultForDeletion(t *testing.T) {
 			return "default\tabc111\nalpha\tdef222\nbeta\tghi333\n", nil
 		}
 		if len(args) >= 3 && args[2] == "log" {
+			if len(args) >= 5 && strings.Contains(args[4], "empty()") {
+				return "eempty1\n", nil
+			}
 			return "abc111\n", nil
 		}
 		return "", nil
@@ -752,9 +755,13 @@ func TestRunTidyOffersActiveNonDefaultForDeletion(t *testing.T) {
 	_ = w.Close()
 
 	var forgetCalls []string
+	var sawAbandon bool
 	commandToStderrFn = func(name string, args ...string) error {
 		if len(args) >= 5 && args[2] == "workspace" && args[3] == "forget" {
 			forgetCalls = append(forgetCalls, args[4])
+		}
+		if len(args) >= 4 && args[2] == "abandon" {
+			sawAbandon = true
 		}
 		return nil
 	}
@@ -772,11 +779,86 @@ func TestRunTidyOffersActiveNonDefaultForDeletion(t *testing.T) {
 	if !reflect.DeepEqual(forgetCalls, []string{"alpha"}) {
 		t.Fatalf("unexpected forget calls: %#v", forgetCalls)
 	}
+	if !sawAbandon {
+		t.Fatalf("expected tidy to abandon top empty mutable commits")
+	}
 	if _, err := os.Stat(alphaPath); !os.IsNotExist(err) {
 		t.Fatalf("expected %s removed", alphaPath)
 	}
 	if _, err := os.Stat(betaPath); err != nil {
 		t.Fatalf("expected %s to remain: %v", betaPath, err)
+	}
+}
+
+func TestRunTidySkipsAbandonWhenNoTopEmptyCommits(t *testing.T) {
+	repoRoot := t.TempDir()
+	worktreesRoot := filepath.Join(t.TempDir(), "worktrees")
+	app := "nixfiles"
+	alphaPath := filepath.Join(worktreesRoot, app, "alpha")
+	betaPath := filepath.Join(worktreesRoot, app, "beta")
+	for _, p := range []string{alphaPath, betaPath} {
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", p, err)
+		}
+		if err := os.WriteFile(filepath.Join(p, "file"), []byte("x"), 0o644); err != nil {
+			t.Fatalf("write marker file: %v", err)
+		}
+	}
+
+	xdg := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(xdg, "jjw"), 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(xdg, "jjw", "config.yaml"), []byte("worktrees_root: "+worktreesRoot+"\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+
+	origCapture := commandCaptureFn
+	origRun := commandToStderrFn
+	origStdin := stdinReader
+	defer func() {
+		commandCaptureFn = origCapture
+		commandToStderrFn = origRun
+		stdinReader = origStdin
+	}()
+
+	commandCaptureFn = func(name string, args ...string) (string, error) {
+		if len(args) >= 3 && args[2] == "workspace" {
+			return "default\tabc111\nalpha\tdef222\nbeta\tghi333\n", nil
+		}
+		if len(args) >= 3 && args[2] == "log" {
+			if len(args) >= 5 && strings.Contains(args[4], "empty()") {
+				return "\n", nil
+			}
+			return "abc111\n", nil
+		}
+		return "", nil
+	}
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	stdinReader = r
+	if _, err := w.Write([]byte("1\n")); err != nil {
+		t.Fatalf("write stdin: %v", err)
+	}
+	_ = w.Close()
+
+	var sawAbandon bool
+	commandToStderrFn = func(name string, args ...string) error {
+		if len(args) >= 4 && args[2] == "abandon" {
+			sawAbandon = true
+		}
+		return nil
+	}
+
+	if err := runTidy([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--yes"}); err != nil {
+		t.Fatalf("runTidy failed: %v", err)
+	}
+	if sawAbandon {
+		t.Fatalf("did not expect abandon call when there are no top empty commits")
 	}
 }
 
@@ -1355,6 +1437,15 @@ func TestRunMainStackRunsStatusAndRebase(t *testing.T) {
 		if len(args) >= 3 && args[0] == "-R" && args[2] == "workspace" {
 			return "feat-a\tabc111\nfeat-b\tabc222\nmain\tabc333\n", nil
 		}
+		if len(args) >= 5 && args[2] == "log" && args[3] == "-r" && args[4] == "conflicts() & @" {
+			return "", nil
+		}
+		if len(args) >= 5 && args[2] == "log" && args[3] == "-r" && strings.HasPrefix(args[4], "heads(") {
+			return "abc111\nabc222\n", nil
+		}
+		if len(args) >= 8 && args[2] == "log" && args[3] == "-r" && args[4] == "immutable() & ::@ & ~@" {
+			return "", nil
+		}
 		if len(args) >= 4 && args[2] == "log" && args[3] == "-r" {
 			return "abc333\n", nil
 		}
@@ -1382,6 +1473,9 @@ func TestRunMainStackRunsStatusAndRebase(t *testing.T) {
 		t.Fatalf("expected rebase call at index 6, got %#v", calls[6])
 	}
 	joined := strings.Join(calls[6], " ")
+	if !strings.Contains(joined, " rebase -b @") {
+		t.Fatalf("expected branch rebase mode, got %q", joined)
+	}
 	if !strings.Contains(joined, "-d feat-a@") || !strings.Contains(joined, "-d feat-b@") {
 		t.Fatalf("expected rebase destinations for feature workspaces, got %q", joined)
 	}
@@ -1489,6 +1583,9 @@ func TestRunMainStackNeedsOtherWorkspaces(t *testing.T) {
 		if len(args) >= 3 && args[0] == "-R" && args[2] == "workspace" {
 			return "main\tabc333\n", nil
 		}
+		if len(args) >= 8 && args[2] == "log" && args[3] == "-r" && args[4] == "immutable() & ::@ & ~@" {
+			return "", nil
+		}
 		if len(args) >= 4 && args[2] == "log" && args[3] == "-r" {
 			return "abc333\n", nil
 		}
@@ -1543,6 +1640,15 @@ func TestRunMainStackUsesRepoRootForDefaultWorkspace(t *testing.T) {
 		if len(args) >= 3 && args[2] == "workspace" {
 			return "default\tabc111\nalpha\tdef222\n", nil
 		}
+		if len(args) >= 5 && args[2] == "log" && args[3] == "-r" && args[4] == "conflicts() & @" {
+			return "", nil
+		}
+		if len(args) >= 5 && args[2] == "log" && args[3] == "-r" && strings.HasPrefix(args[4], "heads(") {
+			return "def222\n", nil
+		}
+		if len(args) >= 8 && args[2] == "log" && args[3] == "-r" && args[4] == "immutable() & ::@ & ~@" {
+			return "", nil
+		}
 		if len(args) >= 3 && args[2] == "log" {
 			return "abc111\n", nil
 		}
@@ -1563,6 +1669,295 @@ func TestRunMainStackUsesRepoRootForDefaultWorkspace(t *testing.T) {
 	}
 	if !sawDefaultUpdate {
 		t.Fatalf("expected default workspace update-stale to run at repo root")
+	}
+}
+
+func TestRunMainStackAutoUsesRevisionModeWhenImmutableAncestorsFound(t *testing.T) {
+	repoRoot := t.TempDir()
+	worktreesRoot := filepath.Join(t.TempDir(), "worktrees")
+	app := "nixfiles"
+	for _, name := range []string{"main", "feat-a", "feat-b"} {
+		if err := os.MkdirAll(filepath.Join(worktreesRoot, app, name), 0o755); err != nil {
+			t.Fatalf("mkdir workspace %s: %v", name, err)
+		}
+	}
+
+	origCapture := commandCaptureFn
+	origRun := commandToStderrFn
+	defer func() {
+		commandCaptureFn = origCapture
+		commandToStderrFn = origRun
+	}()
+
+	commandCaptureFn = func(name string, args ...string) (string, error) {
+		if len(args) >= 3 && args[0] == "-R" && args[2] == "workspace" {
+			return "feat-a\tabc111\nfeat-b\tabc222\nmain\tabc333\n", nil
+		}
+		if len(args) >= 5 && args[2] == "log" && args[3] == "-r" && args[4] == "conflicts() & @" {
+			return "", nil
+		}
+		if len(args) >= 5 && args[2] == "log" && args[3] == "-r" && strings.HasPrefix(args[4], "heads(") {
+			return "abc111\nabc222\n", nil
+		}
+		if len(args) >= 8 && args[2] == "log" && args[3] == "-r" && args[4] == "parents(@)" {
+			return "main999\n", nil
+		}
+		if len(args) >= 8 && args[2] == "log" && args[3] == "-r" && args[4] == "immutable() & ::@ & ~@" {
+			return "imm123\n", nil
+		}
+		if len(args) >= 5 && args[2] == "log" && args[3] == "-r" && strings.HasPrefix(args[4], "main999::(") {
+			return "", nil
+		}
+		if len(args) >= 4 && args[2] == "log" && args[3] == "-r" {
+			return "abc333\n", nil
+		}
+		return "", nil
+	}
+
+	var rebaseCall []string
+	commandToStderrFn = func(name string, args ...string) error {
+		if len(args) >= 4 && args[2] == "rebase" {
+			rebaseCall = append([]string{name}, args...)
+		}
+		return nil
+	}
+
+	err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--main", "main"})
+	if err != nil {
+		t.Fatalf("runMainStack failed: %v", err)
+	}
+
+	joined := strings.Join(rebaseCall, " ")
+	if !strings.Contains(joined, " rebase -r @") {
+		t.Fatalf("expected revision rebase mode, got %q", joined)
+	}
+	if !strings.Contains(joined, "-d main999") {
+		t.Fatalf("expected revision rebase to preserve existing parent, got %q", joined)
+	}
+}
+
+func TestRunMainStackRejectsInvalidRebaseMode(t *testing.T) {
+	repoRoot := t.TempDir()
+	worktreesRoot := filepath.Join(t.TempDir(), "worktrees")
+	app := "nixfiles"
+	if err := os.MkdirAll(filepath.Join(worktreesRoot, app, "main"), 0o755); err != nil {
+		t.Fatalf("mkdir main workspace: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(worktreesRoot, app, "feat"), 0o755); err != nil {
+		t.Fatalf("mkdir feat workspace: %v", err)
+	}
+
+	origCapture := commandCaptureFn
+	origRun := commandToStderrFn
+	defer func() {
+		commandCaptureFn = origCapture
+		commandToStderrFn = origRun
+	}()
+
+	commandCaptureFn = func(name string, args ...string) (string, error) {
+		if len(args) >= 3 && args[2] == "workspace" {
+			return "feat\tabc111\nmain\tabc333\n", nil
+		}
+		if len(args) >= 5 && args[2] == "log" && args[3] == "-r" && args[4] == "conflicts() & @" {
+			return "", nil
+		}
+		if len(args) >= 4 && args[2] == "log" && args[3] == "-r" {
+			return "abc333\n", nil
+		}
+		return "", nil
+	}
+	commandToStderrFn = func(name string, args ...string) error { return nil }
+
+	err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--main", "main", "--rebase-mode", "wat"})
+	if err == nil || !strings.Contains(err.Error(), "invalid --rebase-mode") {
+		t.Fatalf("expected invalid rebase mode error, got %v", err)
+	}
+}
+
+func TestRunMainStackRejectsInvalidConflictStrategy(t *testing.T) {
+	repoRoot := t.TempDir()
+	worktreesRoot := filepath.Join(t.TempDir(), "worktrees")
+	app := "nixfiles"
+	if err := os.MkdirAll(filepath.Join(worktreesRoot, app, "main"), 0o755); err != nil {
+		t.Fatalf("mkdir main workspace: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(worktreesRoot, app, "feat"), 0o755); err != nil {
+		t.Fatalf("mkdir feat workspace: %v", err)
+	}
+
+	origCapture := commandCaptureFn
+	origRun := commandToStderrFn
+	defer func() {
+		commandCaptureFn = origCapture
+		commandToStderrFn = origRun
+	}()
+
+	commandCaptureFn = func(name string, args ...string) (string, error) {
+		if len(args) >= 3 && args[2] == "workspace" {
+			return "feat\tabc111\nmain\tabc333\n", nil
+		}
+		if len(args) >= 4 && args[2] == "log" && args[3] == "-r" {
+			return "abc333\n", nil
+		}
+		return "", nil
+	}
+	commandToStderrFn = func(name string, args ...string) error { return nil }
+
+	err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--main", "main", "--conflict-strategy", "wat"})
+	if err == nil || !strings.Contains(err.Error(), "invalid --conflict-strategy") {
+		t.Fatalf("expected invalid conflict strategy error, got %v", err)
+	}
+}
+
+func TestRunMainStackPreferCleanFallsBackToMerge(t *testing.T) {
+	repoRoot := t.TempDir()
+	worktreesRoot := filepath.Join(t.TempDir(), "worktrees")
+	app := "nixfiles"
+	for _, name := range []string{"main", "alpha", "beta"} {
+		if err := os.MkdirAll(filepath.Join(worktreesRoot, app, name), 0o755); err != nil {
+			t.Fatalf("mkdir workspace %s: %v", name, err)
+		}
+	}
+
+	origCapture := commandCaptureFn
+	origRun := commandToStderrFn
+	defer func() {
+		commandCaptureFn = origCapture
+		commandToStderrFn = origRun
+	}()
+
+	attempt := ""
+	commandCaptureFn = func(name string, args ...string) (string, error) {
+		if len(args) >= 3 && args[2] == "workspace" {
+			return "alpha\taaa111\nbeta\tbbb222\nmain\tmmm333\n", nil
+		}
+		if len(args) >= 5 && args[2] == "log" && args[3] == "-r" && strings.HasPrefix(args[4], "heads(") {
+			return "bbb222\n", nil
+		}
+		if len(args) >= 5 && args[2] == "log" && args[3] == "-r" && args[4] == "conflicts() & @" {
+			if attempt == "linear" {
+				return "conf123\n", nil
+			}
+			return "", nil
+		}
+		if len(args) >= 8 && args[2] == "log" && args[3] == "-r" && args[4] == "immutable() & ::@ & ~@" {
+			return "", nil
+		}
+		if len(args) >= 4 && args[2] == "log" && args[3] == "-r" {
+			return "mmm333\n", nil
+		}
+		return "", nil
+	}
+
+	var rebaseCalls []string
+	undoCount := 0
+	commandToStderrFn = func(name string, args ...string) error {
+		if len(args) >= 4 && args[2] == "rebase" {
+			joined := strings.Join(append([]string{name}, args...), " ")
+			rebaseCalls = append(rebaseCalls, joined)
+			if strings.Contains(joined, "-d bbb222") {
+				attempt = "linear"
+			} else {
+				attempt = "merge"
+			}
+		}
+		if len(args) >= 3 && args[2] == "undo" {
+			undoCount++
+		}
+		return nil
+	}
+
+	err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--main", "main", "--conflict-strategy", "prefer-clean"})
+	if err != nil {
+		t.Fatalf("runMainStack failed: %v", err)
+	}
+
+	if len(rebaseCalls) != 2 {
+		t.Fatalf("expected two rebase attempts, got %d", len(rebaseCalls))
+	}
+	if undoCount != 1 {
+		t.Fatalf("expected one undo between attempts, got %d", undoCount)
+	}
+	if !strings.Contains(rebaseCalls[0], "-d bbb222") {
+		t.Fatalf("expected first attempt to be linear, got %q", rebaseCalls[0])
+	}
+	if !strings.Contains(rebaseCalls[1], "-d alpha@") || !strings.Contains(rebaseCalls[1], "-d beta@") {
+		t.Fatalf("expected second attempt to be merge, got %q", rebaseCalls[1])
+	}
+}
+
+func TestRunMainStackPreferCleanKeepsMergeWhenBothConflict(t *testing.T) {
+	repoRoot := t.TempDir()
+	worktreesRoot := filepath.Join(t.TempDir(), "worktrees")
+	app := "nixfiles"
+	for _, name := range []string{"main", "alpha", "beta"} {
+		if err := os.MkdirAll(filepath.Join(worktreesRoot, app, name), 0o755); err != nil {
+			t.Fatalf("mkdir workspace %s: %v", name, err)
+		}
+	}
+
+	origCapture := commandCaptureFn
+	origRun := commandToStderrFn
+	defer func() {
+		commandCaptureFn = origCapture
+		commandToStderrFn = origRun
+	}()
+
+	attempt := ""
+	commandCaptureFn = func(name string, args ...string) (string, error) {
+		if len(args) >= 3 && args[2] == "workspace" {
+			return "alpha\taaa111\nbeta\tbbb222\nmain\tmmm333\n", nil
+		}
+		if len(args) >= 5 && args[2] == "log" && args[3] == "-r" && strings.HasPrefix(args[4], "heads(") {
+			return "bbb222\n", nil
+		}
+		if len(args) >= 5 && args[2] == "log" && args[3] == "-r" && args[4] == "conflicts() & @" {
+			if attempt == "linear" || attempt == "merge" {
+				return "conf123\n", nil
+			}
+			return "", nil
+		}
+		if len(args) >= 8 && args[2] == "log" && args[3] == "-r" && args[4] == "immutable() & ::@ & ~@" {
+			return "", nil
+		}
+		if len(args) >= 4 && args[2] == "log" && args[3] == "-r" {
+			return "mmm333\n", nil
+		}
+		return "", nil
+	}
+
+	var rebaseCalls []string
+	undoCount := 0
+	commandToStderrFn = func(name string, args ...string) error {
+		if len(args) >= 4 && args[2] == "rebase" {
+			joined := strings.Join(append([]string{name}, args...), " ")
+			rebaseCalls = append(rebaseCalls, joined)
+			if strings.Contains(joined, "-d alpha@") {
+				attempt = "merge"
+			} else {
+				attempt = "linear"
+			}
+		}
+		if len(args) >= 3 && args[2] == "undo" {
+			undoCount++
+		}
+		return nil
+	}
+
+	err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--main", "main", "--conflict-strategy", "prefer-clean", "--stack-shape", "auto"})
+	if err != nil {
+		t.Fatalf("runMainStack failed: %v", err)
+	}
+
+	if len(rebaseCalls) != 2 {
+		t.Fatalf("expected two rebase attempts, got %d", len(rebaseCalls))
+	}
+	if undoCount != 1 {
+		t.Fatalf("expected one undo between attempts, got %d", undoCount)
+	}
+	last := rebaseCalls[len(rebaseCalls)-1]
+	if !strings.Contains(last, "-d alpha@") || !strings.Contains(last, "-d beta@") {
+		t.Fatalf("expected final result to keep merge shape, got %q", last)
 	}
 }
 

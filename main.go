@@ -351,11 +351,17 @@ func runMainStack(args []string) error {
 		appOverride      string
 		rootOverride     string
 		mainOverride     string
+		rebaseMode       string
+		stackShape       string
+		conflictStrategy string
 	)
 	fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
 	fs.StringVar(&appOverride, "app", "", "app override")
 	fs.StringVar(&rootOverride, "worktrees-root", "", "worktrees root override")
 	fs.StringVar(&mainOverride, "main", "default", "main workspace name")
+	fs.StringVar(&rebaseMode, "rebase-mode", "auto", "rebase mode: auto, branch, revision")
+	fs.StringVar(&stackShape, "stack-shape", "auto", "stack shape: auto, linear, merge")
+	fs.StringVar(&conflictStrategy, "conflict-strategy", "off", "conflict strategy: off, prefer-clean")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -420,17 +426,313 @@ func runMainStack(args []string) error {
 		return fmt.Errorf("main workspace path missing: %s", mainPath)
 	}
 
-	cmdArgs := []string{"-R", mainPath, "rebase", "-b", "@"}
-	for _, name := range others {
-		cmdArgs = append(cmdArgs, "-d", name+"@")
-	}
-
-	fmt.Fprintf(stderrWriter, "\n== Rebase main onto: %s ==\n", strings.Join(others, ", "))
-	if err := commandToStderrFn("jj", cmdArgs...); err != nil {
+	resolvedMode, reason, err := resolveMainStackRebaseMode(mainPath, rebaseMode)
+	if err != nil {
 		return err
 	}
 
+	resolvedConflictStrategy, err := resolveMainStackConflictStrategy(conflictStrategy)
+	if err != nil {
+		return err
+	}
+
+	resolvedShape, shapeReason, baseDestinations, err := resolveMainStackStackShape(mainPath, others, stackShape)
+	if err != nil {
+		return err
+	}
+
+	conflicted, err := runMainStackRebaseAttempt(mainPath, others, resolvedMode, reason, resolvedShape, shapeReason, baseDestinations)
+	if err != nil {
+		return err
+	}
+
+	if resolvedConflictStrategy == "prefer-clean" && conflicted && strings.TrimSpace(strings.ToLower(stackShape)) == "auto" {
+		alternativeShape := "merge"
+		if resolvedShape == "merge" {
+			alternativeShape = "linear"
+		}
+
+		alternativeResolvedShape, alternativeShapeReason, alternativeDestinations, altErr := resolveMainStackStackShape(mainPath, others, alternativeShape)
+		if altErr == nil {
+			fmt.Fprintf(stderrWriter, "\n== Conflict fallback: undo and retry with %s ==\n", alternativeResolvedShape)
+			if err := commandToStderrFn("jj", "-R", mainPath, "undo"); err != nil {
+				return err
+			}
+
+			alternativeConflicted, err := runMainStackRebaseAttempt(mainPath, others, resolvedMode, reason, alternativeResolvedShape, alternativeShapeReason, alternativeDestinations)
+			if err != nil {
+				return err
+			}
+
+			if alternativeConflicted && alternativeResolvedShape == "linear" {
+				fmt.Fprintln(stderrWriter, "\n== Both strategies conflicted; keeping merge shape ==")
+				if err := commandToStderrFn("jj", "-R", mainPath, "undo"); err != nil {
+					return err
+				}
+				mergeShape, mergeReason, mergeDestinations, err := resolveMainStackStackShape(mainPath, others, "merge")
+				if err != nil {
+					return err
+				}
+				if _, err := runMainStackRebaseAttempt(mainPath, others, resolvedMode, reason, mergeShape, mergeReason, mergeDestinations); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
 	return commandToStderrFn("jj", "-R", mainPath, "workspace", "update-stale")
+}
+
+func runMainStackRebaseAttempt(mainPath string, others []string, resolvedMode string, modeReason string, resolvedShape string, shapeReason string, baseDestinations []string) (bool, error) {
+	rebaseFlag := "-b"
+	if resolvedMode == "revision" {
+		rebaseFlag = "-r"
+	}
+
+	destinations := make([]string, 0, len(baseDestinations)+2)
+	if resolvedMode == "revision" {
+		parents, err := parentChangeIDs(mainPath)
+		if err != nil {
+			return false, err
+		}
+		preservedParents, err := parentChangeIDsToPreserve(mainPath, parents, baseDestinations)
+		if err != nil {
+			return false, err
+		}
+		destinations = append(destinations, preservedParents...)
+	}
+	destinations = append(destinations, baseDestinations...)
+	destinations = uniqueNonEmptyStrings(destinations)
+
+	cmdArgs := []string{"-R", mainPath, "rebase", rebaseFlag, "@"}
+	for _, dest := range destinations {
+		cmdArgs = append(cmdArgs, "-d", dest)
+	}
+
+	if modeReason == "" {
+		modeReason = resolvedMode
+	}
+	if shapeReason == "" {
+		shapeReason = resolvedShape
+	}
+	fmt.Fprintf(stderrWriter, "\n== Stack shape: %s (%s) ==\n", resolvedShape, shapeReason)
+	fmt.Fprintf(stderrWriter, "\n== Rebase mode: %s (%s) ==\n", resolvedMode, modeReason)
+	fmt.Fprintf(stderrWriter, "\n== Rebase main onto: %s ==\n", strings.Join(others, ", "))
+	if err := commandToStderrFn("jj", cmdArgs...); err != nil {
+		return false, err
+	}
+
+	conflicted, err := workingCopyHasConflicts(mainPath)
+	if err != nil {
+		return false, err
+	}
+	if conflicted {
+		fmt.Fprintln(stderrWriter, "\n== Rebase result has conflicts ==")
+	}
+	return conflicted, nil
+}
+
+func resolveMainStackStackShape(repoPath string, others []string, requested string) (string, string, []string, error) {
+	mode := strings.TrimSpace(strings.ToLower(requested))
+	if mode == "" {
+		mode = "auto"
+	}
+
+	otherRevs := make([]string, 0, len(others))
+	for _, name := range others {
+		otherRevs = append(otherRevs, name+"@")
+	}
+	frontier, err := frontierHeads(repoPath, otherRevs)
+	if err != nil {
+		return "", "", nil, err
+	}
+	if len(frontier) == 0 {
+		return "", "", nil, errors.New("could not resolve workspace frontier heads")
+	}
+
+	switch mode {
+	case "auto":
+		if len(frontier) == 1 {
+			return "linear", "single frontier head", frontier, nil
+		}
+		return "merge", fmt.Sprintf("%d frontier heads", len(frontier)), otherRevs, nil
+	case "linear":
+		if len(frontier) != 1 {
+			return "", "", nil, fmt.Errorf("--stack-shape linear requires a single frontier head, found %d", len(frontier))
+		}
+		return "linear", "flag", frontier, nil
+	case "merge":
+		return "merge", "flag", otherRevs, nil
+	default:
+		return "", "", nil, fmt.Errorf("invalid --stack-shape %q (expected auto, linear, or merge)", requested)
+	}
+}
+
+func resolveMainStackConflictStrategy(requested string) (string, error) {
+	strategy := strings.TrimSpace(strings.ToLower(requested))
+	if strategy == "" {
+		strategy = "off"
+	}
+	switch strategy {
+	case "off", "prefer-clean":
+		return strategy, nil
+	default:
+		return "", fmt.Errorf("invalid --conflict-strategy %q (expected off or prefer-clean)", requested)
+	}
+}
+
+func resolveMainStackRebaseMode(repoPath string, requested string) (string, string, error) {
+	mode := strings.TrimSpace(strings.ToLower(requested))
+	if mode == "" {
+		mode = "auto"
+	}
+
+	switch mode {
+	case "branch":
+		return "branch", "flag", nil
+	case "revision":
+		return "revision", "flag", nil
+	case "auto":
+		hasImmutable, err := hasImmutableAncestors(repoPath)
+		if err != nil {
+			return "", "", err
+		}
+		if hasImmutable {
+			return "revision", "immutable ancestors detected", nil
+		}
+		return "branch", "no immutable ancestors", nil
+	default:
+		return "", "", fmt.Errorf("invalid --rebase-mode %q (expected auto, branch, or revision)", requested)
+	}
+}
+
+func hasImmutableAncestors(repoPath string) (bool, error) {
+	revset := "immutable() & ::@ & ~@"
+	out, err := commandCaptureFn("jj", "-R", repoPath, "log", "-r", revset, "--no-graph", "-T", "change_id.short() ++ \"\\n\"")
+	if err != nil {
+		return false, err
+	}
+
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) != "" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func workingCopyHasConflicts(repoPath string) (bool, error) {
+	out, err := commandCaptureFn("jj", "-R", repoPath, "log", "-r", "conflicts() & @", "--no-graph", "-T", "change_id.short() ++ \"\\n\"")
+	if err != nil {
+		return false, err
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) != "" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func frontierHeads(repoPath string, revs []string) ([]string, error) {
+	if len(revs) == 0 {
+		return nil, nil
+	}
+	revset := fmt.Sprintf("heads(%s)", strings.Join(revs, " | "))
+	out, err := commandCaptureFn("jj", "-R", repoPath, "log", "-r", revset, "--no-graph", "-T", "change_id.short() ++ \"\\n\"")
+	if err != nil {
+		return nil, err
+	}
+	return uniqueNonEmptyStrings(strings.Split(out, "\n")), nil
+}
+
+func parentChangeIDs(repoPath string) ([]string, error) {
+	out, err := commandCaptureFn("jj", "-R", repoPath, "log", "-r", "parents(@)", "--no-graph", "-T", "change_id.short() ++ \"\\n\"")
+	if err != nil {
+		return nil, err
+	}
+
+	var parents []string
+	for _, line := range strings.Split(out, "\n") {
+		id := strings.TrimSpace(line)
+		if id == "" {
+			continue
+		}
+		parents = append(parents, id)
+	}
+	return uniqueNonEmptyStrings(parents), nil
+}
+
+func parentChangeIDsToPreserve(repoPath string, parents []string, destinations []string) ([]string, error) {
+	preserved := make([]string, 0, len(parents))
+	for _, parent := range uniqueNonEmptyStrings(parents) {
+		isAncestor, err := isAncestorOfAny(repoPath, parent, destinations)
+		if err != nil {
+			return nil, err
+		}
+		if isAncestor {
+			continue
+		}
+		preserved = append(preserved, parent)
+	}
+	return preserved, nil
+}
+
+func isAncestorOfAny(repoPath string, ancestor string, descendants []string) (bool, error) {
+	descendants = uniqueNonEmptyStrings(descendants)
+	if ancestor == "" || len(descendants) == 0 {
+		return false, nil
+	}
+	revset := fmt.Sprintf("%s::(%s)", ancestor, strings.Join(descendants, " | "))
+	out, err := commandCaptureFn("jj", "-R", repoPath, "log", "-r", revset, "--no-graph", "-T", "change_id.short() ++ \"\\n\"")
+	if err != nil {
+		return false, err
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) != "" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func uniqueNonEmptyStrings(items []string) []string {
+	seen := make(map[string]struct{}, len(items))
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		result = append(result, item)
+	}
+	return result
+}
+
+func abandonTopEmptyMutableAncestors(repoPath string) error {
+	revset := "empty() & mutable() & ::@ & ~@"
+	out, err := commandCaptureFn("jj", "-R", repoPath, "log", "-r", revset, "--no-graph", "-T", "change_id.short() ++ \"\\n\"")
+	if err != nil {
+		return err
+	}
+
+	hasEmpty := false
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) != "" {
+			hasEmpty = true
+			break
+		}
+	}
+	if !hasEmpty {
+		return nil
+	}
+
+	fmt.Fprintln(stderrWriter, "\n== Abandon top empty commits ==")
+	return commandToStderrFn("jj", "-R", repoPath, "abandon", "-r", revset)
 }
 
 func normalizeCreateArgs(args []string) ([]string, error) {
@@ -622,6 +924,10 @@ func runTidy(args []string) error {
 			return fmt.Errorf("remove %s: %w", path, err)
 		}
 		deleted = append(deleted, path)
+	}
+
+	if err := abandonTopEmptyMutableAncestors(repoRoot); err != nil {
+		return err
 	}
 
 	for _, path := range deleted {
