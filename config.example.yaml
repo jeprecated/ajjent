@@ -29,7 +29,7 @@ name_list:
   - yankee
   - zulu
 main_stack:
-  main: default
+  default_workspace: default
   rebase_mode: auto
   stack_shape: auto
   conflict_strategy: prefer-clean

@@ -24,7 +24,7 @@ func TestMainStackAutoUsesLinearWhenWorkspaceHeadsCollapse(t *testing.T) {
 	runJJ(t, limaPath, "-R", limaPath, "describe", "-m", "lima change")
 	runJJ(t, limaPath, "-R", limaPath, "new")
 
-	if err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--main", "default", "--stack-shape", "auto", "--rebase-mode", "branch"}); err != nil {
+	if err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--workspace", "default", "--stack-shape", "auto", "--rebase-mode", "branch"}); err != nil {
 		t.Fatalf("runMainStack failed: %v", err)
 	}
 
@@ -53,7 +53,7 @@ func TestMainStackAutoUsesMergeWhenWorkspaceHeadsDiverge(t *testing.T) {
 	runJJ(t, limaPath, "-R", limaPath, "describe", "-m", "lima change")
 	runJJ(t, limaPath, "-R", limaPath, "new")
 
-	if err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--main", "default", "--stack-shape", "auto", "--rebase-mode", "branch"}); err != nil {
+	if err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--workspace", "default", "--stack-shape", "auto", "--rebase-mode", "branch"}); err != nil {
 		t.Fatalf("runMainStack failed: %v", err)
 	}
 
@@ -91,7 +91,7 @@ func TestMainStackLinearErrorsWhenWorkspaceHeadsDiverge(t *testing.T) {
 	runJJ(t, limaPath, "-R", limaPath, "describe", "-m", "lima change")
 	runJJ(t, limaPath, "-R", limaPath, "new")
 
-	err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--main", "default", "--stack-shape", "linear", "--rebase-mode", "branch"})
+	err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--workspace", "default", "--stack-shape", "linear", "--rebase-mode", "branch"})
 	if err == nil || !strings.Contains(err.Error(), "requires a single frontier head") {
 		t.Fatalf("expected strict linear error, got %v", err)
 	}
@@ -217,7 +217,7 @@ func TestMainStackInvalidStackShape(t *testing.T) {
 	}
 	commandToStderrFn = func(name string, args ...string) error { return nil }
 
-	err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--main", "main", "--stack-shape", "wat"})
+	err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--workspace", "main", "--stack-shape", "wat"})
 	if err == nil || !strings.Contains(err.Error(), "invalid --stack-shape") {
 		t.Fatalf("expected invalid stack shape error, got %v", err)
 	}
@@ -254,7 +254,7 @@ func TestMainStackLinearRequiresSingleFrontierHead(t *testing.T) {
 	}
 	commandToStderrFn = func(name string, args ...string) error { return nil }
 
-	err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--main", "main", "--stack-shape", "linear"})
+	err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--workspace", "main", "--stack-shape", "linear"})
 	if err == nil || !strings.Contains(err.Error(), "requires a single frontier head") {
 		t.Fatalf("expected single frontier head error, got %v", err)
 	}

@@ -38,7 +38,7 @@ type config struct {
 }
 
 type mainStackConfig struct {
-	Main             string `yaml:"main"`
+	DefaultWorkspace string `yaml:"default_workspace"`
 	RebaseMode       string `yaml:"rebase_mode"`
 	StackShape       string `yaml:"stack_shape"`
 	ConflictStrategy string `yaml:"conflict_strategy"`
@@ -117,7 +117,7 @@ func run(args []string) error {
 		return runCd(args[1:])
 	case "main":
 		return runMain(args[1:])
-	case "main-stack":
+	case "stack":
 		return runMainStack(args[1:])
 	case "help", "-h", "--help":
 		printUsage(stdoutWriter)
@@ -137,7 +137,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  tidy            Select and remove defunct empty workspace dirs")
 	fmt.Fprintln(w, "  cd [name]       Print path for shell wrappers")
 	fmt.Fprintln(w, "  main            Print path for main workspace (default)")
-	fmt.Fprintln(w, "  main-stack      Run st on all workspaces, then rebase main")
+	fmt.Fprintln(w, "  stack           Run st on all workspaces, then rebase default workspace")
 }
 
 func runCreate(args []string) error {
@@ -390,21 +390,21 @@ func runMain(args []string) error {
 }
 
 func runMainStack(args []string) error {
-	fs := flag.NewFlagSet("main-stack", flag.ContinueOnError)
+	fs := flag.NewFlagSet("stack", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var (
-		repoRootOverride string
-		appOverride      string
-		rootOverride     string
-		mainOverride     string
-		rebaseMode       string
-		stackShape       string
-		conflictStrategy string
+		repoRootOverride  string
+		appOverride       string
+		rootOverride      string
+		workspaceOverride string
+		rebaseMode        string
+		stackShape        string
+		conflictStrategy  string
 	)
 	fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
 	fs.StringVar(&appOverride, "app", "", "app override")
 	fs.StringVar(&rootOverride, "worktrees-root", "", "worktrees root override")
-	fs.StringVar(&mainOverride, "main", "", "main workspace name")
+	fs.StringVar(&workspaceOverride, "workspace", "", "workspace to stack into")
 	fs.StringVar(&rebaseMode, "rebase-mode", "", "rebase mode: auto, branch, revision")
 	fs.StringVar(&stackShape, "stack-shape", "", "stack shape: auto, linear, merge")
 	fs.StringVar(&conflictStrategy, "conflict-strategy", "", "conflict strategy: off, prefer-clean")
@@ -436,9 +436,9 @@ func runMainStack(args []string) error {
 		return errors.New("no workspaces found")
 	}
 
-	mainName := strings.TrimSpace(mainOverride)
+	mainName := strings.TrimSpace(workspaceOverride)
 	if mainName == "" {
-		mainName = strings.TrimSpace(cfg.MainStack.Main)
+		mainName = strings.TrimSpace(cfg.MainStack.DefaultWorkspace)
 	}
 	if mainName == "" {
 		mainName = "default"
@@ -1216,7 +1216,7 @@ func currentWorkspaceName(repoRoot string, refs []workspaceRef) (string, error) 
 			return ref.Name, nil
 		}
 	}
-	return "", errors.New("could not detect current workspace; pass --main")
+	return "", errors.New("could not detect current workspace")
 }
 
 func loadConfig(repoRoot string) (config, error) {
@@ -1224,7 +1224,7 @@ func loadConfig(repoRoot string) (config, error) {
 		NameStrategy: strategyFirstUnused,
 		NameList:     append([]string(nil), defaultNameList...),
 		MainStack: mainStackConfig{
-			Main:             "default",
+			DefaultWorkspace: "default",
 			RebaseMode:       "auto",
 			StackShape:       "auto",
 			ConflictStrategy: "prefer-clean",
@@ -1254,8 +1254,8 @@ func loadConfig(repoRoot string) (config, error) {
 		return config{}, fmt.Errorf("invalid name_strategy: %q", merged.NameStrategy)
 	}
 
-	if strings.TrimSpace(merged.MainStack.Main) == "" {
-		merged.MainStack.Main = "default"
+	if strings.TrimSpace(merged.MainStack.DefaultWorkspace) == "" {
+		merged.MainStack.DefaultWorkspace = "default"
 	}
 	if err := validateMainStackRebaseMode(merged.MainStack.RebaseMode); err != nil {
 		return config{}, err
@@ -1296,8 +1296,8 @@ func mergeConfigFile(dst *config, path string) error {
 	if len(src.NameList) > 0 {
 		dst.NameList = append([]string(nil), src.NameList...)
 	}
-	if strings.TrimSpace(src.MainStack.Main) != "" {
-		dst.MainStack.Main = strings.TrimSpace(src.MainStack.Main)
+	if strings.TrimSpace(src.MainStack.DefaultWorkspace) != "" {
+		dst.MainStack.DefaultWorkspace = strings.TrimSpace(src.MainStack.DefaultWorkspace)
 	}
 	if strings.TrimSpace(src.MainStack.RebaseMode) != "" {
 		dst.MainStack.RebaseMode = strings.TrimSpace(src.MainStack.RebaseMode)

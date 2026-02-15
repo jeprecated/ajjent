@@ -115,7 +115,7 @@ func TestLoadConfigGlobalAndLocalOverride(t *testing.T) {
 	if !reflect.DeepEqual(cfg.NameList, []string{"bravo", "charlie"}) {
 		t.Fatalf("unexpected name_list: %#v", cfg.NameList)
 	}
-	if cfg.MainStack.Main != "default" || cfg.MainStack.RebaseMode != "auto" || cfg.MainStack.StackShape != "auto" || cfg.MainStack.ConflictStrategy != "prefer-clean" {
+	if cfg.MainStack.DefaultWorkspace != "default" || cfg.MainStack.RebaseMode != "auto" || cfg.MainStack.StackShape != "auto" || cfg.MainStack.ConflictStrategy != "prefer-clean" {
 		t.Fatalf("unexpected main_stack defaults: %#v", cfg.MainStack)
 	}
 }
@@ -127,7 +127,7 @@ func TestLoadConfigMainStackOverride(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(xdg, "jjw"), 0o755); err != nil {
 		t.Fatalf("mkdir global config dir: %v", err)
 	}
-	globalConfig := []byte("main_stack:\n  main: main\n  rebase_mode: revision\n")
+	globalConfig := []byte("main_stack:\n  default_workspace: main\n  rebase_mode: revision\n")
 	if err := os.WriteFile(filepath.Join(xdg, "jjw", "config.yaml"), globalConfig, 0o644); err != nil {
 		t.Fatalf("write global config: %v", err)
 	}
@@ -146,8 +146,8 @@ func TestLoadConfigMainStackOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadConfig failed: %v", err)
 	}
-	if cfg.MainStack.Main != "main" {
-		t.Fatalf("expected main_stack.main override, got %q", cfg.MainStack.Main)
+	if cfg.MainStack.DefaultWorkspace != "main" {
+		t.Fatalf("expected main_stack.default_workspace override, got %q", cfg.MainStack.DefaultWorkspace)
 	}
 	if cfg.MainStack.RebaseMode != "revision" {
 		t.Fatalf("expected main_stack.rebase_mode override, got %q", cfg.MainStack.RebaseMode)
@@ -1557,7 +1557,7 @@ func TestRunMainStackRunsStatusAndRebase(t *testing.T) {
 	var errOut bytes.Buffer
 	stderrWriter = &errOut
 
-	err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--main", "main"})
+	err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--workspace", "main"})
 	if err != nil {
 		t.Fatalf("runMainStack failed: %v", err)
 	}
@@ -1689,7 +1689,7 @@ func TestRunMainStackNeedsOtherWorkspaces(t *testing.T) {
 	}
 	commandToStderrFn = func(name string, args ...string) error { return nil }
 
-	err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--main", "main"})
+	err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--workspace", "main"})
 	if err == nil || !strings.Contains(err.Error(), "no other workspaces") {
 		t.Fatalf("expected no other workspaces error, got %v", err)
 	}
@@ -1759,7 +1759,7 @@ func TestRunMainStackUsesRepoRootForDefaultWorkspace(t *testing.T) {
 		return nil
 	}
 
-	err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--main", "default"})
+	err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--workspace", "default"})
 	if err != nil {
 		t.Fatalf("runMainStack failed: %v", err)
 	}
@@ -1818,7 +1818,7 @@ func TestRunMainStackAutoUsesRevisionModeWhenImmutableAncestorsFound(t *testing.
 		return nil
 	}
 
-	err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--main", "main"})
+	err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--workspace", "main"})
 	if err != nil {
 		t.Fatalf("runMainStack failed: %v", err)
 	}
@@ -1864,7 +1864,7 @@ func TestRunMainStackRejectsInvalidRebaseMode(t *testing.T) {
 	}
 	commandToStderrFn = func(name string, args ...string) error { return nil }
 
-	err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--main", "main", "--rebase-mode", "wat"})
+	err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--workspace", "main", "--rebase-mode", "wat"})
 	if err == nil || !strings.Contains(err.Error(), "invalid --rebase-mode") {
 		t.Fatalf("expected invalid rebase mode error, got %v", err)
 	}
@@ -1884,7 +1884,7 @@ func TestRunMainStackUsesConfiguredMainStackDefaults(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(xdg, "jjw"), 0o755); err != nil {
 		t.Fatalf("mkdir config dir: %v", err)
 	}
-	configData := []byte("main_stack:\n  main: main\n  rebase_mode: revision\n  stack_shape: merge\n  conflict_strategy: off\n")
+	configData := []byte("main_stack:\n  default_workspace: main\n  rebase_mode: revision\n  stack_shape: merge\n  conflict_strategy: off\n")
 	if err := os.WriteFile(filepath.Join(xdg, "jjw", "config.yaml"), configData, 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -1967,7 +1967,7 @@ func TestRunMainStackRejectsInvalidConflictStrategy(t *testing.T) {
 	}
 	commandToStderrFn = func(name string, args ...string) error { return nil }
 
-	err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--main", "main", "--conflict-strategy", "wat"})
+	err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--workspace", "main", "--conflict-strategy", "wat"})
 	if err == nil || !strings.Contains(err.Error(), "invalid --conflict-strategy") {
 		t.Fatalf("expected invalid conflict strategy error, got %v", err)
 	}
@@ -2031,7 +2031,7 @@ func TestRunMainStackPreferCleanFallsBackToMerge(t *testing.T) {
 		return nil
 	}
 
-	err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--main", "main", "--conflict-strategy", "prefer-clean"})
+	err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--workspace", "main", "--conflict-strategy", "prefer-clean"})
 	if err != nil {
 		t.Fatalf("runMainStack failed: %v", err)
 	}
@@ -2108,7 +2108,7 @@ func TestRunMainStackPreferCleanKeepsMergeWhenBothConflict(t *testing.T) {
 		return nil
 	}
 
-	err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--main", "main", "--conflict-strategy", "prefer-clean", "--stack-shape", "auto"})
+	err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--workspace", "main", "--conflict-strategy", "prefer-clean", "--stack-shape", "auto"})
 	if err != nil {
 		t.Fatalf("runMainStack failed: %v", err)
 	}

@@ -32,7 +32,7 @@ in {
       default = {
         name_list = defaultNameList;
         main_stack = {
-          main = "default";
+          default_workspace = "default";
           rebase_mode = "auto";
           stack_shape = "auto";
           conflict_strategy = "prefer-clean";
@@ -45,7 +45,7 @@ in {
         name_strategy = "first-unused";
         name_list = [ "kilo" "lima" "mike" ];
         main_stack = {
-          main = "default";
+          default_workspace = "default";
           rebase_mode = "auto";
           stack_shape = "auto";
           conflict_strategy = "prefer-clean";
