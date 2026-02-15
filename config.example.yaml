@@ -1,5 +1,5 @@
-dev_root: ~/Development
-worktrees_root: ~/Development/worktrees
+dev_root: ""
+worktrees_root: ""
 name_strategy: first-unused
 name_list:
   - alpha
@@ -7,3 +7,29 @@ name_list:
   - charlie
   - delta
   - echo
+  - foxtrot
+  - golf
+  - hotel
+  - india
+  - juliett
+  - kilo
+  - lima
+  - mike
+  - november
+  - oscar
+  - papa
+  - quebec
+  - romeo
+  - sierra
+  - tango
+  - uniform
+  - victor
+  - whiskey
+  - xray
+  - yankee
+  - zulu
+main_stack:
+  main: default
+  rebase_mode: auto
+  stack_shape: auto
+  conflict_strategy: prefer-clean

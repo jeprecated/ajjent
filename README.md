@@ -33,13 +33,93 @@ State file (for `stateful` naming strategy):
 Example `config.yaml`:
 
 ```yaml
-dev_root: ~/Development
-worktrees_root: ~/Development/worktrees
+dev_root: ""
+worktrees_root: ""
 name_strategy: first-unused
 name_list:
   - alpha
   - bravo
   - charlie
+  - delta
+  - echo
+  - foxtrot
+  - golf
+  - hotel
+  - india
+  - juliett
+  - kilo
+  - lima
+  - mike
+  - november
+  - oscar
+  - papa
+  - quebec
+  - romeo
+  - sierra
+  - tango
+  - uniform
+  - victor
+  - whiskey
+  - xray
+  - yankee
+  - zulu
+main_stack:
+  main: default
+  rebase_mode: auto
+  stack_shape: auto
+  conflict_strategy: prefer-clean
+```
+
+`main_stack` keys set defaults for `jjw main-stack` flags. CLI flags always override config values.
+
+`dev_root` and `worktrees_root` must be set explicitly (or overridden with `--worktrees-root`). `jjw` does not assume a default workspace root path.
+
+## Nix / Flake
+
+This repo provides:
+
+- `packages.<system>.default` (`jjw` binary)
+- `apps.<system>.default`
+- `homeManagerModules.default`
+
+Quick install:
+
+```bash
+nix profile install github:<you>/jj-workspace-helper
+```
+
+Home Manager module example:
+
+```nix
+{
+  inputs.jjw.url = "github:<you>/jj-workspace-helper";
+
+  outputs = { self, nixpkgs, home-manager, jjw, ... }: {
+    homeConfigurations.me = home-manager.lib.homeManagerConfiguration {
+      pkgs = import nixpkgs { system = "x86_64-linux"; };
+      modules = [
+        jjw.homeManagerModules.default
+        ({ ... }: {
+          programs.jjw = {
+            enable = true;
+            settings = {
+              dev_root = "~/Development";
+              worktrees_root = "~/Development/worktrees";
+              name_strategy = "first-unused";
+              name_list = [ "kilo" "lima" "mike" ];
+              main_stack = {
+                main = "default";
+                rebase_mode = "auto";
+                stack_shape = "auto";
+                conflict_strategy = "prefer-clean";
+              };
+            };
+          };
+        })
+      ];
+    };
+  };
+}
 ```
 
 With the zsh wrapper, `jjw create ...` and `jjw select` both `cd` into the returned workspace automatically.
@@ -48,7 +128,7 @@ For repos where you keep a dedicated main workspace, run `jjw main-stack` from t
 
 ## main-stack flow
 
-`jjw main-stack` now has two independent decisions:
+`jjw main-stack` now has three independent decisions:
 
 - rebase mode (`--rebase-mode auto|branch|revision`)
 - stack shape (`--stack-shape auto|linear|merge`)

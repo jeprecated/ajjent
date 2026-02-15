@@ -30,10 +30,18 @@ var (
 )
 
 type config struct {
-	DevRoot       string   `yaml:"dev_root"`
-	WorktreesRoot string   `yaml:"worktrees_root"`
-	NameStrategy  string   `yaml:"name_strategy"`
-	NameList      []string `yaml:"name_list"`
+	DevRoot       string          `yaml:"dev_root"`
+	WorktreesRoot string          `yaml:"worktrees_root"`
+	NameStrategy  string          `yaml:"name_strategy"`
+	NameList      []string        `yaml:"name_list"`
+	MainStack     mainStackConfig `yaml:"main_stack"`
+}
+
+type mainStackConfig struct {
+	Main             string `yaml:"main"`
+	RebaseMode       string `yaml:"rebase_mode"`
+	StackShape       string `yaml:"stack_shape"`
+	ConflictStrategy string `yaml:"conflict_strategy"`
 }
 
 type state struct {
@@ -49,6 +57,35 @@ const (
 	strategyFirstUnused = "first-unused"
 	strategyStateful    = "stateful"
 )
+
+var defaultNameList = []string{
+	"alpha",
+	"bravo",
+	"charlie",
+	"delta",
+	"echo",
+	"foxtrot",
+	"golf",
+	"hotel",
+	"india",
+	"juliett",
+	"kilo",
+	"lima",
+	"mike",
+	"november",
+	"oscar",
+	"papa",
+	"quebec",
+	"romeo",
+	"sierra",
+	"tango",
+	"uniform",
+	"victor",
+	"whiskey",
+	"xray",
+	"yankee",
+	"zulu",
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -150,6 +187,9 @@ func runCreate(args []string) error {
 	if rootOverride != "" {
 		cfg.WorktreesRoot = expandPath(rootOverride)
 	}
+	if err := requireWorktreesRoot(cfg.WorktreesRoot); err != nil {
+		return err
+	}
 
 	app := deriveApp(repoRoot, appOverride)
 	workspaceNames, err := listWorkspaceNames(repoRoot)
@@ -233,6 +273,9 @@ func runList(args []string) error {
 	if rootOverride != "" {
 		cfg.WorktreesRoot = expandPath(rootOverride)
 	}
+	if err := requireWorktreesRoot(cfg.WorktreesRoot); err != nil {
+		return err
+	}
 
 	app := deriveApp(repoRoot, appOverride)
 	refs, err := listWorkspaceRefs(repoRoot)
@@ -312,6 +355,9 @@ func runMain(args []string) error {
 	if rootOverride != "" {
 		cfg.WorktreesRoot = expandPath(rootOverride)
 	}
+	if err := requireWorktreesRoot(cfg.WorktreesRoot); err != nil {
+		return err
+	}
 	app := deriveApp(repoRoot, appOverride)
 
 	refs, err := listWorkspaceRefs(repoRoot)
@@ -358,10 +404,10 @@ func runMainStack(args []string) error {
 	fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
 	fs.StringVar(&appOverride, "app", "", "app override")
 	fs.StringVar(&rootOverride, "worktrees-root", "", "worktrees root override")
-	fs.StringVar(&mainOverride, "main", "default", "main workspace name")
-	fs.StringVar(&rebaseMode, "rebase-mode", "auto", "rebase mode: auto, branch, revision")
-	fs.StringVar(&stackShape, "stack-shape", "auto", "stack shape: auto, linear, merge")
-	fs.StringVar(&conflictStrategy, "conflict-strategy", "off", "conflict strategy: off, prefer-clean")
+	fs.StringVar(&mainOverride, "main", "", "main workspace name")
+	fs.StringVar(&rebaseMode, "rebase-mode", "", "rebase mode: auto, branch, revision")
+	fs.StringVar(&stackShape, "stack-shape", "", "stack shape: auto, linear, merge")
+	fs.StringVar(&conflictStrategy, "conflict-strategy", "", "conflict strategy: off, prefer-clean")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -377,6 +423,9 @@ func runMainStack(args []string) error {
 	if rootOverride != "" {
 		cfg.WorktreesRoot = expandPath(rootOverride)
 	}
+	if err := requireWorktreesRoot(cfg.WorktreesRoot); err != nil {
+		return err
+	}
 	app := deriveApp(repoRoot, appOverride)
 
 	refs, err := listWorkspaceRefs(repoRoot)
@@ -388,6 +437,9 @@ func runMainStack(args []string) error {
 	}
 
 	mainName := strings.TrimSpace(mainOverride)
+	if mainName == "" {
+		mainName = strings.TrimSpace(cfg.MainStack.Main)
+	}
 	if mainName == "" {
 		mainName = "default"
 	}
@@ -426,17 +478,29 @@ func runMainStack(args []string) error {
 		return fmt.Errorf("main workspace path missing: %s", mainPath)
 	}
 
-	resolvedMode, reason, err := resolveMainStackRebaseMode(mainPath, rebaseMode)
+	requestedRebaseMode := strings.TrimSpace(rebaseMode)
+	if requestedRebaseMode == "" {
+		requestedRebaseMode = cfg.MainStack.RebaseMode
+	}
+	resolvedMode, reason, err := resolveMainStackRebaseMode(mainPath, requestedRebaseMode)
 	if err != nil {
 		return err
 	}
 
-	resolvedConflictStrategy, err := resolveMainStackConflictStrategy(conflictStrategy)
+	requestedConflictStrategy := strings.TrimSpace(conflictStrategy)
+	if requestedConflictStrategy == "" {
+		requestedConflictStrategy = cfg.MainStack.ConflictStrategy
+	}
+	resolvedConflictStrategy, err := resolveMainStackConflictStrategy(requestedConflictStrategy)
 	if err != nil {
 		return err
 	}
 
-	resolvedShape, shapeReason, baseDestinations, err := resolveMainStackStackShape(mainPath, others, stackShape)
+	requestedStackShape := strings.TrimSpace(stackShape)
+	if requestedStackShape == "" {
+		requestedStackShape = cfg.MainStack.StackShape
+	}
+	resolvedShape, shapeReason, baseDestinations, err := resolveMainStackStackShape(mainPath, others, requestedStackShape)
 	if err != nil {
 		return err
 	}
@@ -446,7 +510,7 @@ func runMainStack(args []string) error {
 		return err
 	}
 
-	if resolvedConflictStrategy == "prefer-clean" && conflicted && strings.TrimSpace(strings.ToLower(stackShape)) == "auto" {
+	if resolvedConflictStrategy == "prefer-clean" && conflicted && strings.TrimSpace(strings.ToLower(requestedStackShape)) == "auto" {
 		alternativeShape := "merge"
 		if resolvedShape == "merge" {
 			alternativeShape = "linear"
@@ -578,6 +642,26 @@ func resolveMainStackConflictStrategy(requested string) (string, error) {
 		return strategy, nil
 	default:
 		return "", fmt.Errorf("invalid --conflict-strategy %q (expected off or prefer-clean)", requested)
+	}
+}
+
+func validateMainStackRebaseMode(mode string) error {
+	trimmed := strings.TrimSpace(strings.ToLower(mode))
+	switch trimmed {
+	case "", "auto", "branch", "revision":
+		return nil
+	default:
+		return fmt.Errorf("invalid rebase_mode: %q (expected auto, branch, or revision)", mode)
+	}
+}
+
+func validateMainStackStackShape(shape string) error {
+	trimmed := strings.TrimSpace(strings.ToLower(shape))
+	switch trimmed {
+	case "", "auto", "linear", "merge":
+		return nil
+	default:
+		return fmt.Errorf("invalid stack_shape: %q (expected auto, linear, or merge)", shape)
 	}
 }
 
@@ -819,6 +903,9 @@ func runTidy(args []string) error {
 	if rootOverride != "" {
 		cfg.WorktreesRoot = expandPath(rootOverride)
 	}
+	if err := requireWorktreesRoot(cfg.WorktreesRoot); err != nil {
+		return err
+	}
 
 	app := deriveApp(repoRoot, appOverride)
 	refs, err := listWorkspaceRefs(repoRoot)
@@ -963,6 +1050,9 @@ func listExistingWorkspacePaths(args []string) ([]string, error) {
 	}
 	if rootOverride != "" {
 		cfg.WorktreesRoot = expandPath(rootOverride)
+	}
+	if err := requireWorktreesRoot(cfg.WorktreesRoot); err != nil {
+		return nil, err
 	}
 
 	app := deriveApp(repoRoot, appOverride)
@@ -1130,15 +1220,16 @@ func currentWorkspaceName(repoRoot string, refs []workspaceRef) (string, error) 
 }
 
 func loadConfig(repoRoot string) (config, error) {
-	devRoot := os.Getenv("DEV_ROOT")
-	if strings.TrimSpace(devRoot) == "" {
-		devRoot = "~/Development"
-	}
 	defaults := config{
-		DevRoot:      expandPath(devRoot),
 		NameStrategy: strategyFirstUnused,
+		NameList:     append([]string(nil), defaultNameList...),
+		MainStack: mainStackConfig{
+			Main:             "default",
+			RebaseMode:       "auto",
+			StackShape:       "auto",
+			ConflictStrategy: "prefer-clean",
+		},
 	}
-	defaults.WorktreesRoot = filepath.Join(defaults.DevRoot, "worktrees")
 
 	merged := defaults
 
@@ -1156,18 +1247,24 @@ func loadConfig(repoRoot string) (config, error) {
 	merged.DevRoot = expandPath(merged.DevRoot)
 	merged.WorktreesRoot = expandPath(merged.WorktreesRoot)
 
-	if strings.TrimSpace(merged.DevRoot) == "" {
-		merged.DevRoot = expandPath("~/Development")
-	}
-	if strings.TrimSpace(merged.WorktreesRoot) == "" {
-		merged.WorktreesRoot = filepath.Join(merged.DevRoot, "worktrees")
-	}
-
 	if merged.NameStrategy == "" {
 		merged.NameStrategy = strategyFirstUnused
 	}
 	if merged.NameStrategy != strategyFirstUnused && merged.NameStrategy != strategyStateful {
 		return config{}, fmt.Errorf("invalid name_strategy: %q", merged.NameStrategy)
+	}
+
+	if strings.TrimSpace(merged.MainStack.Main) == "" {
+		merged.MainStack.Main = "default"
+	}
+	if err := validateMainStackRebaseMode(merged.MainStack.RebaseMode); err != nil {
+		return config{}, err
+	}
+	if err := validateMainStackStackShape(merged.MainStack.StackShape); err != nil {
+		return config{}, err
+	}
+	if _, err := resolveMainStackConflictStrategy(merged.MainStack.ConflictStrategy); err != nil {
+		return config{}, err
 	}
 
 	return merged, nil
@@ -1199,7 +1296,26 @@ func mergeConfigFile(dst *config, path string) error {
 	if len(src.NameList) > 0 {
 		dst.NameList = append([]string(nil), src.NameList...)
 	}
+	if strings.TrimSpace(src.MainStack.Main) != "" {
+		dst.MainStack.Main = strings.TrimSpace(src.MainStack.Main)
+	}
+	if strings.TrimSpace(src.MainStack.RebaseMode) != "" {
+		dst.MainStack.RebaseMode = strings.TrimSpace(src.MainStack.RebaseMode)
+	}
+	if strings.TrimSpace(src.MainStack.StackShape) != "" {
+		dst.MainStack.StackShape = strings.TrimSpace(src.MainStack.StackShape)
+	}
+	if strings.TrimSpace(src.MainStack.ConflictStrategy) != "" {
+		dst.MainStack.ConflictStrategy = strings.TrimSpace(src.MainStack.ConflictStrategy)
+	}
 
+	return nil
+}
+
+func requireWorktreesRoot(worktreesRoot string) error {
+	if strings.TrimSpace(worktreesRoot) == "" {
+		return errors.New("worktrees_root is required; set it in ~/.config/jjw/config.yaml or .jjw/config.yaml, or pass --worktrees-root")
+	}
 	return nil
 }
 

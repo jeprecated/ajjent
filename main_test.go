@@ -115,6 +115,102 @@ func TestLoadConfigGlobalAndLocalOverride(t *testing.T) {
 	if !reflect.DeepEqual(cfg.NameList, []string{"bravo", "charlie"}) {
 		t.Fatalf("unexpected name_list: %#v", cfg.NameList)
 	}
+	if cfg.MainStack.Main != "default" || cfg.MainStack.RebaseMode != "auto" || cfg.MainStack.StackShape != "auto" || cfg.MainStack.ConflictStrategy != "prefer-clean" {
+		t.Fatalf("unexpected main_stack defaults: %#v", cfg.MainStack)
+	}
+}
+
+func TestLoadConfigMainStackOverride(t *testing.T) {
+	repoRoot := t.TempDir()
+	xdg := t.TempDir()
+
+	if err := os.MkdirAll(filepath.Join(xdg, "jjw"), 0o755); err != nil {
+		t.Fatalf("mkdir global config dir: %v", err)
+	}
+	globalConfig := []byte("main_stack:\n  main: main\n  rebase_mode: revision\n")
+	if err := os.WriteFile(filepath.Join(xdg, "jjw", "config.yaml"), globalConfig, 0o644); err != nil {
+		t.Fatalf("write global config: %v", err)
+	}
+
+	if err := os.MkdirAll(filepath.Join(repoRoot, ".jjw"), 0o755); err != nil {
+		t.Fatalf("mkdir local config dir: %v", err)
+	}
+	localConfig := []byte("main_stack:\n  stack_shape: merge\n  conflict_strategy: prefer-clean\n")
+	if err := os.WriteFile(filepath.Join(repoRoot, ".jjw", "config.yaml"), localConfig, 0o644); err != nil {
+		t.Fatalf("write local config: %v", err)
+	}
+
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+
+	cfg, err := loadConfig(repoRoot)
+	if err != nil {
+		t.Fatalf("loadConfig failed: %v", err)
+	}
+	if cfg.MainStack.Main != "main" {
+		t.Fatalf("expected main_stack.main override, got %q", cfg.MainStack.Main)
+	}
+	if cfg.MainStack.RebaseMode != "revision" {
+		t.Fatalf("expected main_stack.rebase_mode override, got %q", cfg.MainStack.RebaseMode)
+	}
+	if cfg.MainStack.StackShape != "merge" {
+		t.Fatalf("expected main_stack.stack_shape override, got %q", cfg.MainStack.StackShape)
+	}
+	if cfg.MainStack.ConflictStrategy != "prefer-clean" {
+		t.Fatalf("expected main_stack.conflict_strategy override, got %q", cfg.MainStack.ConflictStrategy)
+	}
+}
+
+func TestLoadConfigRejectsInvalidMainStackDefaults(t *testing.T) {
+	repoRoot := t.TempDir()
+	xdg := t.TempDir()
+
+	if err := os.MkdirAll(filepath.Join(xdg, "jjw"), 0o755); err != nil {
+		t.Fatalf("mkdir global config dir: %v", err)
+	}
+	badConfig := []byte("main_stack:\n  rebase_mode: wat\n")
+	if err := os.WriteFile(filepath.Join(xdg, "jjw", "config.yaml"), badConfig, 0o644); err != nil {
+		t.Fatalf("write global config: %v", err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+
+	_, err := loadConfig(repoRoot)
+	if err == nil || !strings.Contains(err.Error(), "invalid rebase_mode") {
+		t.Fatalf("expected invalid rebase_mode error, got %v", err)
+	}
+}
+
+func TestLoadConfigUsesDefaultNATONameList(t *testing.T) {
+	repoRoot := t.TempDir()
+	xdg := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(xdg, "jjw"), 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+
+	cfg, err := loadConfig(repoRoot)
+	if err != nil {
+		t.Fatalf("loadConfig failed: %v", err)
+	}
+	if len(cfg.NameList) != 26 {
+		t.Fatalf("expected 26 default names, got %d", len(cfg.NameList))
+	}
+	if cfg.NameList[0] != "alpha" || cfg.NameList[len(cfg.NameList)-1] != "zulu" {
+		t.Fatalf("unexpected default NATO name list: %#v", cfg.NameList)
+	}
+}
+
+func TestRunCreateRequiresConfiguredWorktreesRoot(t *testing.T) {
+	repoRoot := t.TempDir()
+	xdg := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(xdg, "jjw"), 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+
+	err := runCreate([]string{"--repo", repoRoot, "alpha"})
+	if err == nil || !strings.Contains(err.Error(), "worktrees_root is required") {
+		t.Fatalf("expected worktrees_root required error, got %v", err)
+	}
 }
 
 func TestRunCreateWithFakeJJ(t *testing.T) {
@@ -1771,6 +1867,74 @@ func TestRunMainStackRejectsInvalidRebaseMode(t *testing.T) {
 	err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--main", "main", "--rebase-mode", "wat"})
 	if err == nil || !strings.Contains(err.Error(), "invalid --rebase-mode") {
 		t.Fatalf("expected invalid rebase mode error, got %v", err)
+	}
+}
+
+func TestRunMainStackUsesConfiguredMainStackDefaults(t *testing.T) {
+	repoRoot := t.TempDir()
+	worktreesRoot := filepath.Join(t.TempDir(), "worktrees")
+	app := "nixfiles"
+	for _, name := range []string{"main", "feat-a", "feat-b"} {
+		if err := os.MkdirAll(filepath.Join(worktreesRoot, app, name), 0o755); err != nil {
+			t.Fatalf("mkdir workspace %s: %v", name, err)
+		}
+	}
+
+	xdg := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(xdg, "jjw"), 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	configData := []byte("main_stack:\n  main: main\n  rebase_mode: revision\n  stack_shape: merge\n  conflict_strategy: off\n")
+	if err := os.WriteFile(filepath.Join(xdg, "jjw", "config.yaml"), configData, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+
+	origCapture := commandCaptureFn
+	origRun := commandToStderrFn
+	defer func() {
+		commandCaptureFn = origCapture
+		commandToStderrFn = origRun
+	}()
+
+	commandCaptureFn = func(name string, args ...string) (string, error) {
+		if len(args) >= 3 && args[2] == "workspace" {
+			return "feat-a\taaa111\nfeat-b\tbbb222\nmain\tmmm333\n", nil
+		}
+		if len(args) >= 5 && args[2] == "log" && args[3] == "-r" && args[4] == "parents(@)" {
+			return "main999\n", nil
+		}
+		if len(args) >= 5 && args[2] == "log" && args[3] == "-r" && strings.HasPrefix(args[4], "main999::(") {
+			return "", nil
+		}
+		if len(args) >= 5 && args[2] == "log" && args[3] == "-r" && args[4] == "conflicts() & @" {
+			return "", nil
+		}
+		if len(args) >= 4 && args[2] == "log" && args[3] == "-r" {
+			return "mmm333\n", nil
+		}
+		return "", nil
+	}
+
+	var rebaseCall []string
+	commandToStderrFn = func(name string, args ...string) error {
+		if len(args) >= 4 && args[2] == "rebase" {
+			rebaseCall = append([]string{name}, args...)
+		}
+		return nil
+	}
+
+	err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot})
+	if err != nil {
+		t.Fatalf("runMainStack failed: %v", err)
+	}
+
+	joined := strings.Join(rebaseCall, " ")
+	if !strings.Contains(joined, " rebase -r @") {
+		t.Fatalf("expected revision mode from config, got %q", joined)
+	}
+	if !strings.Contains(joined, "-d feat-a@") || !strings.Contains(joined, "-d feat-b@") {
+		t.Fatalf("expected merge destinations from config, got %q", joined)
 	}
 }
 
