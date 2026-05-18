@@ -14,16 +14,8 @@ in {
 
     package = lib.mkOption {
       type = lib.types.package;
-      default = pkgs.buildGoModule {
-        pname = "jjw";
-        version = "0.1.0";
-        src = ../.;
-        vendorHash = "sha256-zq8CrPEfh6zd/E7snrJtgv2ONCCAB9k9+cA28ZhcOpQ=";
-        subPackages = [ "." ];
-        ldflags = [ "-s" "-w" ];
-        doCheck = false;
-      };
-      defaultText = lib.literalExpression "pkgs.buildGoModule { ... }";
+      default = pkgs.callPackage ./package.nix { };
+      defaultText = lib.literalExpression "pkgs.callPackage ./package.nix { }";
       description = "jjw package to install.";
     };
 

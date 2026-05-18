@@ -79,14 +79,28 @@ main_stack:
 This repo provides:
 
 - `packages.<system>.default` (`jjw` binary)
-- `apps.<system>.default`
+- `apps.<system>.default` / `apps.<system>.jjw`
 - `homeManagerModules.default`
 
-Quick install:
+Quick local install from this checkout:
 
 ```bash
-nix profile install github:<you>/jj-workspace-helper
+nix profile add .#jjw
 ```
+
+Install from any remote flake URL:
+
+```bash
+nix profile add '<flake-url>#jjw'
+```
+
+Run without installing:
+
+```bash
+nix run .# -- <command>
+```
+
+The flake package installs the `jjw` binary and wraps it with `jj` and `fzf` from nixpkgs on `PATH`.
 
 Home Manager module example:
 
