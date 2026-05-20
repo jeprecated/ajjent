@@ -430,6 +430,25 @@ func TestDeriveApp(t *testing.T) {
 	}
 }
 
+func TestDeriveAppFromLinkedWorkspaceUsesDefaultRootName(t *testing.T) {
+	tmp := t.TempDir()
+	defaultRoot := filepath.Join(tmp, "agent-tick")
+	linkedRoot := filepath.Join(tmp, "worktrees", "agent-tick", "bravo")
+	if err := os.MkdirAll(filepath.Join(defaultRoot, ".jj"), 0o755); err != nil {
+		t.Fatalf("mkdir default .jj: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(linkedRoot, ".jj"), 0o755); err != nil {
+		t.Fatalf("mkdir linked .jj: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(linkedRoot, ".jj", "repo"), []byte(filepath.Join(defaultRoot, ".jj", "repo")+"\n"), 0o644); err != nil {
+		t.Fatalf("write linked .jj/repo: %v", err)
+	}
+
+	if got := deriveApp(linkedRoot, ""); got != "agent-tick" {
+		t.Fatalf("expected app from default root, got %q", got)
+	}
+}
+
 func TestResolveRepoRootOverride(t *testing.T) {
 	t.Parallel()
 
@@ -883,6 +902,82 @@ func TestRunTidyOffersActiveNonDefaultForDeletion(t *testing.T) {
 	}
 	if _, err := os.Stat(betaPath); err != nil {
 		t.Fatalf("expected %s to remain: %v", betaPath, err)
+	}
+}
+
+func TestRunTidyFromLinkedWorkspaceUsesDefaultAppForActiveWorkspaces(t *testing.T) {
+	tmp := t.TempDir()
+	defaultRoot := filepath.Join(tmp, "agent-tick")
+	worktreesRoot := filepath.Join(tmp, "worktrees")
+	app := "agent-tick"
+	bravoPath := filepath.Join(worktreesRoot, app, "bravo")
+	alphaPath := filepath.Join(worktreesRoot, app, "alpha")
+	for _, dir := range []string{filepath.Join(defaultRoot, ".jj"), filepath.Join(bravoPath, ".jj"), alphaPath} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(alphaPath, "file"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write alpha marker: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(bravoPath, ".jj", "repo"), []byte(filepath.Join(defaultRoot, ".jj", "repo")+"\n"), 0o644); err != nil {
+		t.Fatalf("write linked .jj/repo: %v", err)
+	}
+
+	origCapture := commandCaptureFn
+	origRun := commandToStderrFn
+	origStdin := stdinReader
+	defer func() {
+		commandCaptureFn = origCapture
+		commandToStderrFn = origRun
+		stdinReader = origStdin
+	}()
+
+	commandCaptureFn = func(name string, args ...string) (string, error) {
+		if len(args) >= 3 && args[2] == "workspace" {
+			return "default\tbase111\nalpha\talpha222\nbravo\tbravo333\n", nil
+		}
+		if len(args) >= 5 && args[2] == "log" && args[3] == "-r" {
+			if strings.Contains(args[4], "empty()") {
+				return "\n", nil
+			}
+			return "bravo333\n", nil
+		}
+		return "", nil
+	}
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	stdinReader = r
+	if _, err := w.Write([]byte("1\n")); err != nil {
+		t.Fatalf("write stdin: %v", err)
+	}
+	_ = w.Close()
+
+	var forgetCalls []string
+	commandToStderrFn = func(name string, args ...string) error {
+		if len(args) >= 5 && args[2] == "workspace" && args[3] == "forget" {
+			forgetCalls = append(forgetCalls, args[4])
+		}
+		return nil
+	}
+
+	output, err := captureStdout(func() error {
+		return runTidy([]string{"--repo", bravoPath, "--worktrees-root", worktreesRoot, "--yes"})
+	})
+	if err != nil {
+		t.Fatalf("runTidy failed: %v", err)
+	}
+	if got := strings.TrimSpace(output); got != alphaPath {
+		t.Fatalf("expected deleted output %q, got %q", alphaPath, got)
+	}
+	if !reflect.DeepEqual(forgetCalls, []string{"alpha"}) {
+		t.Fatalf("unexpected forget calls: %#v", forgetCalls)
+	}
+	if _, err := os.Stat(alphaPath); !os.IsNotExist(err) {
+		t.Fatalf("expected %s removed", alphaPath)
 	}
 }
 
@@ -1510,6 +1605,93 @@ func TestRunHelpAndUnknown(t *testing.T) {
 	}
 }
 
+func TestRunSubcommandHelp(t *testing.T) {
+	for _, helpFlag := range []string{"-h", "--help"} {
+		helpFlag := helpFlag
+		t.Run(helpFlag, func(t *testing.T) {
+			out, err := captureStdout(func() error {
+				return run([]string{"tidy", helpFlag})
+			})
+			if err != nil {
+				t.Fatalf("run tidy %s failed: %v", helpFlag, err)
+			}
+			if !strings.Contains(out, "Usage: jjw tidy") || !strings.Contains(out, "--worktrees-root") || !strings.Contains(out, "--yes") {
+				t.Fatalf("expected tidy usage with options, got %q", out)
+			}
+			if strings.Contains(out, "flag: help requested") {
+				t.Fatalf("help should not expose flag parser error: %q", out)
+			}
+		})
+	}
+}
+
+func TestRunMainStackAbandonsEmptyAncestorsAfterCleanRebase(t *testing.T) {
+	repoRoot := t.TempDir()
+	worktreesRoot := filepath.Join(t.TempDir(), "worktrees")
+	app := "nixfiles"
+	for _, name := range []string{"main", "feat"} {
+		if err := os.MkdirAll(filepath.Join(worktreesRoot, app, name), 0o755); err != nil {
+			t.Fatalf("mkdir workspace %s: %v", name, err)
+		}
+	}
+
+	origCapture := commandCaptureFn
+	origRun := commandToStderrFn
+	defer func() {
+		commandCaptureFn = origCapture
+		commandToStderrFn = origRun
+	}()
+
+	commandCaptureFn = func(name string, args ...string) (string, error) {
+		if len(args) >= 3 && args[2] == "workspace" {
+			return "feat\tabc111\nmain\tabc333\n", nil
+		}
+		if len(args) >= 5 && args[2] == "log" && args[3] == "-r" {
+			switch {
+			case args[4] == "conflicts() & @":
+				return "", nil
+			case strings.HasPrefix(args[4], "heads("):
+				return "abc111\n", nil
+			case args[4] == "immutable() & ::@ & ~@":
+				return "", nil
+			case args[4] == "empty() & mutable() & ::@ & ~@":
+				return "empty123\n", nil
+			}
+		}
+		if len(args) >= 4 && args[2] == "log" && args[3] == "-r" {
+			return "abc333\n", nil
+		}
+		return "", nil
+	}
+
+	var calls [][]string
+	commandToStderrFn = func(name string, args ...string) error {
+		calls = append(calls, append([]string{name}, args...))
+		return nil
+	}
+
+	if err := runMainStack([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--workspace", "main"}); err != nil {
+		t.Fatalf("runMainStack failed: %v", err)
+	}
+
+	abandonIndex := -1
+	finalUpdateIndex := -1
+	for i, call := range calls {
+		if len(call) >= 4 && call[3] == "abandon" {
+			abandonIndex = i
+		}
+		if len(call) >= 5 && call[3] == "workspace" && call[4] == "update-stale" {
+			finalUpdateIndex = i
+		}
+	}
+	if abandonIndex == -1 {
+		t.Fatalf("expected stack to abandon empty ancestors; calls: %#v", calls)
+	}
+	if finalUpdateIndex == -1 || abandonIndex > finalUpdateIndex {
+		t.Fatalf("expected final update-stale after abandon; calls: %#v", calls)
+	}
+}
+
 func TestRunMainStackRunsStatusAndRebase(t *testing.T) {
 	repoRoot := t.TempDir()
 	worktreesRoot := filepath.Join(t.TempDir(), "worktrees")
@@ -1540,6 +1722,9 @@ func TestRunMainStackRunsStatusAndRebase(t *testing.T) {
 			return "abc111\nabc222\n", nil
 		}
 		if len(args) >= 8 && args[2] == "log" && args[3] == "-r" && args[4] == "immutable() & ::@ & ~@" {
+			return "", nil
+		}
+		if len(args) >= 5 && args[2] == "log" && args[3] == "-r" && args[4] == "empty() & mutable() & ::@ & ~@" {
 			return "", nil
 		}
 		if len(args) >= 4 && args[2] == "log" && args[3] == "-r" {

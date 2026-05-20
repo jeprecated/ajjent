@@ -140,6 +140,53 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  stack           Run st on all workspaces, then rebase default workspace")
 }
 
+func parseCommandFlags(fs *flag.FlagSet, args []string, usage string, summary string) (bool, error) {
+	fs.SetOutput(io.Discard)
+	if hasHelpFlag(args) {
+		printCommandUsage(stdoutWriter, fs, usage, summary)
+		return true, nil
+	}
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			printCommandUsage(stdoutWriter, fs, usage, summary)
+			return true, nil
+		}
+		return false, err
+	}
+	return false, nil
+}
+
+func hasHelpFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "-h" || arg == "--help" {
+			return true
+		}
+	}
+	return false
+}
+
+func printCommandUsage(w io.Writer, fs *flag.FlagSet, usage string, summary string) {
+	fmt.Fprintf(w, "Usage: %s\n", usage)
+	if strings.TrimSpace(summary) != "" {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, summary)
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Options:")
+	fs.VisitAll(func(f *flag.Flag) {
+		valueName, usageText := flag.UnquoteUsage(f)
+		option := "--" + f.Name
+		if valueName != "" {
+			option += " " + valueName
+		}
+		fmt.Fprintf(w, "  %-28s %s", option, usageText)
+		if f.DefValue != "" && f.DefValue != "false" {
+			fmt.Fprintf(w, " (default %q)", f.DefValue)
+		}
+		fmt.Fprintln(w)
+	})
+}
+
 func runCreate(args []string) error {
 	normalizedArgs, err := normalizeCreateArgs(args)
 	if err != nil {
@@ -163,7 +210,7 @@ func runCreate(args []string) error {
 	fs.StringVar(&nameOverride, "name", "", "workspace name override")
 	fs.BoolVar(&skipEnvrc, "no-envrc", false, "do not create .envrc")
 	fs.BoolVar(&skipDirenvAllow, "no-direnv-allow", false, "do not run direnv allow")
-	if err := fs.Parse(args); err != nil {
+	if handled, err := parseCommandFlags(fs, args, "jjw create [name] [options]", "Create a new jj workspace and print its path."); handled || err != nil {
 		return err
 	}
 
@@ -258,7 +305,7 @@ func runList(args []string) error {
 	fs.StringVar(&appOverride, "app", "", "app override")
 	fs.StringVar(&rootOverride, "worktrees-root", "", "worktrees root override")
 	fs.BoolVar(&includeAll, "all", false, "include current workspace")
-	if err := fs.Parse(args); err != nil {
+	if handled, err := parseCommandFlags(fs, args, "jjw list [options]", "List workspace paths for the current repository."); handled || err != nil {
 		return err
 	}
 
@@ -300,6 +347,18 @@ func runList(args []string) error {
 }
 
 func runSelect(args []string) error {
+	if hasHelpFlag(args) {
+		fs := flag.NewFlagSet("select", flag.ContinueOnError)
+		var repoRootOverride, appOverride, rootOverride string
+		var includeAll bool
+		fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
+		fs.StringVar(&appOverride, "app", "", "app override")
+		fs.StringVar(&rootOverride, "worktrees-root", "", "worktrees root override")
+		fs.BoolVar(&includeAll, "all", false, "include current workspace")
+		printCommandUsage(stdoutWriter, fs, "jjw select [options]", "Interactively choose an existing workspace path.")
+		return nil
+	}
+
 	paths, err := listExistingWorkspacePaths(args)
 	if err != nil {
 		return err
@@ -317,6 +376,21 @@ func runSelect(args []string) error {
 }
 
 func runCd(args []string) error {
+	if hasHelpFlag(args) {
+		fs := flag.NewFlagSet("cd", flag.ContinueOnError)
+		var repoRootOverride, appOverride, rootOverride, nameOverride string
+		var includeAll, skipEnvrc, skipDirenvAllow bool
+		fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
+		fs.StringVar(&appOverride, "app", "", "app override")
+		fs.StringVar(&rootOverride, "worktrees-root", "", "worktrees root override")
+		fs.StringVar(&nameOverride, "name", "", "workspace name override")
+		fs.BoolVar(&includeAll, "all", false, "include current workspace when selecting")
+		fs.BoolVar(&skipEnvrc, "no-envrc", false, "do not create .envrc when creating")
+		fs.BoolVar(&skipDirenvAllow, "no-direnv-allow", false, "do not run direnv allow when creating")
+		printCommandUsage(stdoutWriter, fs, "jjw cd [name] [options]", "Print an existing workspace path, or create-and-print when a name is provided.")
+		return nil
+	}
+
 	_, positionals, hasNameFlag, err := parseCreateArgs(args)
 	if err != nil {
 		return err
@@ -340,7 +414,7 @@ func runMain(args []string) error {
 	fs.StringVar(&appOverride, "app", "", "app override")
 	fs.StringVar(&rootOverride, "worktrees-root", "", "worktrees root override")
 	fs.StringVar(&mainName, "name", "default", "main workspace name")
-	if err := fs.Parse(args); err != nil {
+	if handled, err := parseCommandFlags(fs, args, "jjw main [options]", "Print the path for the main workspace."); handled || err != nil {
 		return err
 	}
 
@@ -408,7 +482,7 @@ func runMainStack(args []string) error {
 	fs.StringVar(&rebaseMode, "rebase-mode", "", "rebase mode: auto, branch, revision")
 	fs.StringVar(&stackShape, "stack-shape", "", "stack shape: auto, linear, merge")
 	fs.StringVar(&conflictStrategy, "conflict-strategy", "", "conflict strategy: off, prefer-clean")
-	if err := fs.Parse(args); err != nil {
+	if handled, err := parseCommandFlags(fs, args, "jjw stack [options]", "Run jj st across all workspaces, then rebase the selected main workspace onto the others."); handled || err != nil {
 		return err
 	}
 
@@ -509,6 +583,7 @@ func runMainStack(args []string) error {
 	if err != nil {
 		return err
 	}
+	finalConflicted := conflicted
 
 	if resolvedConflictStrategy == "prefer-clean" && conflicted && strings.TrimSpace(strings.ToLower(requestedStackShape)) == "auto" {
 		alternativeShape := "merge"
@@ -527,6 +602,7 @@ func runMainStack(args []string) error {
 			if err != nil {
 				return err
 			}
+			finalConflicted = alternativeConflicted
 
 			if alternativeConflicted && alternativeResolvedShape == "linear" {
 				fmt.Fprintln(stderrWriter, "\n== Both strategies conflicted; keeping merge shape ==")
@@ -537,10 +613,18 @@ func runMainStack(args []string) error {
 				if err != nil {
 					return err
 				}
-				if _, err := runMainStackRebaseAttempt(mainPath, others, resolvedMode, reason, mergeShape, mergeReason, mergeDestinations); err != nil {
+				mergeConflicted, err := runMainStackRebaseAttempt(mainPath, others, resolvedMode, reason, mergeShape, mergeReason, mergeDestinations)
+				if err != nil {
 					return err
 				}
+				finalConflicted = mergeConflicted
 			}
+		}
+	}
+
+	if !finalConflicted {
+		if err := abandonTopEmptyMutableAncestors(mainPath); err != nil {
+			return err
 		}
 	}
 
@@ -888,7 +972,7 @@ func runTidy(args []string) error {
 	fs.StringVar(&appOverride, "app", "", "app override")
 	fs.StringVar(&rootOverride, "worktrees-root", "", "worktrees root override")
 	fs.BoolVar(&yes, "yes", false, "skip confirmation")
-	if err := fs.Parse(args); err != nil {
+	if handled, err := parseCommandFlags(fs, args, "jjw tidy [options]", "Remove defunct empty workspace directories and optionally close active non-default workspaces."); handled || err != nil {
 		return err
 	}
 
@@ -930,6 +1014,7 @@ func runTidy(args []string) error {
 	entries, err := os.ReadDir(appRoot)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(stderrWriter, "No workspace directory found at %s (app %q). Pass --app if this repo uses a different worktrees directory.\n", appRoot, app)
 			return nil
 		}
 		return err
@@ -974,6 +1059,9 @@ func runTidy(args []string) error {
 	}
 
 	if len(optional) == 0 {
+		if len(deleted) == 0 {
+			fmt.Fprintln(stderrWriter, "No workspaces to tidy.")
+		}
 		for _, path := range deleted {
 			fmt.Fprintln(stdoutWriter, path)
 		}
@@ -985,6 +1073,9 @@ func runTidy(args []string) error {
 		return err
 	}
 	if len(selected) == 0 {
+		if len(deleted) == 0 {
+			fmt.Fprintln(stderrWriter, "No workspaces selected.")
+		}
 		for _, path := range deleted {
 			fmt.Fprintln(stdoutWriter, path)
 		}
@@ -1036,7 +1127,10 @@ func listExistingWorkspacePaths(args []string) ([]string, error) {
 	fs.StringVar(&appOverride, "app", "", "app override")
 	fs.StringVar(&rootOverride, "worktrees-root", "", "worktrees root override")
 	fs.BoolVar(&includeAll, "all", false, "include current workspace")
-	if err := fs.Parse(args); err != nil {
+	if handled, err := parseCommandFlags(fs, args, "jjw select [options]", "Interactively choose an existing workspace path."); handled || err != nil {
+		if handled {
+			return nil, nil
+		}
 		return nil, err
 	}
 
@@ -1150,6 +1244,9 @@ func resolveRepoRoot(override string) (string, error) {
 func deriveApp(repoRoot string, override string) string {
 	if strings.TrimSpace(override) != "" {
 		return strings.TrimSpace(override)
+	}
+	if defaultRoot, ok := resolveDefaultWorkspaceRoot(repoRoot); ok {
+		return filepath.Base(defaultRoot)
 	}
 	return filepath.Base(repoRoot)
 }

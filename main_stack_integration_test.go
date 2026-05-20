@@ -32,10 +32,11 @@ func TestMainStackAutoUsesLinearWhenWorkspaceHeadsCollapse(t *testing.T) {
 	if len(parents) != 1 {
 		t.Fatalf("expected linear stack with one parent, got %d parents: %#v", len(parents), parents)
 	}
-	limaHead := workspaceHeadByName(t, repoRoot, "lima")
-	if parents[0] != limaHead {
-		t.Fatalf("expected default parent to be lima head %q, got %q", limaHead, parents[0])
+	limaTip := workspaceParentByName(t, repoRoot, "lima")
+	if parents[0] != limaTip {
+		t.Fatalf("expected default parent to be lima content commit %q, got %q", limaTip, parents[0])
 	}
+	assertNoEmptyAncestorsOfDefault(t, repoRoot)
 }
 
 func TestMainStackAutoUsesMergeWhenWorkspaceHeadsDiverge(t *testing.T) {
@@ -62,18 +63,19 @@ func TestMainStackAutoUsesMergeWhenWorkspaceHeadsDiverge(t *testing.T) {
 		t.Fatalf("expected merge stack with at least two parents, got %d: %#v", len(parents), parents)
 	}
 
-	kiloHead := workspaceHeadByName(t, repoRoot, "kilo")
-	limaHead := workspaceHeadByName(t, repoRoot, "lima")
+	kiloTip := workspaceParentByName(t, repoRoot, "kilo")
+	limaTip := workspaceParentByName(t, repoRoot, "lima")
 	parentSet := map[string]struct{}{}
 	for _, p := range parents {
 		parentSet[p] = struct{}{}
 	}
-	if _, ok := parentSet[kiloHead]; !ok {
-		t.Fatalf("expected kilo head %q in parents %#v", kiloHead, parents)
+	if _, ok := parentSet[kiloTip]; !ok {
+		t.Fatalf("expected kilo content commit %q in parents %#v", kiloTip, parents)
 	}
-	if _, ok := parentSet[limaHead]; !ok {
-		t.Fatalf("expected lima head %q in parents %#v", limaHead, parents)
+	if _, ok := parentSet[limaTip]; !ok {
+		t.Fatalf("expected lima content commit %q in parents %#v", limaTip, parents)
 	}
+	assertNoEmptyAncestorsOfDefault(t, repoRoot)
 }
 
 func TestMainStackLinearErrorsWhenWorkspaceHeadsDiverge(t *testing.T) {
@@ -136,20 +138,21 @@ func createWorkspaces(t *testing.T, repoRoot string, worktreesRoot string, app s
 	return kiloPath, limaPath
 }
 
-func workspaceHeadByName(t *testing.T, repoRoot string, name string) string {
+func workspaceParentByName(t *testing.T, repoRoot string, name string) string {
 	t.Helper()
-	out := runJJ(t, repoRoot, "-R", repoRoot, "workspace", "list", "-T", "name ++ \"\\t\" ++ target.change_id().short() ++ \"\\n\"")
-	for _, line := range nonEmptyLines(out) {
-		parts := strings.Split(line, "\t")
-		if len(parts) != 2 {
-			continue
-		}
-		if strings.TrimSpace(parts[0]) == name {
-			return strings.TrimSpace(parts[1])
-		}
+	parents := nonEmptyLines(runJJ(t, repoRoot, "-R", repoRoot, "log", "-r", "parents("+name+"@)", "--no-graph", "-T", "change_id.short() ++ \"\\n\""))
+	if len(parents) != 1 {
+		t.Fatalf("expected one parent for workspace %q, got %#v", name, parents)
 	}
-	t.Fatalf("workspace %q not found in workspace list output %q", name, out)
-	return ""
+	return parents[0]
+}
+
+func assertNoEmptyAncestorsOfDefault(t *testing.T, repoRoot string) {
+	t.Helper()
+	emptyAncestors := nonEmptyLines(runJJ(t, repoRoot, "-R", repoRoot, "log", "-r", "empty() & mutable() & ::default@ & ~default@", "--no-graph", "-T", "change_id.short() ++ \"\\n\""))
+	if len(emptyAncestors) != 0 {
+		t.Fatalf("expected stack to abandon empty ancestors of default@, got %#v", emptyAncestors)
+	}
 }
 
 func nonEmptyLines(out string) []string {
