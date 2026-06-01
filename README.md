@@ -12,7 +12,7 @@
 - `jjw list` - Print workspace paths for the current repo
 - `jjw select` - Interactively pick a workspace path
 - `jjw tidy` - Auto-remove defunct empty dirs, then open interactive multi-select (arrows + space + enter) for optional non-default workspace deletes
-- `jjw cd [name]` - Print selected path, or create-and-print when `name` is provided
+- `jjw cd [name]` - Print selected existing workspace path (use `jjw create [name]` to create)
 - `jjw main` - Print path for main workspace (`default`)
 - `jjw stack` - Run `jj st` across all repo workspaces, then rebase `default` onto all others (`--workspace` to override, defaults to `default`, `--rebase-mode auto|branch|revision`, `--stack-shape auto|linear|merge`, `--conflict-strategy off|prefer-clean`)
 

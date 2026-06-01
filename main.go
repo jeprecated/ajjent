@@ -51,6 +51,7 @@ type state struct {
 type workspaceRef struct {
 	Name         string
 	TargetChange string
+	Root         string
 }
 
 const (
@@ -341,7 +342,7 @@ func runList(args []string) error {
 		if !includeAll && ref.Name == currentName {
 			continue
 		}
-		fmt.Fprintln(stdoutWriter, workspacePathForName(repoRoot, cfg.WorktreesRoot, app, ref.Name, currentName))
+		fmt.Fprintln(stdoutWriter, workspacePathForRef(repoRoot, cfg.WorktreesRoot, app, ref, currentName))
 	}
 	return nil
 }
@@ -379,26 +380,96 @@ func runCd(args []string) error {
 	if hasHelpFlag(args) {
 		fs := flag.NewFlagSet("cd", flag.ContinueOnError)
 		var repoRootOverride, appOverride, rootOverride, nameOverride string
-		var includeAll, skipEnvrc, skipDirenvAllow bool
+		var includeAll bool
 		fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
 		fs.StringVar(&appOverride, "app", "", "app override")
 		fs.StringVar(&rootOverride, "worktrees-root", "", "worktrees root override")
 		fs.StringVar(&nameOverride, "name", "", "workspace name override")
 		fs.BoolVar(&includeAll, "all", false, "include current workspace when selecting")
-		fs.BoolVar(&skipEnvrc, "no-envrc", false, "do not create .envrc when creating")
-		fs.BoolVar(&skipDirenvAllow, "no-direnv-allow", false, "do not run direnv allow when creating")
-		printCommandUsage(stdoutWriter, fs, "jjw cd [name] [options]", "Print an existing workspace path, or create-and-print when a name is provided.")
+		printCommandUsage(stdoutWriter, fs, "jjw cd [name] [options]", "Print an existing workspace path. Use `jjw create [name]` to create a workspace.")
 		return nil
 	}
 
-	_, positionals, hasNameFlag, err := parseCreateArgs(args)
+	normalizedArgs, positionals, hasNameFlag, err := parseCreateArgs(args)
 	if err != nil {
 		return err
 	}
 	if len(positionals) > 0 || hasNameFlag {
-		return runCreate(args)
+		path, requestedName, found, findErr := existingNamedWorkspacePath(normalizedArgs)
+		if findErr != nil {
+			return findErr
+		}
+		if found {
+			fmt.Fprintln(stdoutWriter, path)
+			return nil
+		}
+		return fmt.Errorf("workspace %q not found; use `jjw create %s` to create it", requestedName, requestedName)
 	}
+
 	return runSelect(args)
+}
+
+func existingNamedWorkspacePath(args []string) (string, string, bool, error) {
+	fs := flag.NewFlagSet("cd", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var repoRootOverride, appOverride, rootOverride, nameOverride string
+	var includeAll bool
+	fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
+	fs.StringVar(&appOverride, "app", "", "app override")
+	fs.StringVar(&rootOverride, "worktrees-root", "", "worktrees root override")
+	fs.StringVar(&nameOverride, "name", "", "workspace name override")
+	fs.BoolVar(&includeAll, "all", false, "include current workspace when selecting")
+	if err := fs.Parse(args); err != nil {
+		return "", "", false, err
+	}
+
+	positionals := fs.Args()
+	if nameOverride != "" && len(positionals) == 1 {
+		return "", "", false, errors.New("provide either positional name or --name, not both")
+	}
+	name := strings.TrimSpace(nameOverride)
+	if name == "" && len(positionals) == 1 {
+		name = strings.TrimSpace(positionals[0])
+	}
+	if name == "" {
+		return "", name, false, nil
+	}
+
+	repoRoot, err := resolveRepoRoot(repoRootOverride)
+	if err != nil {
+		return "", name, false, err
+	}
+	cfg, err := loadConfig(repoRoot)
+	if err != nil {
+		return "", name, false, err
+	}
+	if rootOverride != "" {
+		cfg.WorktreesRoot = expandPath(rootOverride)
+	}
+	if err := requireWorktreesRoot(cfg.WorktreesRoot); err != nil {
+		return "", name, false, err
+	}
+
+	app := deriveApp(repoRoot, appOverride)
+	refs, err := listWorkspaceRefs(repoRoot)
+	if err != nil {
+		return "", name, false, err
+	}
+	currentName := ""
+	if detected, detectErr := currentWorkspaceName(repoRoot, refs); detectErr == nil {
+		currentName = detected
+	}
+	for _, ref := range refs {
+		if ref.Name != name {
+			continue
+		}
+		path := workspacePathForRef(repoRoot, cfg.WorktreesRoot, app, ref, currentName)
+		if st, statErr := os.Stat(path); statErr == nil && st.IsDir() {
+			return path, name, true, nil
+		}
+		return "", name, false, fmt.Errorf("workspace %q path not found: %s", name, path)
+	}
+	return "", name, false, nil
 }
 
 func runMain(args []string) error {
@@ -1167,13 +1238,20 @@ func listExistingWorkspacePaths(args []string) ([]string, error) {
 		if !includeAll && ref.Name == currentName {
 			continue
 		}
-		p := workspacePathForName(repoRoot, cfg.WorktreesRoot, app, ref.Name, currentName)
+		p := workspacePathForRef(repoRoot, cfg.WorktreesRoot, app, ref, currentName)
 		if st, statErr := os.Stat(p); statErr == nil && st.IsDir() {
 			paths = append(paths, p)
 		}
 	}
 	sort.Strings(paths)
 	return paths, nil
+}
+
+func workspacePathForRef(repoRoot string, worktreesRoot string, app string, ref workspaceRef, currentName string) string {
+	if strings.TrimSpace(ref.Root) != "" {
+		return filepath.Clean(ref.Root)
+	}
+	return workspacePathForName(repoRoot, worktreesRoot, app, ref.Name, currentName)
 }
 
 func workspacePathForName(repoRoot string, worktreesRoot string, app string, name string, currentName string) string {
@@ -1275,7 +1353,7 @@ func listWorkspaceNames(repoRoot string) ([]string, error) {
 }
 
 func listWorkspaceRefs(repoRoot string) ([]workspaceRef, error) {
-	out, err := commandCaptureFn("jj", "-R", repoRoot, "workspace", "list", "-T", "name ++ \"\\t\" ++ target.change_id().short() ++ \"\\n\"")
+	out, err := commandCaptureFn("jj", "-R", repoRoot, "workspace", "list", "-T", "name ++ \"\\t\" ++ target.change_id().short() ++ \"\\t\" ++ root ++ \"\\n\"")
 	if err != nil {
 		return nil, err
 	}
@@ -1291,10 +1369,14 @@ func listWorkspaceRefs(repoRoot string) ([]workspaceRef, error) {
 			refs = append(refs, workspaceRef{Name: strings.TrimSpace(parts[0]), TargetChange: ""})
 			continue
 		}
-		if len(parts) != 2 {
+		if len(parts) == 2 {
+			refs = append(refs, workspaceRef{Name: strings.TrimSpace(parts[0]), TargetChange: strings.TrimSpace(parts[1])})
 			continue
 		}
-		refs = append(refs, workspaceRef{Name: strings.TrimSpace(parts[0]), TargetChange: strings.TrimSpace(parts[1])})
+		if len(parts) == 3 {
+			refs = append(refs, workspaceRef{Name: strings.TrimSpace(parts[0]), TargetChange: strings.TrimSpace(parts[1]), Root: strings.TrimSpace(parts[2])})
+			continue
+		}
 	}
 	sort.Slice(refs, func(i, j int) bool {
 		return refs[i].Name < refs[j].Name
@@ -1303,6 +1385,13 @@ func listWorkspaceRefs(repoRoot string) ([]workspaceRef, error) {
 }
 
 func currentWorkspaceName(repoRoot string, refs []workspaceRef) (string, error) {
+	cleanRepoRoot := filepath.Clean(repoRoot)
+	for _, ref := range refs {
+		if strings.TrimSpace(ref.Root) != "" && filepath.Clean(ref.Root) == cleanRepoRoot {
+			return ref.Name, nil
+		}
+	}
+
 	out, err := commandCaptureFn("jj", "-R", repoRoot, "log", "-r", "@", "--no-graph", "-T", "change_id.short() ++ \"\\n\"")
 	if err != nil {
 		return "", err

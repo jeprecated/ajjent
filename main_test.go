@@ -567,6 +567,40 @@ exit 2
 	}
 }
 
+func TestRunListOmitsCurrentWhenOnlyCurrentExists(t *testing.T) {
+	repoRoot := t.TempDir()
+	worktreesRoot := filepath.Join(t.TempDir(), "worktrees")
+	xdg := t.TempDir()
+
+	if err := os.MkdirAll(filepath.Join(xdg, "jjw"), 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(xdg, "jjw", "config.yaml"), []byte("worktrees_root: "+worktreesRoot+"\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	origCapture := commandCaptureFn
+	defer func() { commandCaptureFn = origCapture }()
+	commandCaptureFn = func(name string, args ...string) (string, error) {
+		if len(args) >= 3 && args[0] == "-R" && args[2] == "workspace" {
+			return "default\tabc111\t" + repoRoot + "\n", nil
+		}
+		return "", nil
+	}
+
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+
+	output, err := captureStdout(func() error {
+		return runList([]string{"--repo", repoRoot, "--app", "appx"})
+	})
+	if err != nil {
+		t.Fatalf("runList failed: %v", err)
+	}
+	if strings.TrimSpace(output) != "" {
+		t.Fatalf("expected no listed workspaces, got %q", strings.TrimSpace(output))
+	}
+}
+
 func TestRunListSkipsCurrentWorkspaceByDefault(t *testing.T) {
 	repoRoot := t.TempDir()
 	worktreesRoot := filepath.Join(t.TempDir(), "worktrees")
@@ -1128,7 +1162,131 @@ func TestRunCdDelegatesToSelect(t *testing.T) {
 	}
 }
 
-func TestRunCdWithNameCreatesWorkspacePath(t *testing.T) {
+func TestRunCdWithoutExistingWorkspaceDoesNotCreate(t *testing.T) {
+	repoRoot := t.TempDir()
+	worktreesRoot := filepath.Join(t.TempDir(), "worktrees")
+	app := "myapp"
+	xdg := t.TempDir()
+
+	if err := os.MkdirAll(filepath.Join(xdg, "jjw"), 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	cfg := []byte("worktrees_root: " + worktreesRoot + "\nname_strategy: first-unused\nname_list:\n  - alpha\n")
+	if err := os.WriteFile(filepath.Join(xdg, "jjw", "config.yaml"), cfg, 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	origCapture := commandCaptureFn
+	defer func() { commandCaptureFn = origCapture }()
+	commandCaptureFn = func(name string, args ...string) (string, error) {
+		if len(args) >= 3 && args[0] == "-R" && args[2] == "workspace" {
+			return "default\tabc111\t" + repoRoot + "\n", nil
+		}
+		return "", nil
+	}
+
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+
+	_, err := captureStdout(func() error {
+		return runCd([]string{"--repo", repoRoot, "--app", app})
+	})
+	if err == nil || !strings.Contains(err.Error(), "no workspace directories found") {
+		t.Fatalf("expected no workspace directories error, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(worktreesRoot, app, "alpha")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected alpha not to be created, stat err: %v", err)
+	}
+}
+
+func TestRunCdWithExistingNamePrintsWorkspacePath(t *testing.T) {
+	repoRoot := t.TempDir()
+	worktreesRoot := filepath.Join(t.TempDir(), "worktrees")
+	app := "myapp"
+	alphaPath := filepath.Join(worktreesRoot, app, "alpha")
+	if err := os.MkdirAll(alphaPath, 0o755); err != nil {
+		t.Fatalf("mkdir alpha workspace: %v", err)
+	}
+
+	xdg := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(xdg, "jjw"), 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(xdg, "jjw", "config.yaml"), []byte("worktrees_root: "+worktreesRoot+"\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	origCapture := commandCaptureFn
+	origRun := commandToStderrFn
+	defer func() {
+		commandCaptureFn = origCapture
+		commandToStderrFn = origRun
+	}()
+	commandCaptureFn = func(name string, args ...string) (string, error) {
+		if len(args) >= 3 && args[0] == "-R" && args[2] == "workspace" {
+			return "default\tabc111\t" + repoRoot + "\nalpha\tdef222\t" + alphaPath + "\n", nil
+		}
+		return "", nil
+	}
+	commandToStderrFn = func(name string, args ...string) error {
+		return errors.New("unexpected create")
+	}
+
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+
+	out, err := captureStdout(func() error {
+		return runCd([]string{"--repo", repoRoot, "--app", app, "alpha"})
+	})
+	if err != nil {
+		t.Fatalf("runCd failed: %v", err)
+	}
+	if strings.TrimSpace(out) != alphaPath {
+		t.Fatalf("expected existing path %q, got %q", alphaPath, strings.TrimSpace(out))
+	}
+}
+
+func TestRunCdWithMissingNameDoesNotCreateWorkspace(t *testing.T) {
+	repoRoot := t.TempDir()
+	worktreesRoot := filepath.Join(t.TempDir(), "worktrees")
+	app := "myapp"
+	xdg := t.TempDir()
+
+	if err := os.MkdirAll(filepath.Join(xdg, "jjw"), 0o755); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(xdg, "jjw", "config.yaml"), []byte("worktrees_root: "+worktreesRoot+"\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	origCapture := commandCaptureFn
+	origRun := commandToStderrFn
+	defer func() {
+		commandCaptureFn = origCapture
+		commandToStderrFn = origRun
+	}()
+	commandCaptureFn = func(name string, args ...string) (string, error) {
+		if len(args) >= 3 && args[0] == "-R" && args[2] == "workspace" {
+			return "default\tabc111\t" + repoRoot + "\n", nil
+		}
+		return "", nil
+	}
+	commandToStderrFn = func(name string, args ...string) error {
+		return errors.New("unexpected create")
+	}
+
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+
+	_, err := captureStdout(func() error {
+		return runCd([]string{"--repo", repoRoot, "--app", app, "alpha"})
+	})
+	if err == nil || !strings.Contains(err.Error(), "workspace \"alpha\" not found") {
+		t.Fatalf("expected missing workspace error, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(worktreesRoot, app, "alpha")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected alpha not to be created, stat err: %v", err)
+	}
+}
+
+func TestRunCreateWithTrailingNameCreatesWorkspacePath(t *testing.T) {
 	repoRoot := t.TempDir()
 	worktreesRoot := filepath.Join(t.TempDir(), "worktrees")
 	app := "nixfiles"
@@ -1170,10 +1328,10 @@ exit 2
 	t.Setenv("XDG_CONFIG_HOME", xdg)
 
 	out, err := captureStdout(func() error {
-		return runCd([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "feature-2", "--no-direnv-allow"})
+		return runCreate([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "feature-2", "--no-direnv-allow"})
 	})
 	if err != nil {
-		t.Fatalf("runCd failed: %v", err)
+		t.Fatalf("runCreate failed: %v", err)
 	}
 
 	created := strings.TrimSpace(out)
@@ -1186,7 +1344,7 @@ exit 2
 	}
 }
 
-func TestRunCdWithNameFlagCreatesWorkspacePath(t *testing.T) {
+func TestRunCreateWithNameFlagCreatesWorkspacePath(t *testing.T) {
 	repoRoot := t.TempDir()
 	worktreesRoot := filepath.Join(t.TempDir(), "worktrees")
 	app := "nixfiles"
@@ -1228,10 +1386,10 @@ exit 2
 	t.Setenv("XDG_CONFIG_HOME", xdg)
 
 	out, err := captureStdout(func() error {
-		return runCd([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--name", "feature-3", "--no-direnv-allow"})
+		return runCreate([]string{"--repo", repoRoot, "--app", app, "--worktrees-root", worktreesRoot, "--name", "feature-3", "--no-direnv-allow"})
 	})
 	if err != nil {
-		t.Fatalf("runCd failed: %v", err)
+		t.Fatalf("runCreate failed: %v", err)
 	}
 
 	created := strings.TrimSpace(out)
