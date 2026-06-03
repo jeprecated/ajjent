@@ -14,12 +14,12 @@ Canonical layout for Workspaces created by `jjw`:
 
 ### Setup
 
-- `jjw init [--local] [--force] [--workspaces-root PATH] [--project PROJECT]` — create config. Global by default; `--local` writes `<repo>/.jjw/config.yaml`.
+- `jjw init --workspaces-root PATH [--local] [--force] [--project PROJECT]` — create config. Global by default; `--local` writes `<repo>/.jjw/config.yaml`.
 
 ### Workspace lifecycle
 
-- `jjw create [handle]` — create a Workspace and print its path. Without a handle, picks one from `workspace_handles`.
-- `jjw open [handle]` — print an existing Workspace path. With no handle, opens the built-in selector. Opening never creates.
+- `jjw create [handle]` — create a Workspace and print its path. Without a handle, picks one from `workspace_handles`. Materializes configured assimilated folder symlinks.
+- `jjw open [handle]` — print an existing Workspace path. With no handle, opens the built-in selector. Opening never creates. It also repairs configured assimilated folder symlinks.
 - `jjw close [handle...]` — close Workspaces and print the Main Workspace path for shell wrappers.
 - `jjw close --all` — close all Closable Workspaces.
 - `jjw close --force [--yes] ...` — Forced Closing: abandon unique mutable changes not reachable from Main or any other Workspace, then close.
@@ -71,10 +71,19 @@ workspace_handles:
   - charlie
 handle_strategy: first-unused
 main_workspace: default
+assimilated_folders:
+  - scratch
+projects:
+  nixfiles:
+    assimilated_folders:
+      - .local-notes
 stack:
   rebase_mode: auto
-  stack_shape: auto
+  shape: auto
   conflict_strategy: prefer-clean
+create:
+  envrc: false
+  direnv_allow: false
 ```
 
 Supported handle strategies:
@@ -84,11 +93,40 @@ Supported handle strategies:
 
 Config parsing rejects unknown keys. Legacy keys such as `worktrees_root`, `name_list`, `name_strategy`, `dev_root`, and `main_stack` are not accepted.
 
+### Assimilated folders
+
+`assimilated_folders` declares repo-relative folders whose contents should be shared by symlink across Workspaces. This is intended for git-ignored local development folders such as `scratch`.
+
+```yaml
+assimilated_folders:
+  - scratch
+projects:
+  nixfiles:
+    assimilated_folders:
+      - .local-notes
+```
+
+Global entries apply to every Project. `projects.<project>.assimilated_folders` adds Project-specific entries. Entries must be relative folder paths without `..` traversal. When the source folder exists in the Main Workspace, `jjw create` and `jjw open` create a symlink at the same relative path in the target Workspace. Missing sources are skipped. Existing Workspace content is never overwritten.
+
+See `docs/assimilated-folders.md` for an agent-friendly setup guide.
+
 ## Shell integration
 
-The binary reserves stdout for path/data protocols. Human prompts and progress go to stderr.
+The binary reserves stdout for path/data protocols. Human prompts and progress go to stderr. The raw binary can only print paths; it cannot change the parent shell's directory by itself.
 
-Home Manager shell integration wraps `jjw` in interactive bash/zsh so navigation commands can change the caller's directory:
+To make navigation commands `cd`, use the Home Manager module or source the standalone wrapper for your shell. From this checkout:
+
+```zsh
+source /path/to/jj-workspace-helper/shell/jjw.zsh
+```
+
+```bash
+source /path/to/jj-workspace-helper/shell/jjw.bash
+```
+
+The Nix package also installs these snippets under `$out/share/jjw/shell/`, so a Nix profile install can source the store path for the installed package.
+
+The wrapper makes these commands change the caller's directory:
 
 - `jjw create ...`
 - `jjw open ...`
@@ -137,10 +175,20 @@ Home Manager example:
               workspace_handles = [ "kilo" "lima" "mike" ];
               handle_strategy = "first-unused";
               main_workspace = "default";
+              assimilated_folders = [ "scratch" ];
+              projects = {
+                nixfiles = {
+                  assimilated_folders = [ ".local-notes" ];
+                };
+              };
               stack = {
                 rebase_mode = "auto";
-                stack_shape = "auto";
+                shape = "auto";
                 conflict_strategy = "prefer-clean";
+              };
+              create = {
+                envrc = false;
+                direnv_allow = false;
               };
             };
           };
@@ -160,3 +208,5 @@ devbox run build
 devbox run test
 devbox run install-local
 ```
+
+`install-local` writes `~/.local/bin/jjw` and prints the installed binary's help. If your shell still runs an older `jjw`, put `~/.local/bin` earlier in `PATH` and clear the shell command cache with `hash -r` in bash or `rehash` in zsh.

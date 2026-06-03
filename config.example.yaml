@@ -1,7 +1,7 @@
-dev_root: ""
-worktrees_root: ""
-name_strategy: first-unused
-name_list:
+workspaces_root: "~/Development/workspaces"
+project: "example-project"
+handle_strategy: first-unused
+workspace_handles:
   - alpha
   - bravo
   - charlie
@@ -28,8 +28,17 @@ name_list:
   - xray
   - yankee
   - zulu
-main_stack:
-  default_workspace: default
+main_workspace: default
+assimilated_folders:
+  - scratch
+projects:
+  example-project:
+    assimilated_folders:
+      - .local-notes
+stack:
   rebase_mode: auto
-  stack_shape: auto
+  shape: auto
   conflict_strategy: prefer-clean
+create:
+  envrc: false
+  direnv_allow: false

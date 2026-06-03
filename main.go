@@ -11,10 +11,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
-	"strconv"
 	"strings"
+	"unicode"
 
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
 )
@@ -23,25 +26,36 @@ var (
 	commandCaptureFn            = runCommandCapture
 	commandToStderrFn           = runCommandToStderr
 	lookPathFn                  = exec.LookPath
-	runFzfFn                    = runFzf
 	stdinReader       io.Reader = os.Stdin
 	stdoutWriter      io.Writer = os.Stdout
 	stderrWriter      io.Writer = os.Stderr
 )
 
 type config struct {
-	DevRoot       string          `yaml:"dev_root"`
-	WorktreesRoot string          `yaml:"worktrees_root"`
-	NameStrategy  string          `yaml:"name_strategy"`
-	NameList      []string        `yaml:"name_list"`
-	MainStack     mainStackConfig `yaml:"main_stack"`
+	WorkspacesRoot     string                   `yaml:"workspaces_root"`
+	Project            string                   `yaml:"project"`
+	HandleStrategy     string                   `yaml:"handle_strategy"`
+	WorkspaceHandles   []string                 `yaml:"workspace_handles"`
+	MainWorkspace      string                   `yaml:"main_workspace"`
+	AssimilatedFolders []string                 `yaml:"assimilated_folders"`
+	Projects           map[string]projectConfig `yaml:"projects"`
+	Stack              stackConfig              `yaml:"stack"`
+	Create             createSetup              `yaml:"create"`
 }
 
-type mainStackConfig struct {
-	DefaultWorkspace string `yaml:"default_workspace"`
+type projectConfig struct {
+	AssimilatedFolders []string `yaml:"assimilated_folders"`
+}
+
+type stackConfig struct {
 	RebaseMode       string `yaml:"rebase_mode"`
-	StackShape       string `yaml:"stack_shape"`
+	Shape            string `yaml:"shape"`
 	ConflictStrategy string `yaml:"conflict_strategy"`
+}
+
+type createSetup struct {
+	Envrc       bool `yaml:"envrc"`
+	DirenvAllow bool `yaml:"direnv_allow"`
 }
 
 type state struct {
@@ -49,51 +63,39 @@ type state struct {
 }
 
 type workspaceRef struct {
-	Name         string
+	Handle       string
 	TargetChange string
 	Root         string
 }
 
+type workspaceInfo struct {
+	Ref      workspaceRef
+	Path     string
+	Missing  bool
+	Empty    bool
+	Stacked  bool
+	Conflict bool
+	Current  bool
+	Main     bool
+	External bool
+}
+
 const (
 	strategyFirstUnused = "first-unused"
-	strategyStateful    = "stateful"
+	strategyNextUnused  = "next-unused"
 )
 
-var defaultNameList = []string{
-	"alpha",
-	"bravo",
-	"charlie",
-	"delta",
-	"echo",
-	"foxtrot",
-	"golf",
-	"hotel",
-	"india",
-	"juliett",
-	"kilo",
-	"lima",
-	"mike",
-	"november",
-	"oscar",
-	"papa",
-	"quebec",
-	"romeo",
-	"sierra",
-	"tango",
-	"uniform",
-	"victor",
-	"whiskey",
-	"xray",
-	"yankee",
-	"zulu",
+var defaultWorkspaceHandles = []string{
+	"alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india", "juliett", "kilo", "lima", "mike", "november", "oscar", "papa", "quebec", "romeo", "sierra", "tango", "uniform", "victor", "whiskey", "xray", "yankee", "zulu",
 }
+
+var slugRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 func main() {
 	if len(os.Args) < 2 {
 		printUsage(stderrWriter)
 		os.Exit(2)
 	}
-
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintf(stderrWriter, "jjw: %v\n", err)
 		os.Exit(1)
@@ -104,22 +106,23 @@ func run(args []string) error {
 	if len(args) == 0 {
 		return errors.New("missing command")
 	}
-
 	switch args[0] {
+	case "init":
+		return runInit(args[1:])
 	case "create":
 		return runCreate(args[1:])
+	case "open":
+		return runOpen(args[1:])
 	case "list":
 		return runList(args[1:])
-	case "select":
-		return runSelect(args[1:])
-	case "tidy":
-		return runTidy(args[1:])
-	case "cd":
-		return runCd(args[1:])
 	case "main":
 		return runMain(args[1:])
+	case "close":
+		return runClose(args[1:])
+	case "tidy":
+		return runTidy(args[1:])
 	case "stack":
-		return runMainStack(args[1:])
+		return runStack(args[1:])
 	case "help", "-h", "--help":
 		printUsage(stdoutWriter)
 		return nil
@@ -131,14 +134,21 @@ func run(args []string) error {
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage: jjw <command> [options]")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Commands:")
-	fmt.Fprintln(w, "  create [name]   Create workspace, print path")
-	fmt.Fprintln(w, "  list            List workspace paths for current repo")
-	fmt.Fprintln(w, "  select          Select workspace path interactively")
-	fmt.Fprintln(w, "  tidy            Select and remove defunct empty workspace dirs")
-	fmt.Fprintln(w, "  cd [name]       Print path for shell wrappers")
-	fmt.Fprintln(w, "  main            Print path for main workspace (default)")
-	fmt.Fprintln(w, "  stack           Run st on all workspaces, then rebase default workspace")
+	fmt.Fprintln(w, "Setup:")
+	fmt.Fprintln(w, "  init              Create jjw config")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Workspace lifecycle:")
+	fmt.Fprintln(w, "  create [handle]   Create a Workspace and print its path")
+	fmt.Fprintln(w, "  open [handle]     Print an existing Workspace path")
+	fmt.Fprintln(w, "  close [handle...] Close Workspace(s)")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Stacking:")
+	fmt.Fprintln(w, "  stack [handle...] Stack selected Workspaces into Main")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Inspect and housekeeping:")
+	fmt.Fprintln(w, "  list              List Workspaces")
+	fmt.Fprintln(w, "  main              Print the Main Workspace path")
+	fmt.Fprintln(w, "  tidy              Remove empty leftover Workspace directories")
 }
 
 func parseCommandFlags(fs *flag.FlagSet, args []string, usage string, summary string) (bool, error) {
@@ -166,6 +176,34 @@ func hasHelpFlag(args []string) bool {
 	return false
 }
 
+func normalizePositionalsLast(args []string, flagsWithValues map[string]struct{}) ([]string, error) {
+	flags := make([]string, 0, len(args))
+	positionals := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if strings.HasPrefix(arg, "--") {
+			flags = append(flags, arg)
+			if strings.Contains(arg, "=") {
+				continue
+			}
+			if _, ok := flagsWithValues[arg]; ok {
+				if i+1 >= len(args) {
+					return nil, fmt.Errorf("flag %s requires a value", arg)
+				}
+				i++
+				flags = append(flags, args[i])
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "-") {
+			flags = append(flags, arg)
+			continue
+		}
+		positionals = append(positionals, arg)
+	}
+	return append(flags, positionals...), nil
+}
+
 func printCommandUsage(w io.Writer, fs *flag.FlagSet, usage string, summary string) {
 	fmt.Fprintf(w, "Usage: %s\n", usage)
 	if strings.TrimSpace(summary) != "" {
@@ -188,526 +226,1038 @@ func printCommandUsage(w io.Writer, fs *flag.FlagSet, usage string, summary stri
 	})
 }
 
-func runCreate(args []string) error {
-	normalizedArgs, err := normalizeCreateArgs(args)
+func runInit(args []string) error {
+	fs := flag.NewFlagSet("init", flag.ContinueOnError)
+	var local, force bool
+	var repoRootOverride, workspacesRoot, project string
+	fs.BoolVar(&local, "local", false, "write repo-local .jjw/config.yaml instead of global config")
+	fs.BoolVar(&force, "force", false, "overwrite existing config")
+	fs.StringVar(&repoRootOverride, "repo", "", "repo root override for --local")
+	fs.StringVar(&workspacesRoot, "workspaces-root", "", "directory containing Project Workspace folders")
+	fs.StringVar(&project, "project", "", "Project slug for local config")
+	if handled, err := parseCommandFlags(fs, args, "jjw init [options]", "Create jjw config."); handled || err != nil {
+		return err
+	}
+	cfgPath := ""
+	if local {
+		repoRoot, err := resolveRepoRoot(repoRootOverride)
+		if err != nil {
+			return err
+		}
+		cfgPath = filepath.Join(repoRoot, ".jjw", "config.yaml")
+	} else {
+		path, ok := globalConfigPath()
+		if !ok {
+			return errors.New("could not resolve global config path")
+		}
+		cfgPath = path
+	}
+	if exists(cfgPath) && !force {
+		return fmt.Errorf("config already exists: %s (pass --force to overwrite)", cfgPath)
+	}
+	cfg := defaultConfig()
+	if strings.TrimSpace(workspacesRoot) == "" {
+		return errors.New("init requires --workspaces-root")
+	}
+	cfg.WorkspacesRoot = expandPath(workspacesRoot)
+	if strings.TrimSpace(project) != "" {
+		if err := validateSlug("project", project); err != nil {
+			return err
+		}
+		cfg.Project = strings.TrimSpace(project)
+	}
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		return err
+	}
+	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		return err
 	}
-	args = normalizedArgs
+	if err := os.WriteFile(cfgPath, data, 0o644); err != nil {
+		return fmt.Errorf("write config %s: %w", cfgPath, err)
+	}
+	fmt.Fprintln(stdoutWriter, cfgPath)
+	return nil
+}
 
-	fs := flag.NewFlagSet("create", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	var (
-		repoRootOverride string
-		appOverride      string
-		rootOverride     string
-		nameOverride     string
-		skipEnvrc        bool
-		skipDirenvAllow  bool
-	)
-	fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
-	fs.StringVar(&appOverride, "app", "", "app override")
-	fs.StringVar(&rootOverride, "worktrees-root", "", "worktrees root override")
-	fs.StringVar(&nameOverride, "name", "", "workspace name override")
-	fs.BoolVar(&skipEnvrc, "no-envrc", false, "do not create .envrc")
-	fs.BoolVar(&skipDirenvAllow, "no-direnv-allow", false, "do not run direnv allow")
-	if handled, err := parseCommandFlags(fs, args, "jjw create [name] [options]", "Create a new jj workspace and print its path."); handled || err != nil {
+func runCreate(args []string) error {
+	var err error
+	args, err = normalizePositionalsLast(args, map[string]struct{}{"--repo": {}, "--project": {}, "--workspaces-root": {}})
+	if err != nil {
 		return err
 	}
-
+	fs := flag.NewFlagSet("create", flag.ContinueOnError)
+	var repoRootOverride, projectOverride, rootOverride string
+	var envrc, direnvAllow bool
+	fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
+	fs.StringVar(&projectOverride, "project", "", "Project override")
+	fs.StringVar(&rootOverride, "workspaces-root", "", "Workspaces root override")
+	fs.BoolVar(&envrc, "envrc", false, "create .envrc in the new Workspace")
+	fs.BoolVar(&direnvAllow, "direnv-allow", false, "run direnv allow for the new Workspace")
+	if handled, err := parseCommandFlags(fs, args, "jjw create [handle] [options]", "Create a new Workspace and print its path."); handled || err != nil {
+		return err
+	}
 	positionals := fs.Args()
 	if len(positionals) > 1 {
-		return errors.New("create accepts at most one positional name")
+		return errors.New("create accepts at most one Workspace Handle")
 	}
-	if nameOverride != "" && len(positionals) == 1 {
-		return errors.New("provide either positional name or --name, not both")
-	}
-
-	repoRoot, err := resolveRepoRoot(repoRootOverride)
+	repoRoot, cfg, project, err := commandContext(repoRootOverride, projectOverride, rootOverride)
 	if err != nil {
 		return err
 	}
-
-	cfg, err := loadConfig(repoRoot)
+	handles, err := listWorkspaceHandles(repoRoot)
 	if err != nil {
 		return err
 	}
-	if rootOverride != "" {
-		cfg.WorktreesRoot = expandPath(rootOverride)
+	inUse := make(map[string]struct{}, len(handles))
+	for _, h := range handles {
+		inUse[h] = struct{}{}
 	}
-	if err := requireWorktreesRoot(cfg.WorktreesRoot); err != nil {
-		return err
-	}
-
-	app := deriveApp(repoRoot, appOverride)
-	workspaceNames, err := listWorkspaceNames(repoRoot)
-	if err != nil {
-		return err
-	}
-	nameSet := make(map[string]struct{}, len(workspaceNames))
-	for _, n := range workspaceNames {
-		nameSet[n] = struct{}{}
-	}
-
-	name := nameOverride
-	if name == "" && len(positionals) == 1 {
-		name = strings.TrimSpace(positionals[0])
-	}
-	if name == "" {
-		generated, genErr := chooseAutoName(cfg, repoRoot, nameSet)
-		if genErr != nil {
-			return genErr
+	handle := ""
+	if len(positionals) == 1 {
+		handle = strings.TrimSpace(positionals[0])
+		if err := validateWorkspaceHandle(handle); err != nil {
+			return err
 		}
-		name = generated
+		if _, ok := inUse[handle]; ok {
+			return fmt.Errorf("Workspace %q already exists; use `jjw open %s`", handle, handle)
+		}
+	} else {
+		handle, err = chooseAutoHandle(cfg, repoRoot, inUse)
+		if err != nil {
+			return err
+		}
 	}
-	if strings.TrimSpace(name) == "" {
-		return errors.New("workspace name is empty")
-	}
-
-	target := filepath.Join(cfg.WorktreesRoot, app, name)
+	target := filepath.Join(cfg.WorkspacesRoot, project, handle)
 	if exists(target) {
-		return fmt.Errorf("workspace path already exists: %s", target)
+		return fmt.Errorf("Workspace path already exists: %s", target)
 	}
-
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return fmt.Errorf("create workspace parent: %w", err)
+		return fmt.Errorf("create Workspace parent: %w", err)
 	}
-
-	if err := commandToStderrFn("jj", "-R", repoRoot, "workspace", "add", "--name", name, target); err != nil {
+	if err := commandToStderrFn("jj", "-R", repoRoot, "workspace", "add", "--name", handle, target); err != nil {
 		return err
 	}
-
-	if !skipEnvrc {
+	if envrc || cfg.Create.Envrc {
 		if err := ensureEnvrc(target); err != nil {
 			return err
 		}
 	}
-
-	if !skipDirenvAllow {
+	if err := materializeAssimilatedFolders(mainWorkspaceRoot(repoRoot), target, cfg, project); err != nil {
+		return err
+	}
+	if direnvAllow || cfg.Create.DirenvAllow {
 		if _, err := lookPathFn("direnv"); err == nil {
 			_ = commandToStderrFn("direnv", "allow", target)
 		}
 	}
-
 	fmt.Fprintln(stdoutWriter, target)
+	return nil
+}
+
+func runOpen(args []string) error {
+	var err error
+	args, err = normalizePositionalsLast(args, map[string]struct{}{"--repo": {}, "--project": {}, "--workspaces-root": {}})
+	if err != nil {
+		return err
+	}
+	fs := flag.NewFlagSet("open", flag.ContinueOnError)
+	var repoRootOverride, projectOverride, rootOverride string
+	fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
+	fs.StringVar(&projectOverride, "project", "", "Project override")
+	fs.StringVar(&rootOverride, "workspaces-root", "", "Workspaces root override")
+	if handled, err := parseCommandFlags(fs, args, "jjw open [handle] [options]", "Print an existing Workspace path."); handled || err != nil {
+		return err
+	}
+	positionals := fs.Args()
+	if len(positionals) > 1 {
+		return errors.New("open accepts at most one Workspace Handle")
+	}
+	repoRoot, cfg, project, err := commandContext(repoRootOverride, projectOverride, rootOverride)
+	if err != nil {
+		return err
+	}
+	infos, _, err := loadWorkspaceInfos(repoRoot, cfg, project)
+	if err != nil {
+		return err
+	}
+	if len(positionals) == 1 {
+		handle := strings.TrimSpace(positionals[0])
+		if err := validateWorkspaceHandle(handle); err != nil {
+			return err
+		}
+		for _, info := range infos {
+			if info.Ref.Handle == handle {
+				if info.Missing {
+					return fmt.Errorf("Workspace %q path not found: %s", handle, info.Path)
+				}
+				if err := materializeAssimilatedFolders(mainWorkspaceRoot(repoRoot), info.Path, cfg, project); err != nil {
+					return err
+				}
+				fmt.Fprintln(stdoutWriter, info.Path)
+				return nil
+			}
+		}
+		return fmt.Errorf("Workspace %q not found; use `jjw create %s` to create it", handle, handle)
+	}
+	if !canUseTUI() {
+		return errors.New("open requires a Workspace Handle when not running in a terminal")
+	}
+	items := selectorItemsForOpen(infos)
+	selected, _, err := runSelector(selectorOptions{Title: "Open Workspace", Mode: selectorSingle, Items: items})
+	if err != nil {
+		return err
+	}
+	if len(selected) == 0 {
+		return errors.New("no Workspace selected")
+	}
+	if err := materializeAssimilatedFolders(mainWorkspaceRoot(repoRoot), selected[0].Path, cfg, project); err != nil {
+		return err
+	}
+	fmt.Fprintln(stdoutWriter, selected[0].Path)
 	return nil
 }
 
 func runList(args []string) error {
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	var (
-		repoRootOverride string
-		appOverride      string
-		rootOverride     string
-		includeAll       bool
-	)
+	var repoRootOverride, projectOverride, rootOverride string
+	var pathsOnly bool
 	fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
-	fs.StringVar(&appOverride, "app", "", "app override")
-	fs.StringVar(&rootOverride, "worktrees-root", "", "worktrees root override")
-	fs.BoolVar(&includeAll, "all", false, "include current workspace")
-	if handled, err := parseCommandFlags(fs, args, "jjw list [options]", "List workspace paths for the current repository."); handled || err != nil {
+	fs.StringVar(&projectOverride, "project", "", "Project override")
+	fs.StringVar(&rootOverride, "workspaces-root", "", "Workspaces root override")
+	fs.BoolVar(&pathsOnly, "paths", false, "print Workspace paths only")
+	if handled, err := parseCommandFlags(fs, args, "jjw list [options]", "List Workspaces."); handled || err != nil {
 		return err
 	}
-
-	repoRoot, err := resolveRepoRoot(repoRootOverride)
+	repoRoot, cfg, project, err := commandContext(repoRootOverride, projectOverride, rootOverride)
 	if err != nil {
 		return err
 	}
-	cfg, err := loadConfig(repoRoot)
+	infos, _, err := loadWorkspaceInfos(repoRoot, cfg, project)
 	if err != nil {
 		return err
 	}
-	if rootOverride != "" {
-		cfg.WorktreesRoot = expandPath(rootOverride)
-	}
-	if err := requireWorktreesRoot(cfg.WorktreesRoot); err != nil {
-		return err
-	}
-
-	app := deriveApp(repoRoot, appOverride)
-	refs, err := listWorkspaceRefs(repoRoot)
-	if err != nil {
-		return err
-	}
-
-	currentName := ""
-	if !includeAll {
-		if detected, detectErr := currentWorkspaceName(repoRoot, refs); detectErr == nil {
-			currentName = detected
-		}
-	}
-
-	for _, ref := range refs {
-		if !includeAll && ref.Name == currentName {
+	for _, info := range infos {
+		if pathsOnly {
+			fmt.Fprintln(stdoutWriter, info.Path)
 			continue
 		}
-		fmt.Fprintln(stdoutWriter, workspacePathForRef(repoRoot, cfg.WorktreesRoot, app, ref, currentName))
+		fmt.Fprintf(stdoutWriter, "%s\t%s\t%s\t%s\n", info.Ref.Handle, strings.Join(markers(info), ","), statusLabel(info), info.Path)
 	}
 	return nil
-}
-
-func runSelect(args []string) error {
-	if hasHelpFlag(args) {
-		fs := flag.NewFlagSet("select", flag.ContinueOnError)
-		var repoRootOverride, appOverride, rootOverride string
-		var includeAll bool
-		fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
-		fs.StringVar(&appOverride, "app", "", "app override")
-		fs.StringVar(&rootOverride, "worktrees-root", "", "worktrees root override")
-		fs.BoolVar(&includeAll, "all", false, "include current workspace")
-		printCommandUsage(stdoutWriter, fs, "jjw select [options]", "Interactively choose an existing workspace path.")
-		return nil
-	}
-
-	paths, err := listExistingWorkspacePaths(args)
-	if err != nil {
-		return err
-	}
-	if len(paths) == 0 {
-		return errors.New("no workspace directories found")
-	}
-
-	choice, err := selectOne(paths)
-	if err != nil {
-		return err
-	}
-	fmt.Fprintln(stdoutWriter, choice)
-	return nil
-}
-
-func runCd(args []string) error {
-	if hasHelpFlag(args) {
-		fs := flag.NewFlagSet("cd", flag.ContinueOnError)
-		var repoRootOverride, appOverride, rootOverride, nameOverride string
-		var includeAll bool
-		fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
-		fs.StringVar(&appOverride, "app", "", "app override")
-		fs.StringVar(&rootOverride, "worktrees-root", "", "worktrees root override")
-		fs.StringVar(&nameOverride, "name", "", "workspace name override")
-		fs.BoolVar(&includeAll, "all", false, "include current workspace when selecting")
-		printCommandUsage(stdoutWriter, fs, "jjw cd [name] [options]", "Print an existing workspace path. Use `jjw create [name]` to create a workspace.")
-		return nil
-	}
-
-	normalizedArgs, positionals, hasNameFlag, err := parseCreateArgs(args)
-	if err != nil {
-		return err
-	}
-	if len(positionals) > 0 || hasNameFlag {
-		path, requestedName, found, findErr := existingNamedWorkspacePath(normalizedArgs)
-		if findErr != nil {
-			return findErr
-		}
-		if found {
-			fmt.Fprintln(stdoutWriter, path)
-			return nil
-		}
-		return fmt.Errorf("workspace %q not found; use `jjw create %s` to create it", requestedName, requestedName)
-	}
-
-	return runSelect(args)
-}
-
-func existingNamedWorkspacePath(args []string) (string, string, bool, error) {
-	fs := flag.NewFlagSet("cd", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	var repoRootOverride, appOverride, rootOverride, nameOverride string
-	var includeAll bool
-	fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
-	fs.StringVar(&appOverride, "app", "", "app override")
-	fs.StringVar(&rootOverride, "worktrees-root", "", "worktrees root override")
-	fs.StringVar(&nameOverride, "name", "", "workspace name override")
-	fs.BoolVar(&includeAll, "all", false, "include current workspace when selecting")
-	if err := fs.Parse(args); err != nil {
-		return "", "", false, err
-	}
-
-	positionals := fs.Args()
-	if nameOverride != "" && len(positionals) == 1 {
-		return "", "", false, errors.New("provide either positional name or --name, not both")
-	}
-	name := strings.TrimSpace(nameOverride)
-	if name == "" && len(positionals) == 1 {
-		name = strings.TrimSpace(positionals[0])
-	}
-	if name == "" {
-		return "", name, false, nil
-	}
-
-	repoRoot, err := resolveRepoRoot(repoRootOverride)
-	if err != nil {
-		return "", name, false, err
-	}
-	cfg, err := loadConfig(repoRoot)
-	if err != nil {
-		return "", name, false, err
-	}
-	if rootOverride != "" {
-		cfg.WorktreesRoot = expandPath(rootOverride)
-	}
-	if err := requireWorktreesRoot(cfg.WorktreesRoot); err != nil {
-		return "", name, false, err
-	}
-
-	app := deriveApp(repoRoot, appOverride)
-	refs, err := listWorkspaceRefs(repoRoot)
-	if err != nil {
-		return "", name, false, err
-	}
-	currentName := ""
-	if detected, detectErr := currentWorkspaceName(repoRoot, refs); detectErr == nil {
-		currentName = detected
-	}
-	for _, ref := range refs {
-		if ref.Name != name {
-			continue
-		}
-		path := workspacePathForRef(repoRoot, cfg.WorktreesRoot, app, ref, currentName)
-		if st, statErr := os.Stat(path); statErr == nil && st.IsDir() {
-			return path, name, true, nil
-		}
-		return "", name, false, fmt.Errorf("workspace %q path not found: %s", name, path)
-	}
-	return "", name, false, nil
 }
 
 func runMain(args []string) error {
 	fs := flag.NewFlagSet("main", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	var (
-		repoRootOverride string
-		appOverride      string
-		rootOverride     string
-		mainName         string
-	)
+	var repoRootOverride, projectOverride, rootOverride string
 	fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
-	fs.StringVar(&appOverride, "app", "", "app override")
-	fs.StringVar(&rootOverride, "worktrees-root", "", "worktrees root override")
-	fs.StringVar(&mainName, "name", "default", "main workspace name")
-	if handled, err := parseCommandFlags(fs, args, "jjw main [options]", "Print the path for the main workspace."); handled || err != nil {
+	fs.StringVar(&projectOverride, "project", "", "Project override")
+	fs.StringVar(&rootOverride, "workspaces-root", "", "Workspaces root override")
+	if handled, err := parseCommandFlags(fs, args, "jjw main [options]", "Print the Main Workspace path."); handled || err != nil {
 		return err
 	}
-
-	repoRoot, err := resolveRepoRoot(repoRootOverride)
+	repoRoot, cfg, project, err := commandContext(repoRootOverride, projectOverride, rootOverride)
 	if err != nil {
 		return err
 	}
-	cfg, err := loadConfig(repoRoot)
+	infos, _, err := loadWorkspaceInfos(repoRoot, cfg, project)
 	if err != nil {
 		return err
 	}
-	if rootOverride != "" {
-		cfg.WorktreesRoot = expandPath(rootOverride)
+	for _, info := range infos {
+		if info.Main {
+			if info.Missing {
+				return fmt.Errorf("Main Workspace path missing: %s", info.Path)
+			}
+			fmt.Fprintln(stdoutWriter, info.Path)
+			return nil
+		}
 	}
-	if err := requireWorktreesRoot(cfg.WorktreesRoot); err != nil {
+	return fmt.Errorf("Main Workspace %q not found", cfg.MainWorkspace)
+}
+
+func runTidy(args []string) error {
+	fs := flag.NewFlagSet("tidy", flag.ContinueOnError)
+	var repoRootOverride, projectOverride, rootOverride string
+	fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
+	fs.StringVar(&projectOverride, "project", "", "Project override")
+	fs.StringVar(&rootOverride, "workspaces-root", "", "Workspaces root override")
+	if handled, err := parseCommandFlags(fs, args, "jjw tidy [options]", "Remove empty leftover Workspace directories."); handled || err != nil {
 		return err
 	}
-	app := deriveApp(repoRoot, appOverride)
-
+	repoRoot, cfg, project, err := commandContext(repoRootOverride, projectOverride, rootOverride)
+	if err != nil {
+		return err
+	}
 	refs, err := listWorkspaceRefs(repoRoot)
 	if err != nil {
 		return err
 	}
-	found := false
+	active := make(map[string]struct{}, len(refs))
 	for _, ref := range refs {
-		if ref.Name == mainName {
-			found = true
-			break
+		active[ref.Handle] = struct{}{}
+	}
+	projectRoot := filepath.Join(cfg.WorkspacesRoot, project)
+	entries, err := os.ReadDir(projectRoot)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(stderrWriter, "No Project Workspace directory found at %s.\n", projectRoot)
+			return nil
 		}
+		return err
 	}
-	if !found {
-		return fmt.Errorf("main workspace %q not found", mainName)
+	deleted := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		handle := e.Name()
+		if _, ok := active[handle]; ok {
+			continue
+		}
+		full := filepath.Join(projectRoot, handle)
+		empty, err := isLiteralEmptyDir(full)
+		if err != nil {
+			return err
+		}
+		if !empty {
+			fmt.Fprintf(stderrWriter, "leftover not empty: %s\n", full)
+			continue
+		}
+		if err := os.Remove(full); err != nil {
+			return fmt.Errorf("remove %s: %w", full, err)
+		}
+		fmt.Fprintln(stdoutWriter, full)
+		deleted++
 	}
-
-	currentName := ""
-	if detected, detectErr := currentWorkspaceName(repoRoot, refs); detectErr == nil {
-		currentName = detected
+	if deleted == 0 {
+		fmt.Fprintln(stderrWriter, "No empty leftover Workspaces to tidy.")
 	}
-
-	target := workspacePathForName(repoRoot, cfg.WorktreesRoot, app, mainName, currentName)
-	if st, statErr := os.Stat(target); statErr != nil || !st.IsDir() {
-		return fmt.Errorf("main workspace path missing: %s", target)
-	}
-
-	fmt.Fprintln(stdoutWriter, target)
 	return nil
 }
 
-func runMainStack(args []string) error {
-	fs := flag.NewFlagSet("stack", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	var (
-		repoRootOverride  string
-		appOverride       string
-		rootOverride      string
-		workspaceOverride string
-		rebaseMode        string
-		stackShape        string
-		conflictStrategy  string
-	)
-	fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
-	fs.StringVar(&appOverride, "app", "", "app override")
-	fs.StringVar(&rootOverride, "worktrees-root", "", "worktrees root override")
-	fs.StringVar(&workspaceOverride, "workspace", "", "workspace to stack into")
-	fs.StringVar(&rebaseMode, "rebase-mode", "", "rebase mode: auto, branch, revision")
-	fs.StringVar(&stackShape, "stack-shape", "", "stack shape: auto, linear, merge")
-	fs.StringVar(&conflictStrategy, "conflict-strategy", "", "conflict strategy: off, prefer-clean")
-	if handled, err := parseCommandFlags(fs, args, "jjw stack [options]", "Run jj st across all workspaces, then rebase the selected main workspace onto the others."); handled || err != nil {
-		return err
-	}
-
-	repoRoot, err := resolveRepoRoot(repoRootOverride)
+func runClose(args []string) error {
+	var err error
+	args, err = normalizePositionalsLast(args, map[string]struct{}{"--repo": {}, "--project": {}, "--workspaces-root": {}})
 	if err != nil {
 		return err
+	}
+	fs := flag.NewFlagSet("close", flag.ContinueOnError)
+	var repoRootOverride, projectOverride, rootOverride string
+	var all, force, yes bool
+	fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
+	fs.StringVar(&projectOverride, "project", "", "Project override")
+	fs.StringVar(&rootOverride, "workspaces-root", "", "Workspaces root override")
+	fs.BoolVar(&all, "all", false, "close all Closable Workspaces")
+	fs.BoolVar(&force, "force", false, "forced close: abandon unique mutable changes before closing")
+	fs.BoolVar(&yes, "yes", false, "skip confirmation")
+	if handled, err := parseCommandFlags(fs, args, "jjw close [handle...] [options]", "Close Workspace(s)."); handled || err != nil {
+		return err
+	}
+	positionals := fs.Args()
+	if all && len(positionals) > 0 {
+		return errors.New("provide either --all or Workspace Handles, not both")
+	}
+	repoRoot, cfg, project, err := commandContext(repoRootOverride, projectOverride, rootOverride)
+	if err != nil {
+		return err
+	}
+	infos, currentHandle, err := loadWorkspaceInfos(repoRoot, cfg, project)
+	if err != nil {
+		return err
+	}
+	byHandle := mapInfosByHandle(infos)
+	targets := []workspaceInfo{}
+	if all {
+		for _, info := range infos {
+			if info.Main || info.Missing {
+				continue
+			}
+			if force || isClosable(info) {
+				targets = append(targets, info)
+			}
+		}
+	} else if len(positionals) > 0 {
+		for _, h := range positionals {
+			h = strings.TrimSpace(h)
+			if err := validateWorkspaceHandle(h); err != nil {
+				return err
+			}
+			info, ok := byHandle[h]
+			if !ok {
+				return fmt.Errorf("Workspace %q not found", h)
+			}
+			targets = append(targets, info)
+		}
+	} else if currentHandle != "" && currentHandle != cfg.MainWorkspace {
+		info, ok := byHandle[currentHandle]
+		if !ok {
+			return fmt.Errorf("Current Workspace %q not found", currentHandle)
+		}
+		targets = append(targets, info)
+	} else {
+		if !canUseTUI() {
+			return errors.New("close requires Workspace Handles or --all when not running in a terminal")
+		}
+		items := selectorItemsForClose(infos, force)
+		selected, opts, err := runSelector(selectorOptions{Title: "Close Workspaces", Mode: selectorMulti, Items: items, ForceEnabled: force, AllowForceToggle: true})
+		if err != nil {
+			return err
+		}
+		force = opts.ForceEnabled
+		for _, item := range selected {
+			if info, ok := byHandle[item.Handle]; ok {
+				targets = append(targets, info)
+			}
+		}
+	}
+	if len(targets) == 0 {
+		fmt.Fprintln(stderrWriter, "No Workspaces to close.")
+		return nil
+	}
+	for _, info := range targets {
+		if info.Main {
+			return fmt.Errorf("Main Workspace %q is never closable", info.Ref.Handle)
+		}
+		if info.Missing {
+			return fmt.Errorf("Workspace %q path missing: %s", info.Ref.Handle, info.Path)
+		}
+		if !force && !isClosable(info) {
+			return fmt.Errorf("Workspace %q is not closable; stack it first or use --force", info.Ref.Handle)
+		}
+	}
+	mainInfo, ok := byHandle[cfg.MainWorkspace]
+	if !ok {
+		return fmt.Errorf("Main Workspace %q not found", cfg.MainWorkspace)
+	}
+	if force && !yes {
+		ok, err := confirm(fmt.Sprintf("Forced Closing will abandon unique mutable changes for %d Workspace(s). Continue? [y/N]: ", len(targets)))
+		if err != nil || !ok {
+			return err
+		}
+	}
+	if !force && !yes {
+		ok, err := confirm(fmt.Sprintf("Close %d Workspace(s)? [y/N]: ", len(targets)))
+		if err != nil || !ok {
+			return err
+		}
+	}
+	if _, err := closeWorkspaces(repoRoot, cfg, project, targets, force, yes); err != nil {
+		return err
+	}
+	if err := abandonTopEmptyMutableAncestors(mainInfo.Path); err != nil {
+		return err
+	}
+	fmt.Fprintln(stdoutWriter, mainInfo.Path)
+	return nil
+}
+
+func runStack(args []string) error {
+	var err error
+	args, err = normalizePositionalsLast(args, map[string]struct{}{"--repo": {}, "--project": {}, "--workspaces-root": {}, "--workspace": {}, "--rebase-mode": {}, "--stack-shape": {}, "--conflict-strategy": {}})
+	if err != nil {
+		return err
+	}
+	fs := flag.NewFlagSet("stack", flag.ContinueOnError)
+	var repoRootOverride, projectOverride, rootOverride string
+	var workspaceOverride, rebaseMode, shape, conflictStrategy string
+	var all, yes bool
+	fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
+	fs.StringVar(&projectOverride, "project", "", "Project override")
+	fs.StringVar(&rootOverride, "workspaces-root", "", "Workspaces root override")
+	fs.StringVar(&workspaceOverride, "workspace", "", "Main Workspace handle override")
+	fs.StringVar(&rebaseMode, "rebase-mode", "", "advanced: auto, branch, revision")
+	fs.StringVar(&shape, "stack-shape", "", "advanced: auto, linear, merge")
+	fs.StringVar(&conflictStrategy, "conflict-strategy", "", "advanced: off, prefer-clean")
+	fs.BoolVar(&all, "all", false, "stack all stack-relevant Workspaces")
+	fs.BoolVar(&yes, "yes", false, "skip post-Stack Close prompt")
+	if handled, err := parseCommandFlags(fs, args, "jjw stack [handle...] [options]", "Stack selected Workspaces into the Main Workspace."); handled || err != nil {
+		return err
+	}
+	positionals := fs.Args()
+	if all && len(positionals) > 0 {
+		return errors.New("provide either --all or Stack Input Handles, not both")
+	}
+	repoRoot, cfg, project, err := commandContext(repoRootOverride, projectOverride, rootOverride)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(workspaceOverride) != "" {
+		if err := validateWorkspaceHandle(workspaceOverride); err != nil {
+			return err
+		}
+		cfg.MainWorkspace = strings.TrimSpace(workspaceOverride)
+	}
+	applyStackOverrides(&cfg, rebaseMode, shape, conflictStrategy)
+	infos, _, err := loadWorkspaceInfos(repoRoot, cfg, project)
+	if err != nil {
+		return err
+	}
+	byHandle := mapInfosByHandle(infos)
+	inputs := []string{}
+	if all {
+		for _, info := range infos {
+			if isStackRelevant(info) {
+				inputs = append(inputs, info.Ref.Handle)
+			}
+		}
+	} else if len(positionals) > 0 {
+		for _, h := range positionals {
+			h = strings.TrimSpace(h)
+			if err := validateWorkspaceHandle(h); err != nil {
+				return err
+			}
+			info, ok := byHandle[h]
+			if !ok {
+				return fmt.Errorf("Workspace %q not found", h)
+			}
+			if info.Main {
+				return fmt.Errorf("Main Workspace %q cannot be a Stack Input", h)
+			}
+			if info.Missing {
+				return fmt.Errorf("Workspace %q path missing: %s", h, info.Path)
+			}
+			inputs = append(inputs, h)
+		}
+	} else {
+		if !canUseTUI() {
+			return errors.New("stack requires Workspace Handles or --all when not running in a terminal")
+		}
+		items := selectorItemsForStack(infos)
+		selected, opts, err := runSelector(selectorOptions{Title: "Stack Workspaces", Mode: selectorMulti, Items: items, AllDefault: true, StackOptions: cfg.Stack})
+		if err != nil {
+			return err
+		}
+		cfg.Stack = opts.StackOptions
+		for _, item := range selected {
+			inputs = append(inputs, item.Handle)
+		}
+	}
+	inputs = uniqueNonEmptyStrings(inputs)
+	if len(inputs) == 0 {
+		return errors.New("no Stack Inputs selected")
+	}
+	mainInfo, ok := byHandle[cfg.MainWorkspace]
+	if !ok {
+		return fmt.Errorf("Main Workspace %q not found", cfg.MainWorkspace)
+	}
+	if mainInfo.Missing {
+		return fmt.Errorf("Main Workspace path missing: %s", mainInfo.Path)
+	}
+	if err := validateLinearSelection(mainInfo.Path, inputs, cfg.Stack.Shape); err != nil {
+		return err
+	}
+	conflicted, err := runStackRebase(mainInfo.Path, inputs, cfg.Stack)
+	if err != nil {
+		return err
+	}
+	if !conflicted {
+		if err := abandonTopEmptyMutableAncestors(mainInfo.Path); err != nil {
+			return err
+		}
+	}
+	if err := commandToStderrFn("jj", "-R", mainInfo.Path, "workspace", "update-stale"); err != nil {
+		return err
+	}
+	if !yes && canUseTUI() {
+		updatedInfos, _, err := loadWorkspaceInfos(repoRoot, cfg, project)
+		if err == nil {
+			updated := mapInfosByHandle(updatedInfos)
+			closable := []workspaceInfo{}
+			for _, h := range inputs {
+				if info, ok := updated[h]; ok && isClosable(info) {
+					closable = append(closable, info)
+				}
+			}
+			if len(closable) > 0 {
+				ok, err := confirm(fmt.Sprintf("Close %d normally Closable Stack Input(s)? [y/N]: ", len(closable)))
+				if err != nil {
+					return err
+				}
+				if ok {
+					closed, err := closeWorkspaces(repoRoot, cfg, project, closable, false, true)
+					if err != nil {
+						return err
+					}
+					for _, path := range closed {
+						fmt.Fprintln(stdoutWriter, path)
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func commandContext(repoRootOverride, projectOverride, rootOverride string) (string, config, string, error) {
+	repoRoot, err := resolveRepoRoot(repoRootOverride)
+	if err != nil {
+		return "", config{}, "", err
 	}
 	cfg, err := loadConfig(repoRoot)
 	if err != nil {
-		return err
+		return "", config{}, "", err
 	}
-	if rootOverride != "" {
-		cfg.WorktreesRoot = expandPath(rootOverride)
+	if strings.TrimSpace(rootOverride) != "" {
+		cfg.WorkspacesRoot = expandPath(rootOverride)
 	}
-	if err := requireWorktreesRoot(cfg.WorktreesRoot); err != nil {
-		return err
+	if err := requireWorkspacesRoot(cfg.WorkspacesRoot); err != nil {
+		return "", config{}, "", err
 	}
-	app := deriveApp(repoRoot, appOverride)
+	project := strings.TrimSpace(projectOverride)
+	if project == "" {
+		project = strings.TrimSpace(cfg.Project)
+	}
+	if project == "" {
+		project = deriveProject(repoRoot)
+	}
+	if err := validateSlug("project", project); err != nil {
+		return "", config{}, "", err
+	}
+	cfg.Project = project
+	return repoRoot, cfg, project, nil
+}
 
+func defaultConfig() config {
+	return config{
+		HandleStrategy:     strategyFirstUnused,
+		WorkspaceHandles:   append([]string(nil), defaultWorkspaceHandles...),
+		MainWorkspace:      "default",
+		AssimilatedFolders: []string{},
+		Projects:           map[string]projectConfig{},
+		Stack: stackConfig{
+			RebaseMode:       "auto",
+			Shape:            "auto",
+			ConflictStrategy: "prefer-clean",
+		},
+	}
+}
+
+func loadConfig(repoRoot string) (config, error) {
+	merged := defaultConfig()
+	if globalPath, ok := globalConfigPath(); ok {
+		if err := mergeConfigFile(&merged, globalPath); err != nil {
+			return config{}, err
+		}
+	}
+	localPath := filepath.Join(repoRoot, ".jjw", "config.yaml")
+	if err := mergeConfigFile(&merged, localPath); err != nil {
+		return config{}, err
+	}
+	merged.WorkspacesRoot = expandPath(merged.WorkspacesRoot)
+	if strings.TrimSpace(merged.HandleStrategy) == "" {
+		merged.HandleStrategy = strategyFirstUnused
+	}
+	if merged.HandleStrategy != strategyFirstUnused && merged.HandleStrategy != strategyNextUnused {
+		return config{}, fmt.Errorf("invalid handle_strategy: %q", merged.HandleStrategy)
+	}
+	if strings.TrimSpace(merged.MainWorkspace) == "" {
+		merged.MainWorkspace = "default"
+	}
+	if err := validateWorkspaceHandle(merged.MainWorkspace); err != nil {
+		return config{}, err
+	}
+	if err := validateStackConfig(merged.Stack); err != nil {
+		return config{}, err
+	}
+	if strings.TrimSpace(merged.Project) != "" {
+		if err := validateSlug("project", merged.Project); err != nil {
+			return config{}, err
+		}
+	}
+	for _, handle := range merged.WorkspaceHandles {
+		if err := validateWorkspaceHandle(handle); err != nil {
+			return config{}, err
+		}
+	}
+	folders, err := normalizeAssimilatedFolders(merged.AssimilatedFolders)
+	if err != nil {
+		return config{}, err
+	}
+	merged.AssimilatedFolders = folders
+	if merged.Projects == nil {
+		merged.Projects = map[string]projectConfig{}
+	}
+	for project, projectCfg := range merged.Projects {
+		if err := validateSlug("project", project); err != nil {
+			return config{}, err
+		}
+		folders, err := normalizeAssimilatedFolders(projectCfg.AssimilatedFolders)
+		if err != nil {
+			return config{}, err
+		}
+		projectCfg.AssimilatedFolders = folders
+		merged.Projects[project] = projectCfg
+	}
+	return merged, nil
+}
+
+func mergeConfigFile(dst *config, path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read config %s: %w", path, err)
+	}
+	var src config
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&src); err != nil {
+		return fmt.Errorf("parse config %s: %w", path, err)
+	}
+	if strings.TrimSpace(src.WorkspacesRoot) != "" {
+		dst.WorkspacesRoot = strings.TrimSpace(src.WorkspacesRoot)
+	}
+	if strings.TrimSpace(src.Project) != "" {
+		dst.Project = strings.TrimSpace(src.Project)
+	}
+	if strings.TrimSpace(src.HandleStrategy) != "" {
+		dst.HandleStrategy = strings.TrimSpace(src.HandleStrategy)
+	}
+	if len(src.WorkspaceHandles) > 0 {
+		dst.WorkspaceHandles = append([]string(nil), src.WorkspaceHandles...)
+	}
+	if strings.TrimSpace(src.MainWorkspace) != "" {
+		dst.MainWorkspace = strings.TrimSpace(src.MainWorkspace)
+	}
+	if len(src.AssimilatedFolders) > 0 {
+		dst.AssimilatedFolders = appendUniqueStrings(dst.AssimilatedFolders, src.AssimilatedFolders)
+	}
+	if len(src.Projects) > 0 {
+		if dst.Projects == nil {
+			dst.Projects = map[string]projectConfig{}
+		}
+		for project, projectCfg := range src.Projects {
+			current := dst.Projects[project]
+			current.AssimilatedFolders = appendUniqueStrings(current.AssimilatedFolders, projectCfg.AssimilatedFolders)
+			dst.Projects[project] = current
+		}
+	}
+	if strings.TrimSpace(src.Stack.RebaseMode) != "" {
+		dst.Stack.RebaseMode = strings.TrimSpace(src.Stack.RebaseMode)
+	}
+	if strings.TrimSpace(src.Stack.Shape) != "" {
+		dst.Stack.Shape = strings.TrimSpace(src.Stack.Shape)
+	}
+	if strings.TrimSpace(src.Stack.ConflictStrategy) != "" {
+		dst.Stack.ConflictStrategy = strings.TrimSpace(src.Stack.ConflictStrategy)
+	}
+	if src.Create.Envrc {
+		dst.Create.Envrc = true
+	}
+	if src.Create.DirenvAllow {
+		dst.Create.DirenvAllow = true
+	}
+	return nil
+}
+
+func validateStackConfig(cfg stackConfig) error {
+	if err := validateStackRebaseMode(cfg.RebaseMode); err != nil {
+		return err
+	}
+	if err := validateStackShape(cfg.Shape); err != nil {
+		return err
+	}
+	if _, err := resolveStackConflictStrategy(cfg.ConflictStrategy); err != nil {
+		return err
+	}
+	return nil
+}
+
+func applyStackOverrides(cfg *config, rebaseMode, shape, conflictStrategy string) {
+	if strings.TrimSpace(rebaseMode) != "" {
+		cfg.Stack.RebaseMode = strings.TrimSpace(rebaseMode)
+	}
+	if strings.TrimSpace(shape) != "" {
+		cfg.Stack.Shape = strings.TrimSpace(shape)
+	}
+	if strings.TrimSpace(conflictStrategy) != "" {
+		cfg.Stack.ConflictStrategy = strings.TrimSpace(conflictStrategy)
+	}
+}
+
+func requireWorkspacesRoot(root string) error {
+	if strings.TrimSpace(root) == "" {
+		return errors.New("workspaces_root is required; set it in ~/.config/jjw/config.yaml or .jjw/config.yaml, pass --workspaces-root, or run `jjw init`")
+	}
+	return nil
+}
+
+func globalConfigPath() (string, bool) {
+	if xdg := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); xdg != "" {
+		return filepath.Join(expandPath(xdg), "jjw", "config.yaml"), true
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", false
+	}
+	return filepath.Join(home, ".config", "jjw", "config.yaml"), true
+}
+
+func validateWorkspaceHandle(handle string) error { return validateSlug("Workspace Handle", handle) }
+
+func validateSlug(label, value string) error {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return fmt.Errorf("%s is empty", label)
+	}
+	if trimmed != value {
+		return fmt.Errorf("invalid %s %q; expected a safe single path-segment slug", label, value)
+	}
+	if trimmed == "." || trimmed == ".." || strings.Contains(trimmed, "/") || strings.Contains(trimmed, string(os.PathSeparator)) || !slugRE.MatchString(trimmed) {
+		return fmt.Errorf("invalid %s %q; expected a safe single path-segment slug", label, value)
+	}
+	return nil
+}
+
+func chooseAutoHandle(cfg config, repoRoot string, inUse map[string]struct{}) (string, error) {
+	if len(cfg.WorkspaceHandles) == 0 {
+		return "", errors.New("workspace_handles is empty; configure handles in ~/.config/jjw/config.yaml or .jjw/config.yaml")
+	}
+	handles := make([]string, 0, len(cfg.WorkspaceHandles))
+	for _, candidate := range cfg.WorkspaceHandles {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		if err := validateWorkspaceHandle(candidate); err != nil {
+			return "", err
+		}
+		handles = append(handles, candidate)
+	}
+	if len(handles) == 0 {
+		return "", errors.New("workspace_handles has no usable entries")
+	}
+	switch cfg.HandleStrategy {
+	case strategyFirstUnused:
+		for _, candidate := range handles {
+			if _, ok := inUse[candidate]; !ok {
+				return candidate, nil
+			}
+		}
+		return "", errors.New("all configured Workspace Handles are in use; add more workspace_handles")
+	case strategyNextUnused:
+		st, err := loadState(repoRoot)
+		if err != nil {
+			return "", err
+		}
+		for i := st.NextIndex; i < len(handles); i++ {
+			candidate := handles[i]
+			if _, ok := inUse[candidate]; ok {
+				continue
+			}
+			st.NextIndex = i + 1
+			if saveErr := saveState(repoRoot, st); saveErr != nil {
+				return "", saveErr
+			}
+			return candidate, nil
+		}
+		return "", errors.New("all configured Workspace Handles are exhausted for next-unused strategy; extend workspace_handles")
+	default:
+		return "", fmt.Errorf("unsupported handle_strategy: %s", cfg.HandleStrategy)
+	}
+}
+
+func loadWorkspaceInfos(repoRoot string, cfg config, project string) ([]workspaceInfo, string, error) {
+	refs, err := listWorkspaceRefs(repoRoot)
+	if err != nil {
+		return nil, "", err
+	}
+	current := ""
+	if detected, err := currentWorkspaceHandle(repoRoot, refs); err == nil {
+		current = detected
+	}
+	infos := make([]workspaceInfo, 0, len(refs))
+	for _, ref := range refs {
+		path := workspacePathForRef(repoRoot, cfg.WorkspacesRoot, project, ref, current)
+		info := workspaceInfo{Ref: ref, Path: path, Current: ref.Handle == current, Main: ref.Handle == cfg.MainWorkspace}
+		if st, err := os.Stat(path); err != nil || !st.IsDir() {
+			info.Missing = true
+		}
+		canonical := filepath.Clean(filepath.Join(cfg.WorkspacesRoot, project, ref.Handle))
+		info.External = !info.Missing && filepath.Clean(path) != canonical && !info.Main
+		info.Empty, _ = revisionMatches(pathOrRepo(repoRoot, path), "empty() & "+ref.Handle+"@")
+		info.Conflict, _ = revisionMatches(pathOrRepo(repoRoot, path), "conflicts() & "+ref.Handle+"@")
+		if !info.Main && cfg.MainWorkspace != "" {
+			info.Stacked, _ = revisionIsAncestor(pathOrRepo(repoRoot, path), ref.Handle+"@", cfg.MainWorkspace+"@")
+		}
+		infos = append(infos, info)
+	}
+	sort.Slice(infos, func(i, j int) bool { return infos[i].Ref.Handle < infos[j].Ref.Handle })
+	return infos, current, nil
+}
+
+func pathOrRepo(repoRoot, path string) string {
+	if path != "" {
+		return path
+	}
+	return repoRoot
+}
+
+func mapInfosByHandle(infos []workspaceInfo) map[string]workspaceInfo {
+	m := make(map[string]workspaceInfo, len(infos))
+	for _, info := range infos {
+		m[info.Ref.Handle] = info
+	}
+	return m
+}
+
+func isClosable(info workspaceInfo) bool {
+	return !info.Main && !info.Missing && !info.Conflict && (info.Empty || info.Stacked)
+}
+
+func isStackRelevant(info workspaceInfo) bool {
+	return !info.Main && !info.Missing && (info.Conflict || (!info.Empty && !info.Stacked))
+}
+
+func statusLabel(info workspaceInfo) string {
+	if info.Missing {
+		return "missing"
+	}
+	if info.Conflict {
+		return "conflict"
+	}
+	if info.Empty {
+		return "empty"
+	}
+	if info.Stacked {
+		return "stacked"
+	}
+	return "unstacked"
+}
+
+func markers(info workspaceInfo) []string {
+	var out []string
+	if info.Main {
+		out = append(out, "main")
+	}
+	if info.Current {
+		out = append(out, "current")
+	}
+	if info.External {
+		out = append(out, "external")
+	}
+	if len(out) == 0 {
+		out = append(out, "-")
+	}
+	return out
+}
+
+func closeWorkspaces(repoRoot string, cfg config, project string, targets []workspaceInfo, force bool, yes bool) ([]string, error) {
+	closed := []string{}
+	for _, info := range targets {
+		if info.External && !yes {
+			ok, err := confirm(fmt.Sprintf("Workspace %q is outside the canonical Project layout: %s. Delete this directory? [y/N]: ", info.Ref.Handle, info.Path))
+			if err != nil || !ok {
+				return closed, err
+			}
+		}
+		if force {
+			if err := abandonUniqueMutableChanges(repoRoot, info.Ref.Handle); err != nil {
+				return closed, err
+			}
+		}
+		if err := commandToStderrFn("jj", "-R", repoRoot, "workspace", "forget", info.Ref.Handle); err != nil {
+			return closed, err
+		}
+		if err := os.RemoveAll(info.Path); err != nil {
+			return closed, fmt.Errorf("remove %s: %w", info.Path, err)
+		}
+		closed = append(closed, info.Path)
+	}
+	return closed, nil
+}
+
+func abandonUniqueMutableChanges(repoRoot, handle string) error {
 	refs, err := listWorkspaceRefs(repoRoot)
 	if err != nil {
 		return err
 	}
-	if len(refs) == 0 {
-		return errors.New("no workspaces found")
-	}
-
-	mainName := strings.TrimSpace(workspaceOverride)
-	if mainName == "" {
-		mainName = strings.TrimSpace(cfg.MainStack.DefaultWorkspace)
-	}
-	if mainName == "" {
-		mainName = "default"
-	}
-
-	fmt.Fprintf(stderrWriter, "Main workspace: %s\n", mainName)
+	var otherAncestors []string
 	for _, ref := range refs {
-		workspacePath := filepath.Join(cfg.WorktreesRoot, app, ref.Name)
-		if ref.Name == "default" {
-			workspacePath = workspacePathForName(repoRoot, cfg.WorktreesRoot, app, ref.Name, mainName)
-		}
-		fmt.Fprintf(stderrWriter, "\n== jj st: %s ==\n", ref.Name)
-		if st, statErr := os.Stat(workspacePath); statErr != nil || !st.IsDir() {
-			fmt.Fprintf(stderrWriter, "skip: workspace path missing: %s\n", workspacePath)
-			continue
-		}
-		if err := commandToStderrFn("jj", "-R", workspacePath, "workspace", "update-stale"); err != nil {
-			return err
-		}
-		if err := commandToStderrFn("jj", "-R", workspacePath, "st"); err != nil {
-			return err
+		if ref.Handle != handle {
+			otherAncestors = append(otherAncestors, "::"+ref.Handle+"@")
 		}
 	}
-
-	var others []string
-	for _, ref := range refs {
-		if ref.Name != mainName {
-			others = append(others, ref.Name)
-		}
+	revset := "mutable() & ::" + handle + "@"
+	if len(otherAncestors) > 0 {
+		revset += " & ~(" + strings.Join(otherAncestors, " | ") + ")"
 	}
-	if len(others) == 0 {
-		return errors.New("no other workspaces to stack onto")
-	}
-
-	mainPath := workspacePathForName(repoRoot, cfg.WorktreesRoot, app, mainName, mainName)
-	if st, statErr := os.Stat(mainPath); statErr != nil || !st.IsDir() {
-		return fmt.Errorf("main workspace path missing: %s", mainPath)
-	}
-
-	requestedRebaseMode := strings.TrimSpace(rebaseMode)
-	if requestedRebaseMode == "" {
-		requestedRebaseMode = cfg.MainStack.RebaseMode
-	}
-	resolvedMode, reason, err := resolveMainStackRebaseMode(mainPath, requestedRebaseMode)
+	has, err := revisionMatches(repoRoot, revset)
 	if err != nil {
 		return err
 	}
+	if !has {
+		return nil
+	}
+	fmt.Fprintf(stderrWriter, "\n== Forced Closing: abandon unique mutable changes for %s ==\n", handle)
+	return commandToStderrFn("jj", "-R", repoRoot, "abandon", "-r", revset)
+}
 
-	requestedConflictStrategy := strings.TrimSpace(conflictStrategy)
-	if requestedConflictStrategy == "" {
-		requestedConflictStrategy = cfg.MainStack.ConflictStrategy
-	}
-	resolvedConflictStrategy, err := resolveMainStackConflictStrategy(requestedConflictStrategy)
+func runStackRebase(mainPath string, inputs []string, stack stackConfig) (bool, error) {
+	resolvedConflictStrategy, err := resolveStackConflictStrategy(stack.ConflictStrategy)
 	if err != nil {
-		return err
+		return false, err
 	}
-
-	requestedStackShape := strings.TrimSpace(stackShape)
-	if requestedStackShape == "" {
-		requestedStackShape = cfg.MainStack.StackShape
-	}
-	resolvedShape, shapeReason, baseDestinations, err := resolveMainStackStackShape(mainPath, others, requestedStackShape)
+	resolvedMode, reason, err := resolveStackRebaseMode(mainPath, stack.RebaseMode)
 	if err != nil {
-		return err
+		return false, err
 	}
-
-	conflicted, err := runMainStackRebaseAttempt(mainPath, others, resolvedMode, reason, resolvedShape, shapeReason, baseDestinations)
+	resolvedShape, shapeReason, baseDestinations, err := resolveStackShape(mainPath, inputs, stack.Shape)
 	if err != nil {
-		return err
+		return false, err
+	}
+	conflicted, err := runStackRebaseAttempt(mainPath, inputs, resolvedMode, reason, resolvedShape, shapeReason, baseDestinations)
+	if err != nil {
+		return false, err
 	}
 	finalConflicted := conflicted
-
-	if resolvedConflictStrategy == "prefer-clean" && conflicted && strings.TrimSpace(strings.ToLower(requestedStackShape)) == "auto" {
+	requestedShape := strings.TrimSpace(strings.ToLower(stack.Shape))
+	if requestedShape == "" {
+		requestedShape = "auto"
+	}
+	if resolvedConflictStrategy == "prefer-clean" && conflicted && requestedShape == "auto" {
 		alternativeShape := "merge"
 		if resolvedShape == "merge" {
 			alternativeShape = "linear"
 		}
-
-		alternativeResolvedShape, alternativeShapeReason, alternativeDestinations, altErr := resolveMainStackStackShape(mainPath, others, alternativeShape)
+		alternativeResolvedShape, alternativeShapeReason, alternativeDestinations, altErr := resolveStackShape(mainPath, inputs, alternativeShape)
 		if altErr == nil {
 			fmt.Fprintf(stderrWriter, "\n== Conflict fallback: undo and retry with %s ==\n", alternativeResolvedShape)
 			if err := commandToStderrFn("jj", "-R", mainPath, "undo"); err != nil {
-				return err
+				return false, err
 			}
-
-			alternativeConflicted, err := runMainStackRebaseAttempt(mainPath, others, resolvedMode, reason, alternativeResolvedShape, alternativeShapeReason, alternativeDestinations)
+			alternativeConflicted, err := runStackRebaseAttempt(mainPath, inputs, resolvedMode, reason, alternativeResolvedShape, alternativeShapeReason, alternativeDestinations)
 			if err != nil {
-				return err
+				return false, err
 			}
 			finalConflicted = alternativeConflicted
-
 			if alternativeConflicted && alternativeResolvedShape == "linear" {
 				fmt.Fprintln(stderrWriter, "\n== Both strategies conflicted; keeping merge shape ==")
 				if err := commandToStderrFn("jj", "-R", mainPath, "undo"); err != nil {
-					return err
+					return false, err
 				}
-				mergeShape, mergeReason, mergeDestinations, err := resolveMainStackStackShape(mainPath, others, "merge")
+				mergeShape, mergeReason, mergeDestinations, err := resolveStackShape(mainPath, inputs, "merge")
 				if err != nil {
-					return err
+					return false, err
 				}
-				mergeConflicted, err := runMainStackRebaseAttempt(mainPath, others, resolvedMode, reason, mergeShape, mergeReason, mergeDestinations)
+				mergeConflicted, err := runStackRebaseAttempt(mainPath, inputs, resolvedMode, reason, mergeShape, mergeReason, mergeDestinations)
 				if err != nil {
-					return err
+					return false, err
 				}
 				finalConflicted = mergeConflicted
 			}
 		}
 	}
-
-	if !finalConflicted {
-		if err := abandonTopEmptyMutableAncestors(mainPath); err != nil {
-			return err
-		}
-	}
-
-	return commandToStderrFn("jj", "-R", mainPath, "workspace", "update-stale")
+	return finalConflicted, nil
 }
 
-func runMainStackRebaseAttempt(mainPath string, others []string, resolvedMode string, modeReason string, resolvedShape string, shapeReason string, baseDestinations []string) (bool, error) {
+func runStackRebaseAttempt(mainPath string, inputs []string, resolvedMode string, modeReason string, resolvedShape string, shapeReason string, baseDestinations []string) (bool, error) {
 	rebaseFlag := "-b"
 	if resolvedMode == "revision" {
 		rebaseFlag = "-r"
 	}
-
 	destinations := make([]string, 0, len(baseDestinations)+2)
 	if resolvedMode == "revision" {
 		parents, err := parentChangeIDs(mainPath)
@@ -722,12 +1272,10 @@ func runMainStackRebaseAttempt(mainPath string, others []string, resolvedMode st
 	}
 	destinations = append(destinations, baseDestinations...)
 	destinations = uniqueNonEmptyStrings(destinations)
-
 	cmdArgs := []string{"-R", mainPath, "rebase", rebaseFlag, "@"}
 	for _, dest := range destinations {
 		cmdArgs = append(cmdArgs, "-d", dest)
 	}
-
 	if modeReason == "" {
 		modeReason = resolvedMode
 	}
@@ -736,71 +1284,87 @@ func runMainStackRebaseAttempt(mainPath string, others []string, resolvedMode st
 	}
 	fmt.Fprintf(stderrWriter, "\n== Stack shape: %s (%s) ==\n", resolvedShape, shapeReason)
 	fmt.Fprintf(stderrWriter, "\n== Rebase mode: %s (%s) ==\n", resolvedMode, modeReason)
-	fmt.Fprintf(stderrWriter, "\n== Rebase main onto: %s ==\n", strings.Join(others, ", "))
+	fmt.Fprintf(stderrWriter, "\n== Stack Inputs: %s ==\n", strings.Join(inputs, ", "))
 	if err := commandToStderrFn("jj", cmdArgs...); err != nil {
 		return false, err
 	}
-
 	conflicted, err := workingCopyHasConflicts(mainPath)
 	if err != nil {
 		return false, err
 	}
 	if conflicted {
-		fmt.Fprintln(stderrWriter, "\n== Rebase result has conflicts ==")
+		fmt.Fprintln(stderrWriter, "\n== Stack result has conflicts ==")
 	}
 	return conflicted, nil
 }
 
-func resolveMainStackStackShape(repoPath string, others []string, requested string) (string, string, []string, error) {
+func validateLinearSelection(repoPath string, inputs []string, requested string) error {
+	mode := strings.TrimSpace(strings.ToLower(requested))
+	if mode != "linear" {
+		return nil
+	}
+	revs := make([]string, 0, len(inputs))
+	for _, name := range inputs {
+		revs = append(revs, name+"@")
+	}
+	frontier, err := frontierHeads(repoPath, revs)
+	if err != nil {
+		return err
+	}
+	if len(frontier) != 1 {
+		return fmt.Errorf("shape linear requires a single frontier head, found %d", len(frontier))
+	}
+	return nil
+}
+
+func resolveStackShape(repoPath string, inputs []string, requested string) (string, string, []string, error) {
 	mode := strings.TrimSpace(strings.ToLower(requested))
 	if mode == "" {
 		mode = "auto"
 	}
-
-	otherRevs := make([]string, 0, len(others))
-	for _, name := range others {
-		otherRevs = append(otherRevs, name+"@")
+	inputRevs := make([]string, 0, len(inputs))
+	for _, name := range inputs {
+		inputRevs = append(inputRevs, name+"@")
 	}
-	frontier, err := frontierHeads(repoPath, otherRevs)
+	frontier, err := frontierHeads(repoPath, inputRevs)
 	if err != nil {
 		return "", "", nil, err
 	}
 	if len(frontier) == 0 {
-		return "", "", nil, errors.New("could not resolve workspace frontier heads")
+		return "", "", nil, errors.New("could not resolve Stack Input frontier heads")
 	}
-
 	switch mode {
 	case "auto":
 		if len(frontier) == 1 {
 			return "linear", "single frontier head", frontier, nil
 		}
-		return "merge", fmt.Sprintf("%d frontier heads", len(frontier)), otherRevs, nil
+		return "merge", fmt.Sprintf("%d frontier heads", len(frontier)), inputRevs, nil
 	case "linear":
 		if len(frontier) != 1 {
-			return "", "", nil, fmt.Errorf("--stack-shape linear requires a single frontier head, found %d", len(frontier))
+			return "", "", nil, fmt.Errorf("shape linear requires a single frontier head, found %d", len(frontier))
 		}
-		return "linear", "flag", frontier, nil
+		return "linear", "explicit", frontier, nil
 	case "merge":
-		return "merge", "flag", otherRevs, nil
+		return "merge", "explicit", inputRevs, nil
 	default:
-		return "", "", nil, fmt.Errorf("invalid --stack-shape %q (expected auto, linear, or merge)", requested)
+		return "", "", nil, fmt.Errorf("invalid shape %q (expected auto, linear, or merge)", requested)
 	}
 }
 
-func resolveMainStackConflictStrategy(requested string) (string, error) {
+func resolveStackConflictStrategy(requested string) (string, error) {
 	strategy := strings.TrimSpace(strings.ToLower(requested))
 	if strategy == "" {
-		strategy = "off"
+		strategy = "prefer-clean"
 	}
 	switch strategy {
 	case "off", "prefer-clean":
 		return strategy, nil
 	default:
-		return "", fmt.Errorf("invalid --conflict-strategy %q (expected off or prefer-clean)", requested)
+		return "", fmt.Errorf("invalid conflict_strategy: %q (expected off or prefer-clean)", requested)
 	}
 }
 
-func validateMainStackRebaseMode(mode string) error {
+func validateStackRebaseMode(mode string) error {
 	trimmed := strings.TrimSpace(strings.ToLower(mode))
 	switch trimmed {
 	case "", "auto", "branch", "revision":
@@ -810,27 +1374,26 @@ func validateMainStackRebaseMode(mode string) error {
 	}
 }
 
-func validateMainStackStackShape(shape string) error {
+func validateStackShape(shape string) error {
 	trimmed := strings.TrimSpace(strings.ToLower(shape))
 	switch trimmed {
 	case "", "auto", "linear", "merge":
 		return nil
 	default:
-		return fmt.Errorf("invalid stack_shape: %q (expected auto, linear, or merge)", shape)
+		return fmt.Errorf("invalid stack shape: %q (expected auto, linear, or merge)", shape)
 	}
 }
 
-func resolveMainStackRebaseMode(repoPath string, requested string) (string, string, error) {
+func resolveStackRebaseMode(repoPath string, requested string) (string, string, error) {
 	mode := strings.TrimSpace(strings.ToLower(requested))
 	if mode == "" {
 		mode = "auto"
 	}
-
 	switch mode {
 	case "branch":
-		return "branch", "flag", nil
+		return "branch", "explicit", nil
 	case "revision":
-		return "revision", "flag", nil
+		return "revision", "explicit", nil
 	case "auto":
 		hasImmutable, err := hasImmutableAncestors(repoPath)
 		if err != nil {
@@ -841,17 +1404,22 @@ func resolveMainStackRebaseMode(repoPath string, requested string) (string, stri
 		}
 		return "branch", "no immutable ancestors", nil
 	default:
-		return "", "", fmt.Errorf("invalid --rebase-mode %q (expected auto, branch, or revision)", requested)
+		return "", "", fmt.Errorf("invalid rebase_mode %q (expected auto, branch, or revision)", requested)
 	}
 }
 
 func hasImmutableAncestors(repoPath string) (bool, error) {
-	revset := "immutable() & ::@ & ~@"
+	return revisionMatches(repoPath, "immutable() & ::@ & ~@")
+}
+func workingCopyHasConflicts(repoPath string) (bool, error) {
+	return revisionMatches(repoPath, "conflicts() & @")
+}
+
+func revisionMatches(repoPath, revset string) (bool, error) {
 	out, err := commandCaptureFn("jj", "-R", repoPath, "log", "-r", revset, "--no-graph", "-T", "change_id.short() ++ \"\\n\"")
 	if err != nil {
 		return false, err
 	}
-
 	for _, line := range strings.Split(out, "\n") {
 		if strings.TrimSpace(line) != "" {
 			return true, nil
@@ -860,17 +1428,12 @@ func hasImmutableAncestors(repoPath string) (bool, error) {
 	return false, nil
 }
 
-func workingCopyHasConflicts(repoPath string) (bool, error) {
-	out, err := commandCaptureFn("jj", "-R", repoPath, "log", "-r", "conflicts() & @", "--no-graph", "-T", "change_id.short() ++ \"\\n\"")
-	if err != nil {
-		return false, err
+func revisionIsAncestor(repoPath, ancestor, descendant string) (bool, error) {
+	if ancestor == "" || descendant == "" {
+		return false, nil
 	}
-	for _, line := range strings.Split(out, "\n") {
-		if strings.TrimSpace(line) != "" {
-			return true, nil
-		}
-	}
-	return false, nil
+	revset := fmt.Sprintf("%s::%s", ancestor, descendant)
+	return revisionMatches(repoPath, revset)
 }
 
 func frontierHeads(repoPath string, revs []string) ([]string, error) {
@@ -890,16 +1453,7 @@ func parentChangeIDs(repoPath string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	var parents []string
-	for _, line := range strings.Split(out, "\n") {
-		id := strings.TrimSpace(line)
-		if id == "" {
-			continue
-		}
-		parents = append(parents, id)
-	}
-	return uniqueNonEmptyStrings(parents), nil
+	return uniqueNonEmptyStrings(strings.Split(out, "\n")), nil
 }
 
 func parentChangeIDsToPreserve(repoPath string, parents []string, destinations []string) ([]string, error) {
@@ -909,10 +1463,9 @@ func parentChangeIDsToPreserve(repoPath string, parents []string, destinations [
 		if err != nil {
 			return nil, err
 		}
-		if isAncestor {
-			continue
+		if !isAncestor {
+			preserved = append(preserved, parent)
 		}
-		preserved = append(preserved, parent)
 	}
 	return preserved, nil
 }
@@ -923,16 +1476,20 @@ func isAncestorOfAny(repoPath string, ancestor string, descendants []string) (bo
 		return false, nil
 	}
 	revset := fmt.Sprintf("%s::(%s)", ancestor, strings.Join(descendants, " | "))
-	out, err := commandCaptureFn("jj", "-R", repoPath, "log", "-r", revset, "--no-graph", "-T", "change_id.short() ++ \"\\n\"")
+	return revisionMatches(repoPath, revset)
+}
+
+func abandonTopEmptyMutableAncestors(repoPath string) error {
+	revset := "empty() & mutable() & ::@ & ~@"
+	hasEmpty, err := revisionMatches(repoPath, revset)
 	if err != nil {
-		return false, err
+		return err
 	}
-	for _, line := range strings.Split(out, "\n") {
-		if strings.TrimSpace(line) != "" {
-			return true, nil
-		}
+	if !hasEmpty {
+		return nil
 	}
-	return false, nil
+	fmt.Fprintln(stderrWriter, "\n== Abandon top empty commits ==")
+	return commandToStderrFn("jj", "-R", repoPath, "abandon", "-r", revset)
 }
 
 func uniqueNonEmptyStrings(items []string) []string {
@@ -952,318 +1509,240 @@ func uniqueNonEmptyStrings(items []string) []string {
 	return result
 }
 
-func abandonTopEmptyMutableAncestors(repoPath string) error {
-	revset := "empty() & mutable() & ::@ & ~@"
-	out, err := commandCaptureFn("jj", "-R", repoPath, "log", "-r", revset, "--no-graph", "-T", "change_id.short() ++ \"\\n\"")
-	if err != nil {
-		return err
+func appendUniqueStrings(dst []string, src []string) []string {
+	seen := make(map[string]struct{}, len(dst)+len(src))
+	out := make([]string, 0, len(dst)+len(src))
+	for _, item := range append(append([]string(nil), dst...), src...) {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		out = append(out, item)
 	}
+	return out
+}
 
-	hasEmpty := false
-	for _, line := range strings.Split(out, "\n") {
-		if strings.TrimSpace(line) != "" {
-			hasEmpty = true
-			break
+func normalizeAssimilatedFolders(folders []string) ([]string, error) {
+	out := make([]string, 0, len(folders))
+	seen := map[string]struct{}{}
+	for _, folder := range folders {
+		normalized, err := normalizeAssimilatedFolder(folder)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := seen[normalized]; ok {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		out = append(out, normalized)
+	}
+	return out, nil
+}
+
+func normalizeAssimilatedFolder(folder string) (string, error) {
+	trimmed := strings.TrimSpace(folder)
+	if trimmed == "" {
+		return "", errors.New("assimilated_folders contains an empty folder")
+	}
+	if filepath.IsAbs(trimmed) {
+		return "", fmt.Errorf("invalid assimilated_folders entry %q; expected a relative folder path", folder)
+	}
+	cleaned := filepath.Clean(trimmed)
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("invalid assimilated_folders entry %q; expected a relative folder path without traversal", folder)
+	}
+	for _, part := range strings.Split(cleaned, string(os.PathSeparator)) {
+		if part == "" || part == "." || part == ".." {
+			return "", fmt.Errorf("invalid assimilated_folders entry %q; expected a relative folder path without traversal", folder)
 		}
 	}
-	if !hasEmpty {
+	return cleaned, nil
+}
+
+func effectiveAssimilatedFolders(cfg config, project string) []string {
+	folders := append([]string(nil), cfg.AssimilatedFolders...)
+	if cfg.Projects != nil {
+		if projectCfg, ok := cfg.Projects[project]; ok {
+			folders = append(folders, projectCfg.AssimilatedFolders...)
+		}
+	}
+	folders, _ = normalizeAssimilatedFolders(folders)
+	return folders
+}
+
+func mainWorkspaceRoot(repoRoot string) string {
+	if root, ok := resolveDefaultWorkspaceRoot(repoRoot); ok {
+		return root
+	}
+	return repoRoot
+}
+
+func materializeAssimilatedFolders(mainPath string, workspacePath string, cfg config, project string) error {
+	mainPath = filepath.Clean(mainPath)
+	workspacePath = filepath.Clean(workspacePath)
+	if mainPath == workspacePath {
 		return nil
 	}
-
-	fmt.Fprintln(stderrWriter, "\n== Abandon top empty commits ==")
-	return commandToStderrFn("jj", "-R", repoPath, "abandon", "-r", revset)
-}
-
-func normalizeCreateArgs(args []string) ([]string, error) {
-	normalized, _, _, err := parseCreateArgs(args)
-	if err != nil {
-		return nil, err
-	}
-	return normalized, nil
-}
-
-func parseCreateArgs(args []string) ([]string, []string, bool, error) {
-	flagsWithValues := map[string]struct{}{
-		"--repo":           {},
-		"--app":            {},
-		"--worktrees-root": {},
-		"--name":           {},
-	}
-
-	normalized := make([]string, 0, len(args))
-	positionals := make([]string, 0, 1)
-	hasNameFlag := false
-
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		if strings.HasPrefix(a, "--") {
-			normalized = append(normalized, a)
-			if a == "--name" || strings.HasPrefix(a, "--name=") {
-				hasNameFlag = true
-			}
-			if strings.Contains(a, "=") {
+	for _, folder := range effectiveAssimilatedFolders(cfg, project) {
+		source := filepath.Join(mainPath, folder)
+		st, err := os.Stat(source)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
-			if _, ok := flagsWithValues[a]; ok {
-				if i+1 >= len(args) {
-					return nil, nil, false, fmt.Errorf("flag %s requires a value", a)
-				}
-				i++
-				normalized = append(normalized, args[i])
-			}
-			continue
+			return fmt.Errorf("stat assimilated folder source %s: %w", source, err)
 		}
-
-		if strings.HasPrefix(a, "-") {
-			normalized = append(normalized, a)
-			continue
+		if !st.IsDir() {
+			return fmt.Errorf("assimilated folder source is not a directory: %s", source)
 		}
-
-		positionals = append(positionals, a)
-	}
-
-	if len(positionals) > 1 {
-		return nil, nil, false, errors.New("create accepts at most one positional name")
-	}
-
-	normalized = append(normalized, positionals...)
-	return normalized, positionals, hasNameFlag, nil
-}
-
-func runTidy(args []string) error {
-	fs := flag.NewFlagSet("tidy", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	var (
-		repoRootOverride string
-		appOverride      string
-		rootOverride     string
-		yes              bool
-	)
-	fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
-	fs.StringVar(&appOverride, "app", "", "app override")
-	fs.StringVar(&rootOverride, "worktrees-root", "", "worktrees root override")
-	fs.BoolVar(&yes, "yes", false, "skip confirmation")
-	if handled, err := parseCommandFlags(fs, args, "jjw tidy [options]", "Remove defunct empty workspace directories and optionally close active non-default workspaces."); handled || err != nil {
-		return err
-	}
-
-	repoRoot, err := resolveRepoRoot(repoRootOverride)
-	if err != nil {
-		return err
-	}
-	cfg, err := loadConfig(repoRoot)
-	if err != nil {
-		return err
-	}
-	if rootOverride != "" {
-		cfg.WorktreesRoot = expandPath(rootOverride)
-	}
-	if err := requireWorktreesRoot(cfg.WorktreesRoot); err != nil {
-		return err
-	}
-
-	app := deriveApp(repoRoot, appOverride)
-	refs, err := listWorkspaceRefs(repoRoot)
-	if err != nil {
-		return err
-	}
-	currentName := ""
-	if detected, detectErr := currentWorkspaceName(repoRoot, refs); detectErr == nil {
-		currentName = detected
-	}
-
-	activeNames := make([]string, 0, len(refs))
-	for _, ref := range refs {
-		activeNames = append(activeNames, ref.Name)
-	}
-	active := make(map[string]struct{}, len(activeNames))
-	for _, n := range activeNames {
-		active[n] = struct{}{}
-	}
-
-	appRoot := filepath.Join(cfg.WorktreesRoot, app)
-	entries, err := os.ReadDir(appRoot)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			fmt.Fprintf(stderrWriter, "No workspace directory found at %s (app %q). Pass --app if this repo uses a different worktrees directory.\n", appRoot, app)
-			return nil
+		dest := filepath.Join(workspacePath, folder)
+		if err := ensureAssimilatedSymlink(source, dest); err != nil {
+			return err
 		}
-		return err
-	}
-
-	var candidates []string
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		if _, ok := active[name]; ok {
-			continue
-		}
-		full := filepath.Join(appRoot, name)
-		empty, emptyErr := isLiteralEmptyDir(full)
-		if emptyErr != nil || !empty {
-			continue
-		}
-		candidates = append(candidates, full)
-	}
-
-	deleted := make([]string, 0, len(candidates))
-	for _, path := range candidates {
-		if err := os.Remove(path); err != nil {
-			return fmt.Errorf("remove %s: %w", path, err)
-		}
-		deleted = append(deleted, path)
-	}
-
-	optional := make([]string, 0, len(refs))
-	pathToName := make(map[string]string, len(refs))
-	for _, ref := range refs {
-		if ref.Name == "default" || ref.Name == currentName {
-			continue
-		}
-		path := workspacePathForName(repoRoot, cfg.WorktreesRoot, app, ref.Name, currentName)
-		if st, statErr := os.Stat(path); statErr == nil && st.IsDir() {
-			optional = append(optional, path)
-			pathToName[path] = ref.Name
-		}
-	}
-
-	if len(optional) == 0 {
-		if len(deleted) == 0 {
-			fmt.Fprintln(stderrWriter, "No workspaces to tidy.")
-		}
-		for _, path := range deleted {
-			fmt.Fprintln(stdoutWriter, path)
-		}
-		return nil
-	}
-
-	selected, err := selectMany(optional)
-	if err != nil {
-		return err
-	}
-	if len(selected) == 0 {
-		if len(deleted) == 0 {
-			fmt.Fprintln(stderrWriter, "No workspaces selected.")
-		}
-		for _, path := range deleted {
-			fmt.Fprintln(stdoutWriter, path)
-		}
-		return nil
-	}
-
-	if !yes {
-		confirmed, confirmErr := confirmDelete(len(selected))
-		if confirmErr != nil {
-			return confirmErr
-		}
-		if !confirmed {
-			return nil
-		}
-	}
-
-	for _, path := range selected {
-		if name, ok := pathToName[path]; ok {
-			if err := commandToStderrFn("jj", "-R", repoRoot, "workspace", "forget", name); err != nil {
-				return err
-			}
-		}
-		if err := os.RemoveAll(path); err != nil {
-			return fmt.Errorf("remove %s: %w", path, err)
-		}
-		deleted = append(deleted, path)
-	}
-
-	if err := abandonTopEmptyMutableAncestors(repoRoot); err != nil {
-		return err
-	}
-
-	for _, path := range deleted {
-		fmt.Fprintln(stdoutWriter, path)
 	}
 	return nil
 }
 
-func listExistingWorkspacePaths(args []string) ([]string, error) {
-	fs := flag.NewFlagSet("select", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	var (
-		repoRootOverride string
-		appOverride      string
-		rootOverride     string
-		includeAll       bool
-	)
-	fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
-	fs.StringVar(&appOverride, "app", "", "app override")
-	fs.StringVar(&rootOverride, "worktrees-root", "", "worktrees root override")
-	fs.BoolVar(&includeAll, "all", false, "include current workspace")
-	if handled, err := parseCommandFlags(fs, args, "jjw select [options]", "Interactively choose an existing workspace path."); handled || err != nil {
-		if handled {
-			return nil, nil
+func ensureAssimilatedSymlink(source string, dest string) error {
+	if st, err := os.Lstat(dest); err == nil {
+		if st.Mode()&os.ModeSymlink == 0 {
+			return fmt.Errorf("refusing to replace existing Workspace content with assimilated folder symlink: %s", dest)
 		}
-		return nil, err
+		target, err := os.Readlink(dest)
+		if err != nil {
+			return fmt.Errorf("read assimilated folder symlink %s: %w", dest, err)
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Clean(filepath.Join(filepath.Dir(dest), target))
+		}
+		if filepath.Clean(target) != filepath.Clean(source) {
+			return fmt.Errorf("refusing to replace existing Workspace symlink %s -> %s with assimilated folder source %s", dest, target, source)
+		}
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("stat assimilated folder destination %s: %w", dest, err)
 	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return fmt.Errorf("create assimilated folder parent: %w", err)
+	}
+	if err := os.Symlink(source, dest); err != nil {
+		return fmt.Errorf("symlink assimilated folder %s -> %s: %w", dest, source, err)
+	}
+	return nil
+}
 
-	repoRoot, err := resolveRepoRoot(repoRootOverride)
+func resolveRepoRoot(override string) (string, error) {
+	if override != "" {
+		root := expandPath(override)
+		abs, err := filepath.Abs(root)
+		if err != nil {
+			return "", err
+		}
+		return abs, nil
+	}
+	if out, err := commandCaptureFn("jj", "root"); err == nil {
+		root := strings.TrimSpace(out)
+		if root != "" {
+			return root, nil
+		}
+	}
+	out, err := commandCaptureFn("git", "rev-parse", "--show-toplevel")
 	if err != nil {
-		return nil, err
+		return "", errors.New("could not resolve repo root; run inside a jj/git repo or pass --repo")
 	}
-	cfg, err := loadConfig(repoRoot)
-	if err != nil {
-		return nil, err
+	root := strings.TrimSpace(out)
+	if root == "" {
+		return "", errors.New("resolved empty repo root")
 	}
-	if rootOverride != "" {
-		cfg.WorktreesRoot = expandPath(rootOverride)
-	}
-	if err := requireWorktreesRoot(cfg.WorktreesRoot); err != nil {
-		return nil, err
-	}
+	return root, nil
+}
 
-	app := deriveApp(repoRoot, appOverride)
+func deriveProject(repoRoot string) string {
+	if defaultRoot, ok := resolveDefaultWorkspaceRoot(repoRoot); ok {
+		return filepath.Base(defaultRoot)
+	}
+	return filepath.Base(repoRoot)
+}
+
+func listWorkspaceHandles(repoRoot string) ([]string, error) {
 	refs, err := listWorkspaceRefs(repoRoot)
 	if err != nil {
 		return nil, err
 	}
-
-	currentName := ""
-	if !includeAll {
-		if detected, detectErr := currentWorkspaceName(repoRoot, refs); detectErr == nil {
-			currentName = detected
-		}
-	}
-
-	var paths []string
+	handles := make([]string, 0, len(refs))
 	for _, ref := range refs {
-		if !includeAll && ref.Name == currentName {
-			continue
-		}
-		p := workspacePathForRef(repoRoot, cfg.WorktreesRoot, app, ref, currentName)
-		if st, statErr := os.Stat(p); statErr == nil && st.IsDir() {
-			paths = append(paths, p)
-		}
+		handles = append(handles, ref.Handle)
 	}
-	sort.Strings(paths)
-	return paths, nil
+	sort.Strings(handles)
+	return handles, nil
 }
 
-func workspacePathForRef(repoRoot string, worktreesRoot string, app string, ref workspaceRef, currentName string) string {
+func listWorkspaceRefs(repoRoot string) ([]workspaceRef, error) {
+	out, err := commandCaptureFn("jj", "-R", repoRoot, "workspace", "list", "-T", "name ++ \"\\t\" ++ target.change_id().short() ++ \"\\t\" ++ root ++ \"\\n\"")
+	if err != nil {
+		return nil, err
+	}
+	var refs []workspaceRef
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.Split(line, "\t")
+		ref := workspaceRef{Handle: strings.TrimSpace(parts[0])}
+		if len(parts) > 1 {
+			ref.TargetChange = strings.TrimSpace(parts[1])
+		}
+		if len(parts) > 2 {
+			ref.Root = strings.TrimSpace(parts[2])
+		}
+		refs = append(refs, ref)
+	}
+	sort.Slice(refs, func(i, j int) bool { return refs[i].Handle < refs[j].Handle })
+	return refs, nil
+}
+
+func currentWorkspaceHandle(repoRoot string, refs []workspaceRef) (string, error) {
+	cleanRepoRoot := filepath.Clean(repoRoot)
+	for _, ref := range refs {
+		if strings.TrimSpace(ref.Root) != "" && filepath.Clean(ref.Root) == cleanRepoRoot {
+			return ref.Handle, nil
+		}
+	}
+	out, err := commandCaptureFn("jj", "-R", repoRoot, "log", "-r", "@", "--no-graph", "-T", "change_id.short() ++ \"\\n\"")
+	if err != nil {
+		return "", err
+	}
+	current := strings.TrimSpace(out)
+	for _, ref := range refs {
+		if ref.TargetChange == current {
+			return ref.Handle, nil
+		}
+	}
+	return "", errors.New("could not detect Current Workspace")
+}
+
+func workspacePathForRef(repoRoot string, workspacesRoot string, project string, ref workspaceRef, currentHandle string) string {
 	if strings.TrimSpace(ref.Root) != "" {
 		return filepath.Clean(ref.Root)
 	}
-	return workspacePathForName(repoRoot, worktreesRoot, app, ref.Name, currentName)
+	return workspacePathForHandle(repoRoot, workspacesRoot, project, ref.Handle, currentHandle)
 }
 
-func workspacePathForName(repoRoot string, worktreesRoot string, app string, name string, currentName string) string {
-	if name == "default" {
+func workspacePathForHandle(repoRoot string, workspacesRoot string, project string, handle string, currentHandle string) string {
+	if handle == "default" {
 		if root, ok := resolveDefaultWorkspaceRoot(repoRoot); ok {
 			return root
 		}
 	}
-	if currentName != "" && name == currentName {
+	if currentHandle != "" && handle == currentHandle {
 		return repoRoot
 	}
-	return filepath.Join(worktreesRoot, app, name)
+	return filepath.Join(workspacesRoot, project, handle)
 }
 
 func resolveDefaultWorkspaceRoot(repoRoot string) (string, bool) {
@@ -1291,278 +1770,6 @@ func resolveDefaultWorkspaceRoot(repoRoot string) (string, bool) {
 	return "", false
 }
 
-func resolveRepoRoot(override string) (string, error) {
-	if override != "" {
-		root := expandPath(override)
-		abs, err := filepath.Abs(root)
-		if err != nil {
-			return "", err
-		}
-		return abs, nil
-	}
-
-	if out, err := commandCaptureFn("jj", "root"); err == nil {
-		root := strings.TrimSpace(out)
-		if root != "" {
-			return root, nil
-		}
-	}
-
-	out, err := commandCaptureFn("git", "rev-parse", "--show-toplevel")
-	if err != nil {
-		return "", errors.New("could not resolve repo root; run inside a jj/git repo or pass --repo")
-	}
-	root := strings.TrimSpace(out)
-	if root == "" {
-		return "", errors.New("resolved empty repo root")
-	}
-	return root, nil
-}
-
-func deriveApp(repoRoot string, override string) string {
-	if strings.TrimSpace(override) != "" {
-		return strings.TrimSpace(override)
-	}
-	if defaultRoot, ok := resolveDefaultWorkspaceRoot(repoRoot); ok {
-		return filepath.Base(defaultRoot)
-	}
-	return filepath.Base(repoRoot)
-}
-
-func listWorkspaceNames(repoRoot string) ([]string, error) {
-	out, err := commandCaptureFn("jj", "-R", repoRoot, "workspace", "list", "-T", "name ++ \"\\n\"")
-	if err != nil {
-		return nil, err
-	}
-
-	var names []string
-	seen := map[string]struct{}{}
-	for _, line := range strings.Split(out, "\n") {
-		name := strings.TrimSpace(line)
-		if name == "" {
-			continue
-		}
-		if _, ok := seen[name]; ok {
-			continue
-		}
-		seen[name] = struct{}{}
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names, nil
-}
-
-func listWorkspaceRefs(repoRoot string) ([]workspaceRef, error) {
-	out, err := commandCaptureFn("jj", "-R", repoRoot, "workspace", "list", "-T", "name ++ \"\\t\" ++ target.change_id().short() ++ \"\\t\" ++ root ++ \"\\n\"")
-	if err != nil {
-		return nil, err
-	}
-
-	var refs []workspaceRef
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		parts := strings.Split(line, "\t")
-		if len(parts) == 1 {
-			refs = append(refs, workspaceRef{Name: strings.TrimSpace(parts[0]), TargetChange: ""})
-			continue
-		}
-		if len(parts) == 2 {
-			refs = append(refs, workspaceRef{Name: strings.TrimSpace(parts[0]), TargetChange: strings.TrimSpace(parts[1])})
-			continue
-		}
-		if len(parts) == 3 {
-			refs = append(refs, workspaceRef{Name: strings.TrimSpace(parts[0]), TargetChange: strings.TrimSpace(parts[1]), Root: strings.TrimSpace(parts[2])})
-			continue
-		}
-	}
-	sort.Slice(refs, func(i, j int) bool {
-		return refs[i].Name < refs[j].Name
-	})
-	return refs, nil
-}
-
-func currentWorkspaceName(repoRoot string, refs []workspaceRef) (string, error) {
-	cleanRepoRoot := filepath.Clean(repoRoot)
-	for _, ref := range refs {
-		if strings.TrimSpace(ref.Root) != "" && filepath.Clean(ref.Root) == cleanRepoRoot {
-			return ref.Name, nil
-		}
-	}
-
-	out, err := commandCaptureFn("jj", "-R", repoRoot, "log", "-r", "@", "--no-graph", "-T", "change_id.short() ++ \"\\n\"")
-	if err != nil {
-		return "", err
-	}
-	current := strings.TrimSpace(out)
-	for _, ref := range refs {
-		if ref.TargetChange == current {
-			return ref.Name, nil
-		}
-	}
-	return "", errors.New("could not detect current workspace")
-}
-
-func loadConfig(repoRoot string) (config, error) {
-	defaults := config{
-		NameStrategy: strategyFirstUnused,
-		NameList:     append([]string(nil), defaultNameList...),
-		MainStack: mainStackConfig{
-			DefaultWorkspace: "default",
-			RebaseMode:       "auto",
-			StackShape:       "auto",
-			ConflictStrategy: "prefer-clean",
-		},
-	}
-
-	merged := defaults
-
-	if globalPath, ok := globalConfigPath(); ok {
-		if err := mergeConfigFile(&merged, globalPath); err != nil {
-			return config{}, err
-		}
-	}
-
-	localPath := filepath.Join(repoRoot, ".jjw", "config.yaml")
-	if err := mergeConfigFile(&merged, localPath); err != nil {
-		return config{}, err
-	}
-
-	merged.DevRoot = expandPath(merged.DevRoot)
-	merged.WorktreesRoot = expandPath(merged.WorktreesRoot)
-
-	if merged.NameStrategy == "" {
-		merged.NameStrategy = strategyFirstUnused
-	}
-	if merged.NameStrategy != strategyFirstUnused && merged.NameStrategy != strategyStateful {
-		return config{}, fmt.Errorf("invalid name_strategy: %q", merged.NameStrategy)
-	}
-
-	if strings.TrimSpace(merged.MainStack.DefaultWorkspace) == "" {
-		merged.MainStack.DefaultWorkspace = "default"
-	}
-	if err := validateMainStackRebaseMode(merged.MainStack.RebaseMode); err != nil {
-		return config{}, err
-	}
-	if err := validateMainStackStackShape(merged.MainStack.StackShape); err != nil {
-		return config{}, err
-	}
-	if _, err := resolveMainStackConflictStrategy(merged.MainStack.ConflictStrategy); err != nil {
-		return config{}, err
-	}
-
-	return merged, nil
-}
-
-func mergeConfigFile(dst *config, path string) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return fmt.Errorf("read config %s: %w", path, err)
-	}
-
-	var src config
-	if err := yaml.Unmarshal(data, &src); err != nil {
-		return fmt.Errorf("parse config %s: %w", path, err)
-	}
-
-	if strings.TrimSpace(src.DevRoot) != "" {
-		dst.DevRoot = strings.TrimSpace(src.DevRoot)
-	}
-	if strings.TrimSpace(src.WorktreesRoot) != "" {
-		dst.WorktreesRoot = strings.TrimSpace(src.WorktreesRoot)
-	}
-	if strings.TrimSpace(src.NameStrategy) != "" {
-		dst.NameStrategy = strings.TrimSpace(src.NameStrategy)
-	}
-	if len(src.NameList) > 0 {
-		dst.NameList = append([]string(nil), src.NameList...)
-	}
-	if strings.TrimSpace(src.MainStack.DefaultWorkspace) != "" {
-		dst.MainStack.DefaultWorkspace = strings.TrimSpace(src.MainStack.DefaultWorkspace)
-	}
-	if strings.TrimSpace(src.MainStack.RebaseMode) != "" {
-		dst.MainStack.RebaseMode = strings.TrimSpace(src.MainStack.RebaseMode)
-	}
-	if strings.TrimSpace(src.MainStack.StackShape) != "" {
-		dst.MainStack.StackShape = strings.TrimSpace(src.MainStack.StackShape)
-	}
-	if strings.TrimSpace(src.MainStack.ConflictStrategy) != "" {
-		dst.MainStack.ConflictStrategy = strings.TrimSpace(src.MainStack.ConflictStrategy)
-	}
-
-	return nil
-}
-
-func requireWorktreesRoot(worktreesRoot string) error {
-	if strings.TrimSpace(worktreesRoot) == "" {
-		return errors.New("worktrees_root is required; set it in ~/.config/jjw/config.yaml or .jjw/config.yaml, or pass --worktrees-root")
-	}
-	return nil
-}
-
-func globalConfigPath() (string, bool) {
-	if xdg := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); xdg != "" {
-		return filepath.Join(expandPath(xdg), "jjw", "config.yaml"), true
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", false
-	}
-	return filepath.Join(home, ".config", "jjw", "config.yaml"), true
-}
-
-func chooseAutoName(cfg config, repoRoot string, inUse map[string]struct{}) (string, error) {
-	if len(cfg.NameList) == 0 {
-		return "", errors.New("name_list is empty; configure names in ~/.config/jjw/config.yaml or .jjw/config.yaml")
-	}
-
-	sanitized := make([]string, 0, len(cfg.NameList))
-	for _, candidate := range cfg.NameList {
-		trimmed := strings.TrimSpace(candidate)
-		if trimmed != "" {
-			sanitized = append(sanitized, trimmed)
-		}
-	}
-	if len(sanitized) == 0 {
-		return "", errors.New("name_list has no usable entries")
-	}
-
-	switch cfg.NameStrategy {
-	case strategyFirstUnused:
-		for _, candidate := range sanitized {
-			if _, ok := inUse[candidate]; ok {
-				continue
-			}
-			return candidate, nil
-		}
-		return "", errors.New("all configured names are in use; add more names to name_list")
-	case strategyStateful:
-		st, err := loadState(repoRoot)
-		if err != nil {
-			return "", err
-		}
-		for i := st.NextIndex; i < len(sanitized); i++ {
-			candidate := sanitized[i]
-			if _, ok := inUse[candidate]; ok {
-				continue
-			}
-			st.NextIndex = i + 1
-			if saveErr := saveState(repoRoot, st); saveErr != nil {
-				return "", saveErr
-			}
-			return candidate, nil
-		}
-		return "", errors.New("all configured names are exhausted for stateful strategy; extend name_list")
-	default:
-		return "", fmt.Errorf("unsupported name_strategy: %s", cfg.NameStrategy)
-	}
-}
-
 func loadState(repoRoot string) (state, error) {
 	path := filepath.Join(repoRoot, ".jjw", "state.json")
 	data, err := os.ReadFile(path)
@@ -1572,7 +1779,6 @@ func loadState(repoRoot string) (state, error) {
 		}
 		return state{}, fmt.Errorf("read state %s: %w", path, err)
 	}
-
 	var st state
 	if err := json.Unmarshal(data, &st); err != nil {
 		return state{}, fmt.Errorf("parse state %s: %w", path, err)
@@ -1611,346 +1817,8 @@ func ensureEnvrc(workspacePath string) error {
 	return nil
 }
 
-func selectOne(items []string) (string, error) {
-	if len(items) == 1 {
-		return items[0], nil
-	}
-	fmt.Fprintln(stderrWriter, "Choose a workspace:")
-	for i, item := range items {
-		fmt.Fprintf(stderrWriter, "  %2d) %s\n", i+1, item)
-	}
-	fmt.Fprint(stderrWriter, "Selection (number, q to cancel): ")
-
-	reader := bufio.NewReader(stdinReader)
-	line, err := reader.ReadString('\n')
-	if err != nil {
-		return "", err
-	}
-	line = strings.TrimSpace(line)
-	if line == "" || strings.EqualFold(line, "q") || strings.EqualFold(line, "quit") {
-		return "", errors.New("no selection")
-	}
-	n, err := strconv.Atoi(line)
-	if err != nil || n < 1 || n > len(items) {
-		return "", errors.New("invalid selection")
-	}
-	return items[n-1], nil
-}
-
-func selectMany(items []string) ([]string, error) {
-	sort.Strings(items)
-
-	if canUseInteractiveMultiSelect() {
-		selected, err := interactiveMultiSelect(items)
-		if err != nil {
-			return nil, err
-		}
-		if len(selected) > 0 {
-			return selected, nil
-		}
-		return nil, nil
-	}
-
-	fmt.Fprintln(stderrWriter, "Select workspaces to delete:")
-	for i, item := range items {
-		fmt.Fprintf(stderrWriter, "  %2d) %s\n", i+1, item)
-	}
-	fmt.Fprint(stderrWriter, "Selection (e.g. 1,3-5, a=all, blank/q=cancel): ")
-
-	reader := bufio.NewReader(stdinReader)
-	line, err := reader.ReadString('\n')
-	if err != nil {
-		return nil, err
-	}
-	line = strings.TrimSpace(line)
-	if line == "" || strings.EqualFold(line, "q") || strings.EqualFold(line, "quit") {
-		return nil, nil
-	}
-	if strings.EqualFold(line, "a") || strings.EqualFold(line, "all") {
-		return append([]string(nil), items...), nil
-	}
-
-	indices, parseErr := parseSelectionIndices(line, len(items))
-	if parseErr != nil {
-		return nil, parseErr
-	}
-	selected := make([]string, 0, len(indices))
-	for _, idx := range indices {
-		selected = append(selected, items[idx])
-	}
-	return selected, nil
-}
-
-func canUseInteractiveMultiSelect() bool {
-	in, ok := stdinReader.(*os.File)
-	if !ok {
-		return false
-	}
-	out, ok := stderrWriter.(*os.File)
-	if !ok {
-		return false
-	}
-	return term.IsTerminal(int(in.Fd())) && term.IsTerminal(int(out.Fd()))
-}
-
-func interactiveMultiSelect(items []string) ([]string, error) {
-	in := stdinReader.(*os.File)
-	out := stderrWriter.(*os.File)
-
-	fd := int(in.Fd())
-	oldState, err := term.MakeRaw(fd)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		_ = term.Restore(fd, oldState)
-	}()
-
-	_, _ = fmt.Fprint(out, "\x1b[?25l")
-	defer func() {
-		_, _ = fmt.Fprint(out, "\x1b[?25h")
-		_, _ = fmt.Fprint(out, "\x1b[0m\r\n")
-	}()
-
-	selected := make(map[int]bool, len(items))
-	cursor := 0
-	lastRenderedRows := 0
-
-	render := func() {
-		if lastRenderedRows > 0 {
-			_, _ = fmt.Fprintf(out, "\x1b[%dA", lastRenderedRows)
-			for i := 0; i < lastRenderedRows; i++ {
-				_, _ = fmt.Fprint(out, "\r\x1b[2K")
-				if i < lastRenderedRows-1 {
-					_, _ = fmt.Fprint(out, "\x1b[1B")
-				}
-			}
-			if lastRenderedRows > 1 {
-				_, _ = fmt.Fprintf(out, "\x1b[%dA", lastRenderedRows-1)
-			}
-		}
-
-		lines := buildMultiSelectLines(items, cursor, selected, terminalWidth(out))
-
-		for _, line := range lines {
-			_, _ = fmt.Fprintf(out, "%s\r\n", line)
-		}
-
-		lastRenderedRows = len(lines)
-	}
-
-	render()
-	reader := bufio.NewReader(in)
-	for {
-		b, readErr := reader.ReadByte()
-		if readErr != nil {
-			return nil, readErr
-		}
-
-		switch b {
-		case 'q', 'Q':
-			return nil, nil
-		case 'a', 'A':
-			invertSelections(selected, len(items))
-		case 'c', 'C':
-			return selectedItems(items, selected), nil
-		case 'k':
-			if cursor > 0 {
-				cursor--
-			}
-		case 'j':
-			if cursor < len(items) {
-				cursor++
-			}
-		case ' ':
-			if cursor < len(items) {
-				selected[cursor] = !selected[cursor]
-			}
-		case '\r', '\n':
-			nextCursor, done := applyEnter(cursor, len(items), selected)
-			cursor = nextCursor
-			if done {
-				return selectedItems(items, selected), nil
-			}
-		case 0x1b:
-			next, err1 := reader.ReadByte()
-			if err1 != nil {
-				return nil, nil
-			}
-			if next != '[' {
-				return nil, nil
-			}
-			arrow, err2 := reader.ReadByte()
-			if err2 != nil {
-				return nil, nil
-			}
-			switch arrow {
-			case 'A':
-				if cursor > 0 {
-					cursor--
-				}
-			case 'B':
-				if cursor < len(items) {
-					cursor++
-				}
-			}
-		}
-
-		render()
-	}
-}
-
-func buildMultiSelectLines(items []string, cursor int, selected map[int]bool, width int) []string {
-	lines := make([]string, 0, 3+len(items))
-	lines = appendWrappedLine(lines, "", "", "Select workspaces to delete", width)
-	lines = appendWrappedLine(lines, "", "", "Up/Down: move  Space: toggle  Enter: toggle+next/submit  a: invert  c: continue  q: cancel", width)
-	lines = append(lines, "")
-
-	for i, item := range items {
-		pointer := " "
-		if i == cursor {
-			pointer = ">"
-		}
-		mark := "[ ]"
-		if selected[i] {
-			mark = "[x]"
-		}
-
-		prefix := fmt.Sprintf("%s %s ", pointer, mark)
-		continuation := strings.Repeat(" ", len(prefix))
-		lines = appendWrappedLine(lines, prefix, continuation, item, width)
-	}
-
-	submitPointer := " "
-	if cursor == len(items) {
-		submitPointer = ">"
-	}
-	lines = append(lines, fmt.Sprintf("%s [ continue ]", submitPointer))
-
-	return lines
-}
-
-func selectedItems(items []string, selected map[int]bool) []string {
-	outItems := make([]string, 0, len(selected))
-	for i := 0; i < len(items); i++ {
-		if selected[i] {
-			outItems = append(outItems, items[i])
-		}
-	}
-	return outItems
-}
-
-func invertSelections(selected map[int]bool, itemCount int) {
-	for i := 0; i < itemCount; i++ {
-		selected[i] = !selected[i]
-	}
-}
-
-func applyEnter(cursor, itemCount int, selected map[int]bool) (nextCursor int, done bool) {
-	if cursor >= itemCount {
-		return cursor, true
-	}
-	selected[cursor] = !selected[cursor]
-	if cursor < itemCount {
-		cursor++
-	}
-	return cursor, false
-}
-
-func appendWrappedLine(lines []string, prefix, continuation, content string, width int) []string {
-	effectiveWidth := width
-	if effectiveWidth > 1 {
-		effectiveWidth--
-	}
-
-	prefixRunes := []rune(prefix)
-	contentRunes := []rune(content)
-	maxFirst := effectiveWidth - len(prefixRunes)
-	if effectiveWidth <= 0 || maxFirst <= 0 {
-		return append(lines, prefix+content)
-	}
-
-	maxNext := effectiveWidth - len([]rune(continuation))
-	if maxNext <= 0 {
-		maxNext = maxFirst
-	}
-
-	if len(contentRunes) <= maxFirst {
-		return append(lines, prefix+content)
-	}
-
-	lines = append(lines, prefix+string(contentRunes[:maxFirst]))
-	contentRunes = contentRunes[maxFirst:]
-	for len(contentRunes) > 0 {
-		take := maxNext
-		if len(contentRunes) < take {
-			take = len(contentRunes)
-		}
-		lines = append(lines, continuation+string(contentRunes[:take]))
-		contentRunes = contentRunes[take:]
-	}
-
-	return lines
-}
-
-func terminalWidth(f *os.File) int {
-	width, _, err := term.GetSize(int(f.Fd()))
-	if err != nil || width <= 0 {
-		return 0
-	}
-	return width
-}
-
-func parseSelectionIndices(input string, max int) ([]int, error) {
-	parts := strings.Split(input, ",")
-	seen := map[int]struct{}{}
-	indices := make([]int, 0, len(parts))
-	for _, p := range parts {
-		token := strings.TrimSpace(p)
-		if token == "" {
-			continue
-		}
-		if strings.Contains(token, "-") {
-			bounds := strings.SplitN(token, "-", 2)
-			if len(bounds) != 2 {
-				return nil, fmt.Errorf("invalid selection: %q", token)
-			}
-			start, errStart := strconv.Atoi(strings.TrimSpace(bounds[0]))
-			end, errEnd := strconv.Atoi(strings.TrimSpace(bounds[1]))
-			if errStart != nil || errEnd != nil || start < 1 || end < 1 || start > max || end > max || start > end {
-				return nil, fmt.Errorf("invalid selection: %q", token)
-			}
-			for n := start; n <= end; n++ {
-				idx := n - 1
-				if _, ok := seen[idx]; ok {
-					continue
-				}
-				seen[idx] = struct{}{}
-				indices = append(indices, idx)
-			}
-			continue
-		}
-
-		n, convErr := strconv.Atoi(token)
-		if convErr != nil || n < 1 || n > max {
-			return nil, fmt.Errorf("invalid selection: %q", token)
-		}
-		idx := n - 1
-		if _, ok := seen[idx]; ok {
-			continue
-		}
-		seen[idx] = struct{}{}
-		indices = append(indices, idx)
-	}
-	return indices, nil
-}
-
-func confirmDelete(count int) (bool, error) {
-	fmt.Fprintf(stderrWriter, "Delete %d workspace directorie(s)? [y/N]: ", count)
-	if canUseInteractiveConfirm() {
-		return confirmDeleteImmediate()
-	}
-
+func confirm(prompt string) (bool, error) {
+	fmt.Fprint(stderrWriter, prompt)
 	reader := bufio.NewReader(stdinReader)
 	line, err := reader.ReadString('\n')
 	if err != nil {
@@ -1960,7 +1828,7 @@ func confirmDelete(count int) (bool, error) {
 	return answer == "y" || answer == "yes", nil
 }
 
-func canUseInteractiveConfirm() bool {
+func canUseTUI() bool {
 	in, ok := stdinReader.(*os.File)
 	if !ok {
 		return false
@@ -1972,95 +1840,355 @@ func canUseInteractiveConfirm() bool {
 	return term.IsTerminal(int(in.Fd())) && term.IsTerminal(int(out.Fd()))
 }
 
-func confirmDeleteImmediate() (bool, error) {
-	in := stdinReader.(*os.File)
-	out := stderrWriter.(*os.File)
-
-	fd := int(in.Fd())
-	oldState, err := term.MakeRaw(fd)
+func isLiteralEmptyDir(path string) (bool, error) {
+	entries, err := os.ReadDir(path)
 	if err != nil {
 		return false, err
 	}
-	defer func() {
-		_ = term.Restore(fd, oldState)
-	}()
-
-	reader := bufio.NewReader(in)
-	for {
-		b, readErr := reader.ReadByte()
-		if readErr != nil {
-			return false, readErr
-		}
-
-		done, confirmed := interpretConfirmByte(b)
-		if !done {
-			continue
-		}
-
-		switch b {
-		case 'y', 'Y':
-			_, _ = fmt.Fprint(out, "y\r\n")
-		case 'n', 'N':
-			_, _ = fmt.Fprint(out, "n\r\n")
-		default:
-			_, _ = fmt.Fprint(out, "\r\n")
-		}
-
-		return confirmed, nil
-	}
+	return len(entries) == 0, nil
 }
 
-func interpretConfirmByte(b byte) (done bool, confirmed bool) {
-	switch b {
-	case 'y', 'Y':
-		return true, true
-	case 'n', 'N', 'q', 'Q', '\r', '\n', 0x1b:
-		return true, false
-	default:
-		return false, false
-	}
+func exists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
-func runFzf(items []string, multi bool) (string, error) {
-	args := []string{"--prompt", "jjw> "}
-	if multi {
-		args = append(args, "-m")
+func expandPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
 	}
-	cmd := exec.Command("fzf", args...)
-	cmd.Stderr = stderrWriter
+	if path == "~" {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			return home
+		}
+	}
+	if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			return filepath.Join(home, path[2:])
+		}
+	}
+	return os.ExpandEnv(path)
+}
 
-	stdin, err := cmd.StdinPipe()
+// Shared Bubble Tea/Lip Gloss selector.
+type selectorMode int
+
+const (
+	selectorSingle selectorMode = iota
+	selectorMulti
+)
+
+type selectorItem struct {
+	Handle   string
+	Path     string
+	Status   string
+	Markers  string
+	Disabled bool
+	All      bool
+}
+
+type selectorOptions struct {
+	Title            string
+	Mode             selectorMode
+	Items            []selectorItem
+	AllDefault       bool
+	ForceEnabled     bool
+	AllowForceToggle bool
+	StackOptions     stackConfig
+}
+
+type selectorResult struct {
+	Items        []selectorItem
+	ForceEnabled bool
+	StackOptions stackConfig
+}
+
+type selectorModel struct {
+	opts     selectorOptions
+	cursor   int
+	selected map[int]bool
+	filter   string
+	result   selectorResult
+	cancel   bool
+	width    int
+}
+
+func runSelector(opts selectorOptions) ([]selectorItem, selectorOptions, error) {
+	model := selectorModel{opts: opts, selected: map[int]bool{}, width: 100}
+	program := tea.NewProgram(model, tea.WithInput(stdinReader), tea.WithOutput(stderrWriter))
+	out, err := program.Run()
 	if err != nil {
-		return "", err
+		return nil, opts, err
 	}
-
-	var out bytes.Buffer
-	cmd.Stdout = &out
-
-	if err := cmd.Start(); err != nil {
-		return "", err
+	m, ok := out.(selectorModel)
+	if !ok || m.cancel {
+		return nil, opts, nil
 	}
+	opts.ForceEnabled = m.result.ForceEnabled
+	opts.StackOptions = m.result.StackOptions
+	return m.result.Items, opts, nil
+}
 
-	for _, item := range items {
-		if _, err := io.WriteString(stdin, item+"\n"); err != nil {
-			_ = stdin.Close()
-			_ = cmd.Wait()
-			return "", err
-		}
-	}
-	_ = stdin.Close()
+func (m selectorModel) Init() tea.Cmd { return nil }
 
-	if err := cmd.Wait(); err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			if exitErr.ExitCode() == 1 || exitErr.ExitCode() == 130 {
-				return "", nil
+func (m selectorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "ctrl+c", "esc":
+			m.cancel = true
+			return m, tea.Quit
+		case "q":
+			m.cancel = true
+			return m, tea.Quit
+		case "up", "k":
+			if m.cursor > 0 {
+				m.cursor--
+			}
+		case "down", "j":
+			if m.cursor < len(m.visibleItems())-1 {
+				m.cursor++
+			}
+		case "backspace":
+			if len(m.filter) > 0 {
+				m.filter = m.filter[:len(m.filter)-1]
+				m.cursor = 0
+			}
+		case " ":
+			if m.opts.Mode == selectorMulti {
+				visible := m.visibleItems()
+				if m.cursor >= 0 && m.cursor < len(visible) {
+					idx := visible[m.cursor]
+					item := m.opts.Items[idx]
+					if !item.Disabled && !item.All {
+						m.selected[idx] = !m.selected[idx]
+					}
+				}
+			}
+		case "enter":
+			return m.submit(), tea.Quit
+		case "f":
+			if m.opts.AllowForceToggle {
+				m.opts.ForceEnabled = !m.opts.ForceEnabled
+				for i := range m.opts.Items {
+					if m.opts.Items[i].All {
+						continue
+					}
+					if m.opts.ForceEnabled {
+						m.opts.Items[i].Disabled = m.opts.Items[i].Status == "missing"
+					} else {
+						m.opts.Items[i].Disabled = m.opts.Items[i].Status != "empty" && m.opts.Items[i].Status != "stacked"
+					}
+				}
+			}
+		case "s":
+			m.opts.StackOptions.Shape = cycle(m.opts.StackOptions.Shape, []string{"auto", "linear", "merge"})
+		case "r":
+			m.opts.StackOptions.RebaseMode = cycle(m.opts.StackOptions.RebaseMode, []string{"auto", "branch", "revision"})
+		case "c":
+			m.opts.StackOptions.ConflictStrategy = cycle(m.opts.StackOptions.ConflictStrategy, []string{"prefer-clean", "off"})
+		default:
+			if len(msg.String()) == 1 {
+				r := []rune(msg.String())[0]
+				if unicode.IsPrint(r) {
+					m.filter += msg.String()
+					m.cursor = 0
+				}
 			}
 		}
-		return "", err
 	}
+	return m, nil
+}
 
-	return strings.TrimSpace(out.String()), nil
+func (m selectorModel) submit() selectorModel {
+	visible := m.visibleItems()
+	if len(visible) == 0 {
+		m.cancel = true
+		return m
+	}
+	if m.cursor >= len(visible) {
+		m.cursor = len(visible) - 1
+	}
+	if m.opts.Mode == selectorSingle {
+		idx := visible[m.cursor]
+		item := m.opts.Items[idx]
+		if item.Disabled {
+			m.cancel = true
+			return m
+		}
+		m.result = selectorResult{Items: []selectorItem{item}, ForceEnabled: m.opts.ForceEnabled, StackOptions: m.opts.StackOptions}
+		return m
+	}
+	idx := visible[m.cursor]
+	item := m.opts.Items[idx]
+	if item.All {
+		items := []selectorItem{}
+		for _, candidate := range m.opts.Items {
+			if !candidate.All && !candidate.Disabled {
+				items = append(items, candidate)
+			}
+		}
+		m.result = selectorResult{Items: items, ForceEnabled: m.opts.ForceEnabled, StackOptions: m.opts.StackOptions}
+		return m
+	}
+	if !item.Disabled {
+		m.selected[idx] = true
+	}
+	items := []selectorItem{}
+	for selectedIdx, selected := range m.selected {
+		if selected {
+			items = append(items, m.opts.Items[selectedIdx])
+		}
+	}
+	m.result = selectorResult{Items: items, ForceEnabled: m.opts.ForceEnabled, StackOptions: m.opts.StackOptions}
+	return m
+}
+
+func (m selectorModel) View() string {
+	var b strings.Builder
+	styles := selectorStyles()
+	fmt.Fprintln(&b, styles.Title.Render(m.opts.Title))
+	if m.filter != "" {
+		fmt.Fprintln(&b, styles.Help.Render("filter: "+m.filter))
+	}
+	visible := m.visibleItems()
+	cursor := m.cursor
+	if cursor >= len(visible) && len(visible) > 0 {
+		cursor = len(visible) - 1
+	}
+	if len(visible) == 0 {
+		fmt.Fprintln(&b, styles.Disabled.Render("No matching Workspaces"))
+	}
+	for row, idx := range visible {
+		item := m.opts.Items[idx]
+		pointer := "  "
+		if row == cursor {
+			pointer = "> "
+		}
+		mark := ""
+		if m.opts.Mode == selectorMulti && !item.All {
+			mark = "[ ] "
+			if m.selected[idx] {
+				mark = "[x] "
+			}
+		}
+		line := fmt.Sprintf("%s%s%-14s %-10s %-18s %s", pointer, mark, item.Handle, item.Status, item.Markers, item.Path)
+		if item.Disabled {
+			line = styles.Disabled.Render(line)
+		} else if row == m.cursor {
+			line = styles.Selected.Render(line)
+		} else {
+			line = styleStatus(styles, item.Status, line)
+		}
+		fmt.Fprintln(&b, line)
+	}
+	footer := "↑/↓ move  type filter  enter choose  q quit"
+	if m.opts.Mode == selectorMulti {
+		footer = "↑/↓ move  space toggle  enter submit/all  type filter  q quit"
+	}
+	if m.opts.AllowForceToggle {
+		footer += fmt.Sprintf("  f force:%v", m.opts.ForceEnabled)
+	}
+	if m.opts.StackOptions.Shape != "" || m.opts.StackOptions.RebaseMode != "" || m.opts.StackOptions.ConflictStrategy != "" {
+		footer += fmt.Sprintf("  s shape:%s  r rebase:%s  c conflicts:%s", emptyDefault(m.opts.StackOptions.Shape, "auto"), emptyDefault(m.opts.StackOptions.RebaseMode, "auto"), emptyDefault(m.opts.StackOptions.ConflictStrategy, "prefer-clean"))
+	}
+	fmt.Fprintln(&b, styles.Help.Render(footer))
+	return b.String()
+}
+
+func (m selectorModel) visibleItems() []int {
+	needle := strings.ToLower(strings.TrimSpace(m.filter))
+	var out []int
+	for i, item := range m.opts.Items {
+		if needle == "" || strings.Contains(strings.ToLower(item.Handle+" "+item.Path+" "+item.Status+" "+item.Markers), needle) {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+func selectorItemsForOpen(infos []workspaceInfo) []selectorItem {
+	items := make([]selectorItem, 0, len(infos))
+	for _, info := range infos {
+		items = append(items, selectorItem{Handle: info.Ref.Handle, Path: info.Path, Status: statusLabel(info), Markers: strings.Join(markers(info), ","), Disabled: info.Missing})
+	}
+	return items
+}
+
+func selectorItemsForClose(infos []workspaceInfo, force bool) []selectorItem {
+	items := []selectorItem{}
+	for _, info := range infos {
+		if info.Main {
+			continue
+		}
+		disabled := info.Missing || (!force && !isClosable(info))
+		items = append(items, selectorItem{Handle: info.Ref.Handle, Path: info.Path, Status: statusLabel(info), Markers: strings.Join(markers(info), ","), Disabled: disabled})
+	}
+	return items
+}
+
+func selectorItemsForStack(infos []workspaceInfo) []selectorItem {
+	items := []selectorItem{{Handle: "All", Status: "default", Markers: "stack-relevant", All: true}}
+	for _, info := range infos {
+		if info.Main {
+			continue
+		}
+		items = append(items, selectorItem{Handle: info.Ref.Handle, Path: info.Path, Status: statusLabel(info), Markers: strings.Join(markers(info), ","), Disabled: !isStackRelevant(info)})
+	}
+	return items
+}
+
+type styles struct{ Title, Selected, Disabled, Help, Conflict, Stacked, Empty lipgloss.Style }
+
+func selectorStyles() styles {
+	if os.Getenv("NO_COLOR") != "" {
+		base := lipgloss.NewStyle()
+		return styles{Title: base.Bold(true), Selected: base.Bold(true), Disabled: base.Faint(true), Help: base.Faint(true), Conflict: base, Stacked: base, Empty: base}
+	}
+	return styles{
+		Title:    lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("63")),
+		Selected: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212")),
+		Disabled: lipgloss.NewStyle().Faint(true),
+		Help:     lipgloss.NewStyle().Faint(true),
+		Conflict: lipgloss.NewStyle().Foreground(lipgloss.Color("196")),
+		Stacked:  lipgloss.NewStyle().Foreground(lipgloss.Color("42")),
+		Empty:    lipgloss.NewStyle().Foreground(lipgloss.Color("244")),
+	}
+}
+
+func styleStatus(s styles, status string, line string) string {
+	switch status {
+	case "conflict":
+		return s.Conflict.Render(line)
+	case "stacked":
+		return s.Stacked.Render(line)
+	case "empty", "missing":
+		return s.Empty.Render(line)
+	default:
+		return line
+	}
+}
+
+func cycle(current string, values []string) string {
+	current = emptyDefault(strings.TrimSpace(strings.ToLower(current)), values[0])
+	for i, value := range values {
+		if current == value {
+			return values[(i+1)%len(values)]
+		}
+	}
+	return values[0]
+}
+
+func emptyDefault(value, def string) string {
+	if strings.TrimSpace(value) == "" {
+		return def
+	}
+	return value
 }
 
 func runCommandCapture(name string, args ...string) (string, error) {
@@ -2087,52 +2215,4 @@ func runCommandToStderr(name string, args ...string) error {
 		return fmt.Errorf("%s %s failed: %w", name, strings.Join(args, " "), err)
 	}
 	return nil
-}
-
-func exists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}
-
-func isLiteralEmptyDir(path string) (bool, error) {
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		return false, err
-	}
-	return len(entries) == 0, nil
-}
-
-func splitNonEmptyLines(s string) []string {
-	lines := strings.Split(s, "\n")
-	out := make([]string, 0, len(lines))
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		out = append(out, line)
-	}
-	return out
-}
-
-func expandPath(path string) string {
-	trimmed := strings.TrimSpace(path)
-	if trimmed == "" {
-		return ""
-	}
-	if strings.HasPrefix(trimmed, "~") {
-		home, err := os.UserHomeDir()
-		if err == nil {
-			if trimmed == "~" {
-				trimmed = home
-			} else if strings.HasPrefix(trimmed, "~/") {
-				trimmed = filepath.Join(home, strings.TrimPrefix(trimmed, "~/"))
-			}
-		}
-	}
-	abs, err := filepath.Abs(trimmed)
-	if err == nil {
-		return abs
-	}
-	return trimmed
 }
