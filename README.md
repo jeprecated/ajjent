@@ -1,20 +1,48 @@
 # jj-workspace-helper
 
-`jjw` is a workspace manager for `jj` that keeps workspaces under a predictable layout:
+`jjw` is a Jujutsu Workspace lifecycle tool. It keeps Workspaces under a predictable Project layout and optimizes for quick create/open/stack/close loops.
 
-- `~/Development/worktrees/<app>/<workspace>` by default
-- app defaults to the repo basename
-- name can be explicit or auto-selected from a configured list
+Canonical layout for Workspaces created by `jjw`:
+
+```text
+<workspaces_root>/<project>/<workspace_handle>
+```
+
+`workspaces_root` is required. `project` defaults to the repo/default-workspace basename unless configured or overridden with `--project`. A Workspace Handle is a reusable safe slug such as `alpha`, `kilo`, or `feature-2`.
 
 ## Commands
 
-- `jjw create [name]` - Create a workspace and print its path (shell wrapper can auto-`cd`)
-- `jjw list` - Print workspace paths for the current repo
-- `jjw select` - Interactively pick a workspace path
-- `jjw tidy` - Auto-remove defunct empty dirs, then open interactive multi-select (arrows + space + enter) for optional non-default workspace deletes
-- `jjw cd [name]` - Print selected existing workspace path (use `jjw create [name]` to create)
-- `jjw main` - Print path for main workspace (`default`)
-- `jjw stack` - Run `jj st` across all repo workspaces, then rebase `default` onto all others (`--workspace` to override, defaults to `default`, `--rebase-mode auto|branch|revision`, `--stack-shape auto|linear|merge`, `--conflict-strategy off|prefer-clean`)
+### Setup
+
+- `jjw init [--local] [--force] [--workspaces-root PATH] [--project PROJECT]` — create config. Global by default; `--local` writes `<repo>/.jjw/config.yaml`.
+
+### Workspace lifecycle
+
+- `jjw create [handle]` — create a Workspace and print its path. Without a handle, picks one from `workspace_handles`.
+- `jjw open [handle]` — print an existing Workspace path. With no handle, opens the built-in selector. Opening never creates.
+- `jjw close [handle...]` — close Workspaces and print the Main Workspace path for shell wrappers.
+- `jjw close --all` — close all Closable Workspaces.
+- `jjw close --force [--yes] ...` — Forced Closing: abandon unique mutable changes not reachable from Main or any other Workspace, then close.
+- `jjw main` — print the Main Workspace path.
+
+### Stacking
+
+- `jjw stack [handle...]` — Stack selected Workspaces into the Main Workspace.
+- `jjw stack --all` — non-interactive equivalent of the selector's All row.
+
+Stack's All row includes unstacked/conflicted Workspaces and excludes empty, missing, and already-stacked Workspaces. Positional handles skip the TUI. Advanced graph controls remain available as flags and TUI footer toggles:
+
+- `--rebase-mode auto|branch|revision`
+- `--stack-shape auto|linear|merge`
+- `--conflict-strategy off|prefer-clean`
+
+When `prefer-clean` is used with `--stack-shape auto`, `jjw` tries the auto-selected shape, undoes on conflict, and tries the alternative shape. If every fallback conflicts, it keeps the merge-shaped conflicted Main Workspace so the conflict can be resolved there.
+
+### Inspect and housekeeping
+
+- `jjw list` — print a parseable table: handle, markers, status, path. Includes Current and Main markers.
+- `jjw list --paths` — print paths only.
+- `jjw tidy` — remove empty leftover directories under the Project layout and report non-empty leftovers. `tidy` never closes active Workspaces.
 
 ## Config
 
@@ -26,59 +54,54 @@ Local repo override:
 
 - `<repo-root>/.jjw/config.yaml`
 
-State file (for `stateful` naming strategy):
+Local state file for `next-unused` handle selection:
 
 - `<repo-root>/.jjw/state.json`
 
-Example `config.yaml`:
+`state.json` should be ignored; `.jjw/config.yaml` may be committed when a Project wants shared settings.
+
+Example:
 
 ```yaml
-dev_root: ""
-worktrees_root: ""
-name_strategy: first-unused
-name_list:
+workspaces_root: "~/Development/workspaces"
+project: "nixfiles"
+workspace_handles:
   - alpha
   - bravo
   - charlie
-  - delta
-  - echo
-  - foxtrot
-  - golf
-  - hotel
-  - india
-  - juliett
-  - kilo
-  - lima
-  - mike
-  - november
-  - oscar
-  - papa
-  - quebec
-  - romeo
-  - sierra
-  - tango
-  - uniform
-  - victor
-  - whiskey
-  - xray
-  - yankee
-  - zulu
-main_stack:
-  default_workspace: default
+handle_strategy: first-unused
+main_workspace: default
+stack:
   rebase_mode: auto
   stack_shape: auto
   conflict_strategy: prefer-clean
 ```
 
-`main_stack` keys set defaults for `jjw stack` flags. CLI flags always override config values.
+Supported handle strategies:
 
-`dev_root` and `worktrees_root` must be set explicitly (or overridden with `--worktrees-root`). `jjw` does not assume a default workspace root path.
+- `first-unused` — reuse the first available configured handle.
+- `next-unused` — advance through handles per Project/repo using `.jjw/state.json`.
+
+Config parsing rejects unknown keys. Legacy keys such as `worktrees_root`, `name_list`, `name_strategy`, `dev_root`, and `main_stack` are not accepted.
+
+## Shell integration
+
+The binary reserves stdout for path/data protocols. Human prompts and progress go to stderr.
+
+Home Manager shell integration wraps `jjw` in interactive bash/zsh so navigation commands can change the caller's directory:
+
+- `jjw create ...`
+- `jjw open ...`
+- `jjw close ...`
+- `jjw main`
+
+Use `command jjw ...` to bypass the shell function and call the raw binary.
 
 ## Nix / Flake
 
 This repo provides:
 
-- `packages.<system>.default` (`jjw` binary)
+- `packages.<system>.default` / `packages.<system>.jjw`
 - `apps.<system>.default` / `apps.<system>.jjw`
 - `homeManagerModules.default`
 
@@ -88,21 +111,13 @@ Quick local install from this checkout:
 nix profile add .#jjw
 ```
 
-Install from any remote flake URL:
-
-```bash
-nix profile add '<flake-url>#jjw'
-```
-
 Run without installing:
 
 ```bash
 nix run .# -- <command>
 ```
 
-The flake package installs the `jjw` binary and wraps it with `jj` and `fzf` from nixpkgs on `PATH`.
-
-Home Manager module example:
+Home Manager example:
 
 ```nix
 {
@@ -117,12 +132,12 @@ Home Manager module example:
           programs.jjw = {
             enable = true;
             settings = {
-              dev_root = "~/Development";
-              worktrees_root = "~/Development/worktrees";
-              name_strategy = "first-unused";
-              name_list = [ "kilo" "lima" "mike" ];
-              main_stack = {
-                default_workspace = "default";
+              workspaces_root = "~/Development/workspaces";
+              project = "nixfiles";
+              workspace_handles = [ "kilo" "lima" "mike" ];
+              handle_strategy = "first-unused";
+              main_workspace = "default";
+              stack = {
                 rebase_mode = "auto";
                 stack_shape = "auto";
                 conflict_strategy = "prefer-clean";
@@ -135,161 +150,6 @@ Home Manager module example:
   };
 }
 ```
-
-With the zsh wrapper, `jjw create ...` and `jjw select` both `cd` into the returned workspace automatically.
-
-For repos where you keep a dedicated main workspace, run `jjw stack` from that main directory to stack it on top of all other workspaces before building/testing.
-
-## stack flow
-
-`jjw stack` now has three independent decisions:
-
-- rebase mode (`--rebase-mode auto|branch|revision`)
-- stack shape (`--stack-shape auto|linear|merge`)
-- conflict strategy (`--conflict-strategy off|prefer-clean`)
-
-### Decision order
-
-1. Collect other workspaces (`<name>@`) besides `--workspace`.
-2. Compute frontier heads: `heads(ws1@ | ws2@ | ...)`.
-3. Resolve stack shape:
-   - `auto`: 1 frontier head -> `linear`, otherwise `merge`
-   - `linear`: requires exactly 1 frontier head (strict error otherwise)
-   - `merge`: use all frontier heads
-4. Resolve rebase mode:
-   - `auto`: uses `revision` when immutable ancestors are detected, otherwise `branch`
-   - `branch`: runs with `-b @`
-   - `revision`: runs with `-r @`
-5. In `revision` mode, existing parents are preserved only if they are not already ancestors of the chosen destinations.
-6. If `--conflict-strategy prefer-clean` is set and `--stack-shape auto`, `stack` tries the auto-selected shape first; if it conflicts, it runs `jj undo` and retries the other shape. If both conflict, it keeps the merge shape.
-
-### Example A: auto shape picks merge (divergent heads)
-
-Command:
-
-```bash
-jjw stack --workspace default --stack-shape auto --rebase-mode branch
-```
-
-Before (`kilo@` and `lima@` are independent):
-
-```text
-@  default@ dddddd
-│
-◆  main mmmmmm
-├─╮
-│ ○  kilo@ kkkkkk
-│
-○  lima@ llllll
-```
-
-After (`default@` rebased onto both heads as a merge):
-
-```text
-@    default@ nnnnnn
-├─┬─╮
-│ ○ │  kilo@ kkkkkk
-│ │ ○  lima@ llllll
-│ │
-◆ │  main mmmmmm
-```
-
-### Example B: auto shape picks linear (single frontier)
-
-Command:
-
-```bash
-jjw stack --workspace default --stack-shape auto --rebase-mode branch
-```
-
-Before (`lima@` already includes `kilo@`):
-
-```text
-@  default@ dddddd
-│
-○  lima@ llllll
-│
-○  kilo@ kkkkkk
-│
-◆  main mmmmmm
-```
-
-After (`default@` rebased onto a single destination, still includes both changes):
-
-```text
-@  default@ nnnnnn
-│
-○  lima@ llllll
-│
-○  kilo@ kkkkkk
-│
-◆  main mmmmmm
-```
-
-### Example C: strict linear mode errors on divergence
-
-Command:
-
-```bash
-jjw stack --workspace default --stack-shape linear
-```
-
-If the frontier has multiple heads (for example `kilo@` and `lima@` diverged), `stack` fails with an error like:
-
-```text
---stack-shape linear requires a single frontier head, found 2
-```
-
-### Example D: revision mode with immutable ancestors
-
-Command:
-
-```bash
-jjw stack --workspace default --rebase-mode auto
-```
-
-When immutable ancestors are detected above `@`, `auto` switches to `-r @` and preserves needed parents (for example `main`) unless already implied by selected destinations.
-
-### Example E: conflict-aware fallback (`prefer-clean`)
-
-Command:
-
-```bash
-jjw stack --workspace default --stack-shape auto --conflict-strategy prefer-clean
-```
-
-Behavior:
-
-1. Try the auto-selected shape first (linear if single frontier, merge otherwise).
-2. Detect unresolved conflicts via `conflicts() & @`.
-3. If conflicted, run `jj undo` and retry with the other shape.
-4. If both conflict, keep the merge shape.
-
-Illustrative flow:
-
-```text
-attempt #1: linear -> conflicts
-jj undo
-attempt #2: merge  -> clean    => keep merge
-```
-
-```text
-attempt #1: linear -> conflicts
-jj undo
-attempt #2: merge  -> conflicts => keep merge (preserves source-parent structure)
-```
-
-Notes:
-
-- `prefer-clean` currently only applies when `--stack-shape auto` is used.
-- There is no `jj rebase --dry-run`; this strategy uses real rebase attempts plus `jj undo`.
-- Since `jj undo` rewinds only the latest operation, fallback checks happen immediately after each rebase attempt.
-
-## Notes
-
-- Auto-naming requires `name_list`.
-- `name_strategy` supports `first-unused` and `stateful`.
-- If all configured names are exhausted, `jjw` exits with an error.
 
 ## Development
 
