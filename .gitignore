@@ -1,2 +1,3 @@
 bin/
 .jjw/state.json
+.hunk/change-context/

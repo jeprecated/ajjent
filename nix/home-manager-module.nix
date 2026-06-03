@@ -13,7 +13,7 @@ let
       local out rc
       case "$1" in
         create|open|close|main)
-          out="$(command jjw "$@")"
+          out="$(JJW_SHELL_WRAPPED=1 command jjw "$@")"
           rc=$?
           if [ $rc -ne 0 ]; then
             return $rc
@@ -45,7 +45,7 @@ in {
         workspace_handles = defaultWorkspaceHandles;
         handle_strategy = "first-unused";
         main_workspace = "default";
-        assimilated_folders = [ ];
+        assimilated_paths = [ ];
         projects = { };
         stack = {
           rebase_mode = "auto";
@@ -64,10 +64,10 @@ in {
         handle_strategy = "first-unused";
         workspace_handles = [ "kilo" "lima" "mike" ];
         main_workspace = "default";
-        assimilated_folders = [ "scratch" ];
+        assimilated_paths = [ "scratch" ];
         projects = {
           nixfiles = {
-            assimilated_folders = [ ".local-notes" ];
+            assimilated_paths = [ ".local-notes" ];
           };
         };
         stack = {

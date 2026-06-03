@@ -29,11 +29,12 @@ workspace_handles:
   - yankee
   - zulu
 main_workspace: default
-assimilated_folders:
+assimilated_paths:
   - scratch
+  - .env.local
 projects:
   example-project:
-    assimilated_folders:
+    assimilated_paths:
       - .local-notes
 stack:
   rebase_mode: auto

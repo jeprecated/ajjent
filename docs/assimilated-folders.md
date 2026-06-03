@@ -1,33 +1,38 @@
-# Assimilated folders
+# Assimilated paths
 
-Assimilated folders are repo-local, usually git-ignored folders that should be shared across all `jjw` Workspaces for a Project by symlink.
+Assimilated paths are repo-local, usually git-ignored files or directories that should be shared across all `jjw` Workspaces for a Project by symlink.
 
-Use this for folders such as `scratch/` that contain local notes, experiments, generated snippets, or other useful development artifacts that should survive ephemeral Workspace deletion.
+Use this for directories such as `scratch/` that contain local notes, or files such as `.env.local` that contain local development settings. These artifacts survive ephemeral Workspace deletion because the Workspace only contains a symlink.
 
 ## Configure globally
 
-Add repo-relative folder paths to `assimilated_folders`:
+Add repo-relative file or directory paths to `assimilated_paths`:
 
 ```yaml
-assimilated_folders:
+assimilated_paths:
   - scratch
+  - .pi-scratch.md
+  - .env.local
 ```
 
 Global entries apply to every Project handled by this config.
 
 ## Configure per Project
 
-Add Project-specific entries under `projects.<project>.assimilated_folders`:
+Add Project-specific entries under `projects.<project>.assimilated_paths`:
 
 ```yaml
 projects:
   my-project:
-    assimilated_folders:
+    assimilated_paths:
       - scratch
       - .local-notes
+      - .env.local
 ```
 
 Global and Project-specific entries are combined and de-duplicated.
+
+The old `assimilated_folders` key is still accepted as a deprecated alias for existing configs.
 
 ## Full example
 
@@ -40,21 +45,23 @@ workspace_handles:
 handle_strategy: first-unused
 main_workspace: default
 
-assimilated_folders:
+assimilated_paths:
   - scratch
+  - .pi-scratch.md
+  - .env.local
 
 projects:
   my-project:
-    assimilated_folders:
+    assimilated_paths:
       - .local-notes
 ```
 
 ## Behavior
 
-On `jjw create` and `jjw open`, for each configured assimilated folder:
+On `jjw create` and `jjw open`, for each configured assimilated path:
 
-1. `jjw` looks for the source folder in the Main Workspace at the same relative path.
-2. If the source exists and is a directory, `jjw` creates a symlink in the target Workspace.
+1. `jjw` looks for the source file or directory in the Main Workspace at the same relative path.
+2. If the source exists and is a regular file or directory, `jjw` creates a symlink in the target Workspace.
 3. If the source does not exist, `jjw` skips it.
 4. If the target path already contains real Workspace content, `jjw` refuses to overwrite it.
 
@@ -62,44 +69,54 @@ Example result:
 
 ```text
 /main-workspace/scratch
+/main-workspace/.pi-scratch.md
+/main-workspace/.env.local
 /workspaces/my-project/alpha/scratch -> /main-workspace/scratch
+/workspaces/my-project/alpha/.pi-scratch.md -> /main-workspace/.pi-scratch.md
+/workspaces/my-project/alpha/.env.local -> /main-workspace/.env.local
 /workspaces/my-project/bravo/scratch -> /main-workspace/scratch
 ```
 
-When a Workspace is closed, only the Workspace symlink is deleted. The source folder in the Main Workspace remains.
+When a Workspace is closed, only the Workspace symlink is deleted. The source file or directory in the Main Workspace remains.
 
 ## Requirements
 
-Assimilated folder entries must be relative paths inside the repo. They may not be absolute paths and may not contain `..` traversal.
+Assimilated entries must be relative paths inside the repo. They may not be absolute paths and may not contain `..` traversal. Sources must be regular files or directories.
 
 Good:
 
 ```yaml
-assimilated_folders:
+assimilated_paths:
   - scratch
   - .local-notes
   - local/generated
+  - .pi-scratch.md
+  - .env.local
 ```
 
 Bad:
 
 ```yaml
-assimilated_folders:
+assimilated_paths:
   - /tmp/scratch
   - ../scratch
 ```
 
-## Recommended setup for scratch
+## Recommended setup for scratch and local files
 
-Make sure the folder is ignored by the repo, then configure it:
+Make sure each folder or file is ignored by the repo, then configure it:
 
 ```gitignore
 scratch/
+.pi-scratch.md
+.env.local
 ```
 
 ```yaml
-assimilated_folders:
+assimilated_paths:
   - scratch
+  - .pi-scratch.md
+  - .env.local
 ```
 
 Then create or open a Workspace:
@@ -109,4 +126,4 @@ jjw create alpha
 jjw open alpha
 ```
 
-The Workspace will contain `scratch` as a symlink to the Main Workspace's `scratch` folder.
+The Workspace will contain `scratch`, `.pi-scratch.md`, and `.env.local` as symlinks to the Main Workspace's source paths.

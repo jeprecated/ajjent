@@ -37,14 +37,16 @@ type config struct {
 	HandleStrategy     string                   `yaml:"handle_strategy"`
 	WorkspaceHandles   []string                 `yaml:"workspace_handles"`
 	MainWorkspace      string                   `yaml:"main_workspace"`
-	AssimilatedFolders []string                 `yaml:"assimilated_folders"`
+	AssimilatedPaths   []string                 `yaml:"assimilated_paths"`
+	AssimilatedFolders []string                 `yaml:"assimilated_folders,omitempty"`
 	Projects           map[string]projectConfig `yaml:"projects"`
 	Stack              stackConfig              `yaml:"stack"`
 	Create             createSetup              `yaml:"create"`
 }
 
 type projectConfig struct {
-	AssimilatedFolders []string `yaml:"assimilated_folders"`
+	AssimilatedPaths   []string `yaml:"assimilated_paths,omitempty"`
+	AssimilatedFolders []string `yaml:"assimilated_folders,omitempty"`
 }
 
 type stackConfig struct {
@@ -97,14 +99,15 @@ func main() {
 		os.Exit(2)
 	}
 	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintf(stderrWriter, "jjw: %v\n", err)
+		s := cliStylesForWriter(stderrWriter)
+		fmt.Fprintf(stderrWriter, "%s %v\n", s.Danger.Render("jjw:"), err)
 		os.Exit(1)
 	}
 }
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("missing command")
+		return errors.New("missing command\n\nRun `jjw help` to see available commands.")
 	}
 	switch args[0] {
 	case "init":
@@ -117,6 +120,8 @@ func run(args []string) error {
 		return runList(args[1:])
 	case "main":
 		return runMain(args[1:])
+	case "shell-init":
+		return runShellInit(args[1:])
 	case "close":
 		return runClose(args[1:])
 	case "tidy":
@@ -127,28 +132,71 @@ func run(args []string) error {
 		printUsage(stdoutWriter)
 		return nil
 	default:
-		return fmt.Errorf("unknown command: %s", args[0])
+		return fmt.Errorf("unknown command: %s\n\nRun `jjw help` to see available commands.", args[0])
 	}
 }
 
 func printUsage(w io.Writer) {
-	fmt.Fprintln(w, "Usage: jjw <command> [options]")
+	s := cliStylesForWriter(w)
+	fmt.Fprintln(w, s.Title.Render("jjw — Jujutsu Workspace lifecycle helper"))
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Setup:")
-	fmt.Fprintln(w, "  init              Create jjw config")
+	fmt.Fprintf(w, "%s %s\n", s.Section.Render("Usage:"), s.Command.Render("jjw <command> [options]"))
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Workspace lifecycle:")
-	fmt.Fprintln(w, "  create [handle]   Create a Workspace and print its path")
-	fmt.Fprintln(w, "  open [handle]     Print an existing Workspace path")
-	fmt.Fprintln(w, "  close [handle...] Close Workspace(s)")
+	fmt.Fprintln(w, s.Section.Render("Setup:"))
+	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "init", 18), "Create jjw config")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Stacking:")
-	fmt.Fprintln(w, "  stack [handle...] Stack selected Workspaces into Main")
+	fmt.Fprintln(w, s.Section.Render("Workspace lifecycle:"))
+	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "create [handle]", 18), "Create a Workspace and print its path")
+	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "open [handle]", 18), "Open an existing Workspace; with no handle, use the selector")
+	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "close [handle...]", 18), "Close Workspaces; with no handle, use the selector")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Inspect and housekeeping:")
-	fmt.Fprintln(w, "  list              List Workspaces")
-	fmt.Fprintln(w, "  main              Print the Main Workspace path")
-	fmt.Fprintln(w, "  tidy              Remove empty leftover Workspace directories")
+	fmt.Fprintln(w, s.Section.Render("Stacking:"))
+	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "stack [handle...]", 18), "Stack selected Workspaces into Main; with no handles, use the selector")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, s.Section.Render("Inspect and housekeeping:"))
+	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "list", 18), "List Workspaces with status and markers")
+	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "main", 18), "Print the Main Workspace path")
+	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "tidy", 18), "Remove empty leftover Workspace directories")
+	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "shell-init", 18), "Print shell integration for cd-on-open/main")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, s.Muted.Render("Run `jjw <command> --help` for command-specific options."))
+}
+
+type cliStyles struct{ Title, Section, Command, Option, Muted, Success, Warn, Danger, Info, Marker lipgloss.Style }
+
+func cliStylesForWriter(w io.Writer) cliStyles {
+	base := lipgloss.NewStyle()
+	if !canColorWriter(w) {
+		return cliStyles{}
+	}
+	return cliStyles{
+		Title:   base.Bold(true).Foreground(lipgloss.Color("63")),
+		Section: base.Bold(true).Foreground(lipgloss.Color("75")),
+		Command: base.Bold(true).Foreground(lipgloss.Color("212")),
+		Option:  base.Foreground(lipgloss.Color("220")),
+		Muted:   base.Faint(true),
+		Success: base.Foreground(lipgloss.Color("42")),
+		Warn:    base.Foreground(lipgloss.Color("214")),
+		Danger:  base.Foreground(lipgloss.Color("196")),
+		Info:    base.Foreground(lipgloss.Color("81")),
+		Marker:  base.Foreground(lipgloss.Color("141")),
+	}
+}
+
+func paddedStyled(style lipgloss.Style, text string, width int) string {
+	padding := width - lipgloss.Width(text)
+	if padding < 1 {
+		padding = 1
+	}
+	return style.Render(text) + strings.Repeat(" ", padding)
+}
+
+func canColorWriter(w io.Writer) bool {
+	if os.Getenv("NO_COLOR") != "" {
+		return false
+	}
+	f, ok := w.(*os.File)
+	return ok && term.IsTerminal(int(f.Fd()))
 }
 
 func parseCommandFlags(fs *flag.FlagSet, args []string, usage string, summary string) (bool, error) {
@@ -162,9 +210,20 @@ func parseCommandFlags(fs *flag.FlagSet, args []string, usage string, summary st
 			printCommandUsage(stdoutWriter, fs, usage, summary)
 			return true, nil
 		}
-		return false, err
+		return false, fmt.Errorf("%w\n\nRun `%s --help` for options.", err, commandNameFromUsage(usage))
 	}
 	return false, nil
+}
+
+func commandNameFromUsage(usage string) string {
+	fields := strings.Fields(usage)
+	if len(fields) >= 2 {
+		return fields[0] + " " + fields[1]
+	}
+	if len(fields) == 1 {
+		return fields[0]
+	}
+	return "jjw"
 }
 
 func hasHelpFlag(args []string) bool {
@@ -205,26 +264,31 @@ func normalizePositionalsLast(args []string, flagsWithValues map[string]struct{}
 }
 
 func printCommandUsage(w io.Writer, fs *flag.FlagSet, usage string, summary string) {
-	fmt.Fprintf(w, "Usage: %s\n", usage)
+	s := cliStylesForWriter(w)
+	fmt.Fprintf(w, "%s %s\n", s.Section.Render("Usage:"), s.Command.Render(usage))
 	if strings.TrimSpace(summary) != "" {
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, summary)
 	}
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Options:")
+	fmt.Fprintln(w, s.Section.Render("Options:"))
 	fs.VisitAll(func(f *flag.Flag) {
 		valueName, usageText := flag.UnquoteUsage(f)
 		option := "--" + f.Name
 		if valueName != "" {
 			option += " " + valueName
 		}
-		fmt.Fprintf(w, "  %-28s %s", option, usageText)
+		fmt.Fprintf(w, "  %s%s", paddedStyled(s.Option, option, 30), usageText)
 		if f.DefValue != "" && f.DefValue != "false" {
-			fmt.Fprintf(w, " (default %q)", f.DefValue)
+			fmt.Fprintf(w, " %s", s.Muted.Render("(default "+strconvQuote(f.DefValue)+")"))
 		}
 		fmt.Fprintln(w)
 	})
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "%s %s\n", s.Muted.Render("Tip:"), "most lifecycle commands accept --repo, --project, and --workspaces-root overrides.")
 }
+
+func strconvQuote(value string) string { return fmt.Sprintf("%q", value) }
 
 func runInit(args []string) error {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
@@ -253,11 +317,24 @@ func runInit(args []string) error {
 		cfgPath = path
 	}
 	if exists(cfgPath) && !force {
-		return fmt.Errorf("config already exists: %s (pass --force to overwrite)", cfgPath)
+		if !canUseTUI() {
+			return fmt.Errorf("config already exists: %s (pass --force to overwrite)", cfgPath)
+		}
+		ok, err := confirm(fmt.Sprintf("Config already exists: %s. Overwrite it? [y/N]: ", cfgPath))
+		if err != nil || !ok {
+			return err
+		}
 	}
 	cfg := defaultConfig()
 	if strings.TrimSpace(workspacesRoot) == "" {
-		return errors.New("init requires --workspaces-root")
+		if !canUseTUI() {
+			return errors.New("init requires --workspaces-root")
+		}
+		value, err := promptText("Workspaces root", "~/Development/workspaces")
+		if err != nil || strings.TrimSpace(value) == "" {
+			return err
+		}
+		workspacesRoot = value
 	}
 	cfg.WorkspacesRoot = expandPath(workspacesRoot)
 	if strings.TrimSpace(project) != "" {
@@ -320,7 +397,14 @@ func runCreate(args []string) error {
 			return err
 		}
 		if _, ok := inUse[handle]; ok {
-			return fmt.Errorf("Workspace %q already exists; use `jjw open %s`", handle, handle)
+			if !canUseTUI() {
+				return fmt.Errorf("Workspace %q already exists; use `jjw open %s`", handle, handle)
+			}
+			ok, err := confirm(fmt.Sprintf("Workspace %q already exists. Open it instead? [y/N]: ", handle))
+			if err != nil || !ok {
+				return err
+			}
+			return openExistingWorkspace(repoRoot, cfg, project, handle)
 		}
 	} else {
 		handle, err = chooseAutoHandle(cfg, repoRoot, inUse)
@@ -328,6 +412,10 @@ func runCreate(args []string) error {
 			return err
 		}
 	}
+	return createWorkspace(repoRoot, cfg, project, handle, envrc, direnvAllow)
+}
+
+func createWorkspace(repoRoot string, cfg config, project string, handle string, envrc bool, direnvAllow bool) error {
 	target := filepath.Join(cfg.WorkspacesRoot, project, handle)
 	if exists(target) {
 		return fmt.Errorf("Workspace path already exists: %s", target)
@@ -351,8 +439,32 @@ func runCreate(args []string) error {
 			_ = commandToStderrFn("direnv", "allow", target)
 		}
 	}
-	fmt.Fprintln(stdoutWriter, target)
+	printNavigationPath(target, "create")
 	return nil
+}
+
+func openExistingWorkspace(repoRoot string, cfg config, project string, handle string) error {
+	infos, _, err := loadWorkspaceInfos(repoRoot, cfg, project)
+	if err != nil {
+		return err
+	}
+	for _, info := range infos {
+		if info.Ref.Handle == handle {
+			if info.Missing {
+				return fmt.Errorf("Workspace %q path not found: %s", handle, info.Path)
+			}
+			if err := materializeAssimilatedFolders(mainWorkspaceRoot(repoRoot), info.Path, cfg, project); err != nil {
+				return err
+			}
+			printNavigationPath(info.Path, "open")
+			return nil
+		}
+	}
+	return workspaceNotFoundError(handle)
+}
+
+func workspaceNotFoundError(handle string) error {
+	return fmt.Errorf("Workspace %q not found; use `jjw create %s` to create it", handle, handle)
 }
 
 func runOpen(args []string) error {
@@ -394,11 +506,18 @@ func runOpen(args []string) error {
 				if err := materializeAssimilatedFolders(mainWorkspaceRoot(repoRoot), info.Path, cfg, project); err != nil {
 					return err
 				}
-				fmt.Fprintln(stdoutWriter, info.Path)
+				printNavigationPath(info.Path, "open")
 				return nil
 			}
 		}
-		return fmt.Errorf("Workspace %q not found; use `jjw create %s` to create it", handle, handle)
+		if canUseTUI() {
+			ok, err := confirm(fmt.Sprintf("Workspace %q does not exist. Create it now? [y/N]: ", handle))
+			if err != nil || !ok {
+				return err
+			}
+			return createWorkspace(repoRoot, cfg, project, handle, false, false)
+		}
+		return workspaceNotFoundError(handle)
 	}
 	if !canUseTUI() {
 		return errors.New("open requires a Workspace Handle when not running in a terminal")
@@ -414,8 +533,79 @@ func runOpen(args []string) error {
 	if err := materializeAssimilatedFolders(mainWorkspaceRoot(repoRoot), selected[0].Path, cfg, project); err != nil {
 		return err
 	}
-	fmt.Fprintln(stdoutWriter, selected[0].Path)
+	printNavigationPath(selected[0].Path, "open")
 	return nil
+}
+
+func runShellInit(args []string) error {
+	fs := flag.NewFlagSet("shell-init", flag.ContinueOnError)
+	if handled, err := parseCommandFlags(fs, args, "jjw shell-init [bash|zsh]", "Print shell integration that makes navigation commands cd in the current shell."); handled || err != nil {
+		return err
+	}
+	positionals := fs.Args()
+	if len(positionals) > 1 {
+		return errors.New("shell-init accepts at most one shell name")
+	}
+	shellName := ""
+	if len(positionals) == 1 {
+		shellName = strings.TrimSpace(positionals[0])
+	} else {
+		shellName = filepath.Base(os.Getenv("SHELL"))
+	}
+	snippet, err := shellIntegrationSnippet(shellName)
+	if err != nil {
+		return err
+	}
+	fmt.Fprint(stdoutWriter, snippet)
+	return nil
+}
+
+func shellIntegrationSnippet(shellName string) (string, error) {
+	switch strings.TrimSpace(shellName) {
+	case "bash", "zsh":
+		return `# jjw shell integration: source this to make create/open/close/main change directory.
+jjw() {
+  local out rc
+  case "$1" in
+    create|open|close|main)
+      out="$(JJW_SHELL_WRAPPED=1 command jjw "$@")"
+      rc=$?
+      if [ $rc -ne 0 ]; then
+        return $rc
+      fi
+      if [ -n "$out" ]; then
+        cd "$out" || return
+      fi
+      ;;
+    *)
+      command jjw "$@"
+      ;;
+  esac
+}
+`, nil
+	default:
+		return "", fmt.Errorf("unsupported shell %q (expected bash or zsh)", shellName)
+	}
+}
+
+func printNavigationPath(path string, command string) {
+	fmt.Fprintln(stdoutWriter, path)
+	maybePrintNavigationHint(command)
+}
+
+func maybePrintNavigationHint(command string) {
+	if os.Getenv("JJW_SHELL_WRAPPED") != "" || !canUseTUI() {
+		return
+	}
+	s := cliStylesForWriter(stderrWriter)
+	fmt.Fprintf(stderrWriter, "%s %s\n", s.Muted.Render("Tip:"), navigationHint(command, filepath.Base(os.Getenv("SHELL"))))
+}
+
+func navigationHint(command string, shellName string) string {
+	if shellName != "bash" && shellName != "zsh" {
+		shellName = "zsh"
+	}
+	return fmt.Sprintf("to make `jjw %s` cd automatically, run `eval \"$(jjw shell-init %s)\"` once in your shell startup.", command, shellName)
 }
 
 func runList(args []string) error {
@@ -437,12 +627,14 @@ func runList(args []string) error {
 	if err != nil {
 		return err
 	}
+	color := canColorWriter(stdoutWriter) && !pathsOnly
 	for _, info := range infos {
 		if pathsOnly {
 			fmt.Fprintln(stdoutWriter, info.Path)
 			continue
 		}
-		fmt.Fprintf(stdoutWriter, "%s\t%s\t%s\t%s\n", info.Ref.Handle, strings.Join(markers(info), ","), statusLabel(info), info.Path)
+		handle, markerText, status, path := listFields(info, color)
+		fmt.Fprintf(stdoutWriter, "%s\t%s\t%s\t%s\n", handle, markerText, status, path)
 	}
 	return nil
 }
@@ -469,7 +661,7 @@ func runMain(args []string) error {
 			if info.Missing {
 				return fmt.Errorf("Main Workspace path missing: %s", info.Path)
 			}
-			fmt.Fprintln(stdoutWriter, info.Path)
+			printNavigationPath(info.Path, "main")
 			return nil
 		}
 	}
@@ -501,7 +693,7 @@ func runTidy(args []string) error {
 	entries, err := os.ReadDir(projectRoot)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			fmt.Fprintf(stderrWriter, "No Project Workspace directory found at %s.\n", projectRoot)
+			fmt.Fprintf(stderrWriter, "%s\n", cliStylesForWriter(stderrWriter).Warn.Render(fmt.Sprintf("No Project Workspace directory found at %s.", projectRoot)))
 			return nil
 		}
 		return err
@@ -521,7 +713,7 @@ func runTidy(args []string) error {
 			return err
 		}
 		if !empty {
-			fmt.Fprintf(stderrWriter, "leftover not empty: %s\n", full)
+			fmt.Fprintf(stderrWriter, "%s\n", cliStylesForWriter(stderrWriter).Warn.Render(fmt.Sprintf("leftover not empty: %s", full)))
 			continue
 		}
 		if err := os.Remove(full); err != nil {
@@ -531,7 +723,7 @@ func runTidy(args []string) error {
 		deleted++
 	}
 	if deleted == 0 {
-		fmt.Fprintln(stderrWriter, "No empty leftover Workspaces to tidy.")
+		fmt.Fprintln(stderrWriter, cliStylesForWriter(stderrWriter).Muted.Render("No empty leftover Workspaces to tidy."))
 	}
 	return nil
 }
@@ -612,9 +804,10 @@ func runClose(args []string) error {
 		}
 	}
 	if len(targets) == 0 {
-		fmt.Fprintln(stderrWriter, "No Workspaces to close.")
+		fmt.Fprintln(stderrWriter, cliStylesForWriter(stderrWriter).Muted.Render("No Workspaces to close."))
 		return nil
 	}
+	unsafeTargets := []workspaceInfo{}
 	for _, info := range targets {
 		if info.Main {
 			return fmt.Errorf("Main Workspace %q is never closable", info.Ref.Handle)
@@ -623,14 +816,26 @@ func runClose(args []string) error {
 			return fmt.Errorf("Workspace %q path missing: %s", info.Ref.Handle, info.Path)
 		}
 		if !force && !isClosable(info) {
-			return fmt.Errorf("Workspace %q is not closable; stack it first or use --force", info.Ref.Handle)
+			unsafeTargets = append(unsafeTargets, info)
 		}
+	}
+	confirmedForce := false
+	if len(unsafeTargets) > 0 {
+		if !canUseTUI() {
+			return fmt.Errorf("%s not normally closable; stack first or run this close with --force", workspaceSummary(unsafeTargets))
+		}
+		ok, err := confirm(fmt.Sprintf("%s not normally closable. Forced Closing abandons unique mutable changes. Force close instead? [y/N]: ", workspaceSummary(unsafeTargets)))
+		if err != nil || !ok {
+			return err
+		}
+		force = true
+		confirmedForce = true
 	}
 	mainInfo, ok := byHandle[cfg.MainWorkspace]
 	if !ok {
 		return fmt.Errorf("Main Workspace %q not found", cfg.MainWorkspace)
 	}
-	if force && !yes {
+	if force && !yes && !confirmedForce {
 		ok, err := confirm(fmt.Sprintf("Forced Closing will abandon unique mutable changes for %d Workspace(s). Continue? [y/N]: ", len(targets)))
 		if err != nil || !ok {
 			return err
@@ -648,7 +853,7 @@ func runClose(args []string) error {
 	if err := abandonTopEmptyMutableAncestors(mainInfo.Path); err != nil {
 		return err
 	}
-	fmt.Fprintln(stdoutWriter, mainInfo.Path)
+	printNavigationPath(mainInfo.Path, "close")
 	return nil
 }
 
@@ -670,7 +875,7 @@ func runStack(args []string) error {
 	fs.StringVar(&shape, "stack-shape", "", "advanced: auto, linear, merge")
 	fs.StringVar(&conflictStrategy, "conflict-strategy", "", "advanced: off, prefer-clean")
 	fs.BoolVar(&all, "all", false, "stack all stack-relevant Workspaces")
-	fs.BoolVar(&yes, "yes", false, "skip post-Stack Close prompt")
+	fs.BoolVar(&yes, "yes", false, "skip Stack confirmation and post-Stack Close prompt")
 	if handled, err := parseCommandFlags(fs, args, "jjw stack [handle...] [options]", "Stack selected Workspaces into the Main Workspace."); handled || err != nil {
 		return err
 	}
@@ -695,6 +900,7 @@ func runStack(args []string) error {
 	}
 	byHandle := mapInfosByHandle(infos)
 	inputs := []string{}
+	selectorUsed := false
 	if all {
 		for _, info := range infos {
 			if isStackRelevant(info) {
@@ -728,6 +934,7 @@ func runStack(args []string) error {
 		if err != nil {
 			return err
 		}
+		selectorUsed = true
 		cfg.Stack = opts.StackOptions
 		for _, item := range selected {
 			inputs = append(inputs, item.Handle)
@@ -736,6 +943,13 @@ func runStack(args []string) error {
 	inputs = uniqueNonEmptyStrings(inputs)
 	if len(inputs) == 0 {
 		return errors.New("no Stack Inputs selected")
+	}
+	if shouldConfirmStackPlan(selectorUsed, yes, canUseTUI()) {
+		ok, err := confirm(stackPlanPrompt(inputs, cfg.Stack))
+		if err != nil || !ok {
+			fmt.Fprintln(stderrWriter, cliStylesForWriter(stderrWriter).Muted.Render("Stack cancelled."))
+			return err
+		}
 	}
 	mainInfo, ok := byHandle[cfg.MainWorkspace]
 	if !ok {
@@ -789,6 +1003,21 @@ func runStack(args []string) error {
 	return nil
 }
 
+func shouldConfirmStackPlan(selectorUsed bool, yes bool, canUseTUI bool) bool {
+	return selectorUsed && !yes && canUseTUI
+}
+
+func stackPlanPrompt(inputs []string, stack stackConfig) string {
+	return fmt.Sprintf(
+		"Stack %d Workspaces: %s. Options: shape:%s rebase:%s conflicts:%s. Continue? [y/N]: ",
+		len(inputs),
+		strings.Join(inputs, ", "),
+		emptyDefault(stack.Shape, "auto"),
+		emptyDefault(stack.RebaseMode, "auto"),
+		emptyDefault(stack.ConflictStrategy, "prefer-clean"),
+	)
+}
+
 func commandContext(repoRootOverride, projectOverride, rootOverride string) (string, config, string, error) {
 	repoRoot, err := resolveRepoRoot(repoRootOverride)
 	if err != nil {
@@ -820,11 +1049,11 @@ func commandContext(repoRootOverride, projectOverride, rootOverride string) (str
 
 func defaultConfig() config {
 	return config{
-		HandleStrategy:     strategyFirstUnused,
-		WorkspaceHandles:   append([]string(nil), defaultWorkspaceHandles...),
-		MainWorkspace:      "default",
-		AssimilatedFolders: []string{},
-		Projects:           map[string]projectConfig{},
+		HandleStrategy:   strategyFirstUnused,
+		WorkspaceHandles: append([]string(nil), defaultWorkspaceHandles...),
+		MainWorkspace:    "default",
+		AssimilatedPaths: []string{},
+		Projects:         map[string]projectConfig{},
 		Stack: stackConfig{
 			RebaseMode:       "auto",
 			Shape:            "auto",
@@ -870,11 +1099,12 @@ func loadConfig(repoRoot string) (config, error) {
 			return config{}, err
 		}
 	}
-	folders, err := normalizeAssimilatedFolders(merged.AssimilatedFolders)
+	paths, err := normalizeAssimilatedPaths(appendUniqueStrings(merged.AssimilatedPaths, merged.AssimilatedFolders))
 	if err != nil {
 		return config{}, err
 	}
-	merged.AssimilatedFolders = folders
+	merged.AssimilatedPaths = paths
+	merged.AssimilatedFolders = nil
 	if merged.Projects == nil {
 		merged.Projects = map[string]projectConfig{}
 	}
@@ -882,11 +1112,12 @@ func loadConfig(repoRoot string) (config, error) {
 		if err := validateSlug("project", project); err != nil {
 			return config{}, err
 		}
-		folders, err := normalizeAssimilatedFolders(projectCfg.AssimilatedFolders)
+		paths, err := normalizeAssimilatedPaths(appendUniqueStrings(projectCfg.AssimilatedPaths, projectCfg.AssimilatedFolders))
 		if err != nil {
 			return config{}, err
 		}
-		projectCfg.AssimilatedFolders = folders
+		projectCfg.AssimilatedPaths = paths
+		projectCfg.AssimilatedFolders = nil
 		merged.Projects[project] = projectCfg
 	}
 	return merged, nil
@@ -921,8 +1152,11 @@ func mergeConfigFile(dst *config, path string) error {
 	if strings.TrimSpace(src.MainWorkspace) != "" {
 		dst.MainWorkspace = strings.TrimSpace(src.MainWorkspace)
 	}
+	if len(src.AssimilatedPaths) > 0 {
+		dst.AssimilatedPaths = appendUniqueStrings(dst.AssimilatedPaths, src.AssimilatedPaths)
+	}
 	if len(src.AssimilatedFolders) > 0 {
-		dst.AssimilatedFolders = appendUniqueStrings(dst.AssimilatedFolders, src.AssimilatedFolders)
+		dst.AssimilatedPaths = appendUniqueStrings(dst.AssimilatedPaths, src.AssimilatedFolders)
 	}
 	if len(src.Projects) > 0 {
 		if dst.Projects == nil {
@@ -930,7 +1164,8 @@ func mergeConfigFile(dst *config, path string) error {
 		}
 		for project, projectCfg := range src.Projects {
 			current := dst.Projects[project]
-			current.AssimilatedFolders = appendUniqueStrings(current.AssimilatedFolders, projectCfg.AssimilatedFolders)
+			current.AssimilatedPaths = appendUniqueStrings(current.AssimilatedPaths, projectCfg.AssimilatedPaths)
+			current.AssimilatedPaths = appendUniqueStrings(current.AssimilatedPaths, projectCfg.AssimilatedFolders)
 			dst.Projects[project] = current
 		}
 	}
@@ -1068,6 +1303,7 @@ func loadWorkspaceInfos(repoRoot string, cfg config, project string) ([]workspac
 	if detected, err := currentWorkspaceHandle(repoRoot, refs); err == nil {
 		current = detected
 	}
+	graphRepoPath := workspaceGraphRepoPath(repoRoot, refs, cfg, project, current)
 	infos := make([]workspaceInfo, 0, len(refs))
 	for _, ref := range refs {
 		path := workspacePathForRef(repoRoot, cfg.WorkspacesRoot, project, ref, current)
@@ -1077,22 +1313,69 @@ func loadWorkspaceInfos(repoRoot string, cfg config, project string) ([]workspac
 		}
 		canonical := filepath.Clean(filepath.Join(cfg.WorkspacesRoot, project, ref.Handle))
 		info.External = !info.Missing && filepath.Clean(path) != canonical && !info.Main
-		info.Empty, _ = revisionMatches(pathOrRepo(repoRoot, path), "empty() & "+ref.Handle+"@")
-		info.Conflict, _ = revisionMatches(pathOrRepo(repoRoot, path), "conflicts() & "+ref.Handle+"@")
+		info.Conflict, err = workspaceHasConflictCommits(graphRepoPath, ref.Handle)
+		if err != nil {
+			return nil, "", fmt.Errorf("probe conflict status for Workspace %q from %s: %w", ref.Handle, graphRepoPath, err)
+		}
 		if !info.Main && cfg.MainWorkspace != "" {
-			info.Stacked, _ = revisionIsAncestor(pathOrRepo(repoRoot, path), ref.Handle+"@", cfg.MainWorkspace+"@")
+			unstacked, err := workspaceHasUnstackedCommits(graphRepoPath, ref.Handle, cfg.MainWorkspace)
+			if err != nil {
+				return nil, "", fmt.Errorf("probe unstacked status for Workspace %q from %s: %w", ref.Handle, graphRepoPath, err)
+			}
+			if unstacked {
+				info.Empty = false
+				info.Stacked = false
+			} else {
+				info.Empty, err = revisionMatches(graphRepoPath, "empty() & "+ref.Handle+"@")
+				if err != nil {
+					return nil, "", fmt.Errorf("probe empty status for Workspace %q from %s: %w", ref.Handle, graphRepoPath, err)
+				}
+				info.Stacked, err = revisionIsAncestor(graphRepoPath, ref.Handle+"@", cfg.MainWorkspace+"@")
+				if err != nil {
+					return nil, "", fmt.Errorf("probe stacked status for Workspace %q from %s: %w", ref.Handle, graphRepoPath, err)
+				}
+			}
+		} else {
+			info.Empty, err = revisionMatches(graphRepoPath, "empty() & "+ref.Handle+"@")
+			if err != nil {
+				return nil, "", fmt.Errorf("probe empty status for Workspace %q from %s: %w", ref.Handle, graphRepoPath, err)
+			}
 		}
 		infos = append(infos, info)
 	}
-	sort.Slice(infos, func(i, j int) bool { return infos[i].Ref.Handle < infos[j].Ref.Handle })
+	sortWorkspaceInfos(infos)
 	return infos, current, nil
 }
 
-func pathOrRepo(repoRoot, path string) string {
-	if path != "" {
-		return path
+func sortWorkspaceInfos(infos []workspaceInfo) {
+	sort.Slice(infos, func(i, j int) bool {
+		if infos[i].Main != infos[j].Main {
+			return infos[i].Main
+		}
+		return infos[i].Ref.Handle < infos[j].Ref.Handle
+	})
+}
+
+func workspaceGraphRepoPath(repoRoot string, refs []workspaceRef, cfg config, project string, currentHandle string) string {
+	if strings.TrimSpace(cfg.MainWorkspace) != "" {
+		for _, ref := range refs {
+			if ref.Handle == cfg.MainWorkspace {
+				path := workspacePathForRef(repoRoot, cfg.WorkspacesRoot, project, ref, currentHandle)
+				if strings.TrimSpace(path) != "" {
+					return path
+				}
+			}
+		}
 	}
 	return repoRoot
+}
+
+func workspaceHasConflictCommits(repoPath, handle string) (bool, error) {
+	return revisionMatches(repoPath, "conflicts() & reachable("+handle+"@, mutable())")
+}
+
+func workspaceHasUnstackedCommits(repoPath, handle, mainHandle string) (bool, error) {
+	return revisionMatches(repoPath, "reachable("+handle+"@, mutable()) & ~::"+mainHandle+"@ & ~empty()")
 }
 
 func mapInfosByHandle(infos []workspaceInfo) map[string]workspaceInfo {
@@ -1111,6 +1394,17 @@ func isStackRelevant(info workspaceInfo) bool {
 	return !info.Main && !info.Missing && (info.Conflict || (!info.Empty && !info.Stacked))
 }
 
+func workspaceSummary(infos []workspaceInfo) string {
+	parts := make([]string, 0, len(infos))
+	for _, info := range infos {
+		parts = append(parts, fmt.Sprintf("%s (%s)", info.Ref.Handle, statusLabel(info)))
+	}
+	if len(parts) == 1 {
+		return "Workspace " + parts[0]
+	}
+	return "Workspaces " + strings.Join(parts, ", ")
+}
+
 func statusLabel(info workspaceInfo) string {
 	if info.Missing {
 		return "missing"
@@ -1125,6 +1419,49 @@ func statusLabel(info workspaceInfo) string {
 		return "stacked"
 	}
 	return "unstacked"
+}
+
+func listFields(info workspaceInfo, color bool) (string, string, string, string) {
+	handle := info.Ref.Handle
+	markerText := strings.Join(markers(info), ",")
+	status := statusLabel(info)
+	path := info.Path
+	if !color {
+		return handle, markerText, status, path
+	}
+	s := cliStylesForWriter(stdoutWriter)
+	if info.Main {
+		handle = s.Section.Render(handle)
+	} else if info.Current {
+		handle = s.Command.Render(handle)
+	}
+	markerText = s.Marker.Render(markerText)
+	status = styleCLIStatus(s, status, status)
+	if info.Missing || info.External {
+		path = s.Warn.Render(path)
+	} else {
+		path = s.Muted.Render(path)
+	}
+	return handle, markerText, status, path
+}
+
+func styleCLIStatus(s cliStyles, status string, text string) string {
+	switch status {
+	case "conflict", "missing":
+		return s.Danger.Render(text)
+	case "stacked":
+		return s.Success.Render(text)
+	case "empty":
+		return s.Muted.Render(text)
+	case "unstacked":
+		return s.Info.Render(text)
+	default:
+		return text
+	}
+}
+
+func stderrHeading(format string, args ...any) string {
+	return cliStylesForWriter(stderrWriter).Section.Render("== " + fmt.Sprintf(format, args...) + " ==")
 }
 
 func markers(info workspaceInfo) []string {
@@ -1191,7 +1528,7 @@ func abandonUniqueMutableChanges(repoRoot, handle string) error {
 	if !has {
 		return nil
 	}
-	fmt.Fprintf(stderrWriter, "\n== Forced Closing: abandon unique mutable changes for %s ==\n", handle)
+	fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Forced Closing: abandon unique mutable changes for %s", handle))
 	return commandToStderrFn("jj", "-R", repoRoot, "abandon", "-r", revset)
 }
 
@@ -1224,7 +1561,7 @@ func runStackRebase(mainPath string, inputs []string, stack stackConfig) (bool, 
 		}
 		alternativeResolvedShape, alternativeShapeReason, alternativeDestinations, altErr := resolveStackShape(mainPath, inputs, alternativeShape)
 		if altErr == nil {
-			fmt.Fprintf(stderrWriter, "\n== Conflict fallback: undo and retry with %s ==\n", alternativeResolvedShape)
+			fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Conflict fallback: undo and retry with %s", alternativeResolvedShape))
 			if err := commandToStderrFn("jj", "-R", mainPath, "undo"); err != nil {
 				return false, err
 			}
@@ -1234,7 +1571,7 @@ func runStackRebase(mainPath string, inputs []string, stack stackConfig) (bool, 
 			}
 			finalConflicted = alternativeConflicted
 			if alternativeConflicted && alternativeResolvedShape == "linear" {
-				fmt.Fprintln(stderrWriter, "\n== Both strategies conflicted; keeping merge shape ==")
+				fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Both strategies conflicted; keeping merge shape"))
 				if err := commandToStderrFn("jj", "-R", mainPath, "undo"); err != nil {
 					return false, err
 				}
@@ -1282,9 +1619,9 @@ func runStackRebaseAttempt(mainPath string, inputs []string, resolvedMode string
 	if shapeReason == "" {
 		shapeReason = resolvedShape
 	}
-	fmt.Fprintf(stderrWriter, "\n== Stack shape: %s (%s) ==\n", resolvedShape, shapeReason)
-	fmt.Fprintf(stderrWriter, "\n== Rebase mode: %s (%s) ==\n", resolvedMode, modeReason)
-	fmt.Fprintf(stderrWriter, "\n== Stack Inputs: %s ==\n", strings.Join(inputs, ", "))
+	fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Stack shape: %s (%s)", resolvedShape, shapeReason))
+	fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Rebase mode: %s (%s)", resolvedMode, modeReason))
+	fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Stack Inputs: %s", strings.Join(inputs, ", ")))
 	if err := commandToStderrFn("jj", cmdArgs...); err != nil {
 		return false, err
 	}
@@ -1293,7 +1630,7 @@ func runStackRebaseAttempt(mainPath string, inputs []string, resolvedMode string
 		return false, err
 	}
 	if conflicted {
-		fmt.Fprintln(stderrWriter, "\n== Stack result has conflicts ==")
+		fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Stack result has conflicts"))
 	}
 	return conflicted, nil
 }
@@ -1303,10 +1640,7 @@ func validateLinearSelection(repoPath string, inputs []string, requested string)
 	if mode != "linear" {
 		return nil
 	}
-	revs := make([]string, 0, len(inputs))
-	for _, name := range inputs {
-		revs = append(revs, name+"@")
-	}
+	revs := stackInputHeadRevsets(inputs)
 	frontier, err := frontierHeads(repoPath, revs)
 	if err != nil {
 		return err
@@ -1322,10 +1656,7 @@ func resolveStackShape(repoPath string, inputs []string, requested string) (stri
 	if mode == "" {
 		mode = "auto"
 	}
-	inputRevs := make([]string, 0, len(inputs))
-	for _, name := range inputs {
-		inputRevs = append(inputRevs, name+"@")
-	}
+	inputRevs := stackInputHeadRevsets(inputs)
 	frontier, err := frontierHeads(repoPath, inputRevs)
 	if err != nil {
 		return "", "", nil, err
@@ -1349,6 +1680,18 @@ func resolveStackShape(repoPath string, inputs []string, requested string) (stri
 	default:
 		return "", "", nil, fmt.Errorf("invalid shape %q (expected auto, linear, or merge)", requested)
 	}
+}
+
+func stackInputHeadRevsets(inputs []string) []string {
+	revs := make([]string, 0, len(inputs))
+	for _, name := range inputs {
+		revs = append(revs, stackInputHeadRevset(name))
+	}
+	return revs
+}
+
+func stackInputHeadRevset(handle string) string {
+	return "heads(reachable(" + handle + "@, mutable()) & ~::@ & ~empty())"
 }
 
 func resolveStackConflictStrategy(requested string) (string, error) {
@@ -1488,7 +1831,7 @@ func abandonTopEmptyMutableAncestors(repoPath string) error {
 	if !hasEmpty {
 		return nil
 	}
-	fmt.Fprintln(stderrWriter, "\n== Abandon top empty commits ==")
+	fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Abandon top empty commits"))
 	return commandToStderrFn("jj", "-R", repoPath, "abandon", "-r", revset)
 }
 
@@ -1526,11 +1869,11 @@ func appendUniqueStrings(dst []string, src []string) []string {
 	return out
 }
 
-func normalizeAssimilatedFolders(folders []string) ([]string, error) {
-	out := make([]string, 0, len(folders))
+func normalizeAssimilatedPaths(paths []string) ([]string, error) {
+	out := make([]string, 0, len(paths))
 	seen := map[string]struct{}{}
-	for _, folder := range folders {
-		normalized, err := normalizeAssimilatedFolder(folder)
+	for _, path := range paths {
+		normalized, err := normalizeAssimilatedPath(path)
 		if err != nil {
 			return nil, err
 		}
@@ -1543,35 +1886,36 @@ func normalizeAssimilatedFolders(folders []string) ([]string, error) {
 	return out, nil
 }
 
-func normalizeAssimilatedFolder(folder string) (string, error) {
-	trimmed := strings.TrimSpace(folder)
+func normalizeAssimilatedPath(path string) (string, error) {
+	trimmed := strings.TrimSpace(path)
 	if trimmed == "" {
-		return "", errors.New("assimilated_folders contains an empty folder")
+		return "", errors.New("assimilated_paths contains an empty path")
 	}
 	if filepath.IsAbs(trimmed) {
-		return "", fmt.Errorf("invalid assimilated_folders entry %q; expected a relative folder path", folder)
+		return "", fmt.Errorf("invalid assimilated_paths entry %q; expected a relative path", path)
 	}
 	cleaned := filepath.Clean(trimmed)
 	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(os.PathSeparator)) {
-		return "", fmt.Errorf("invalid assimilated_folders entry %q; expected a relative folder path without traversal", folder)
+		return "", fmt.Errorf("invalid assimilated_paths entry %q; expected a relative path without traversal", path)
 	}
 	for _, part := range strings.Split(cleaned, string(os.PathSeparator)) {
 		if part == "" || part == "." || part == ".." {
-			return "", fmt.Errorf("invalid assimilated_folders entry %q; expected a relative folder path without traversal", folder)
+			return "", fmt.Errorf("invalid assimilated_paths entry %q; expected a relative path without traversal", path)
 		}
 	}
 	return cleaned, nil
 }
 
-func effectiveAssimilatedFolders(cfg config, project string) []string {
-	folders := append([]string(nil), cfg.AssimilatedFolders...)
+func effectiveAssimilatedPaths(cfg config, project string) []string {
+	paths := appendUniqueStrings(cfg.AssimilatedPaths, cfg.AssimilatedFolders)
 	if cfg.Projects != nil {
 		if projectCfg, ok := cfg.Projects[project]; ok {
-			folders = append(folders, projectCfg.AssimilatedFolders...)
+			paths = appendUniqueStrings(paths, projectCfg.AssimilatedPaths)
+			paths = appendUniqueStrings(paths, projectCfg.AssimilatedFolders)
 		}
 	}
-	folders, _ = normalizeAssimilatedFolders(folders)
-	return folders
+	paths, _ = normalizeAssimilatedPaths(paths)
+	return paths
 }
 
 func mainWorkspaceRoot(repoRoot string) string {
@@ -1587,19 +1931,19 @@ func materializeAssimilatedFolders(mainPath string, workspacePath string, cfg co
 	if mainPath == workspacePath {
 		return nil
 	}
-	for _, folder := range effectiveAssimilatedFolders(cfg, project) {
-		source := filepath.Join(mainPath, folder)
+	for _, path := range effectiveAssimilatedPaths(cfg, project) {
+		source := filepath.Join(mainPath, path)
 		st, err := os.Stat(source)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
-			return fmt.Errorf("stat assimilated folder source %s: %w", source, err)
+			return fmt.Errorf("stat assimilated path source %s: %w", source, err)
 		}
-		if !st.IsDir() {
-			return fmt.Errorf("assimilated folder source is not a directory: %s", source)
+		if !st.IsDir() && !st.Mode().IsRegular() {
+			return fmt.Errorf("assimilated path source is not a regular file or directory: %s", source)
 		}
-		dest := filepath.Join(workspacePath, folder)
+		dest := filepath.Join(workspacePath, path)
 		if err := ensureAssimilatedSymlink(source, dest); err != nil {
 			return err
 		}
@@ -1610,27 +1954,27 @@ func materializeAssimilatedFolders(mainPath string, workspacePath string, cfg co
 func ensureAssimilatedSymlink(source string, dest string) error {
 	if st, err := os.Lstat(dest); err == nil {
 		if st.Mode()&os.ModeSymlink == 0 {
-			return fmt.Errorf("refusing to replace existing Workspace content with assimilated folder symlink: %s", dest)
+			return fmt.Errorf("refusing to replace existing Workspace content with assimilated path symlink: %s", dest)
 		}
 		target, err := os.Readlink(dest)
 		if err != nil {
-			return fmt.Errorf("read assimilated folder symlink %s: %w", dest, err)
+			return fmt.Errorf("read assimilated path symlink %s: %w", dest, err)
 		}
 		if !filepath.IsAbs(target) {
 			target = filepath.Clean(filepath.Join(filepath.Dir(dest), target))
 		}
 		if filepath.Clean(target) != filepath.Clean(source) {
-			return fmt.Errorf("refusing to replace existing Workspace symlink %s -> %s with assimilated folder source %s", dest, target, source)
+			return fmt.Errorf("refusing to replace existing Workspace symlink %s -> %s with assimilated path source %s", dest, target, source)
 		}
 		return nil
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("stat assimilated folder destination %s: %w", dest, err)
+		return fmt.Errorf("stat assimilated path destination %s: %w", dest, err)
 	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-		return fmt.Errorf("create assimilated folder parent: %w", err)
+		return fmt.Errorf("create assimilated path parent: %w", err)
 	}
 	if err := os.Symlink(source, dest); err != nil {
-		return fmt.Errorf("symlink assimilated folder %s -> %s: %w", dest, source, err)
+		return fmt.Errorf("symlink assimilated path %s -> %s: %w", dest, source, err)
 	}
 	return nil
 }
@@ -1818,7 +2162,11 @@ func ensureEnvrc(workspacePath string) error {
 }
 
 func confirm(prompt string) (bool, error) {
-	fmt.Fprint(stderrWriter, prompt)
+	if canUseTUI() {
+		return runConfirmTUI(prompt)
+	}
+	s := cliStylesForWriter(stderrWriter)
+	fmt.Fprint(stderrWriter, s.Warn.Render(prompt))
 	reader := bufio.NewReader(stdinReader)
 	line, err := reader.ReadString('\n')
 	if err != nil {
@@ -1826,6 +2174,131 @@ func confirm(prompt string) (bool, error) {
 	}
 	answer := strings.ToLower(strings.TrimSpace(line))
 	return answer == "y" || answer == "yes", nil
+}
+
+type confirmModel struct {
+	prompt string
+	yes    bool
+	cancel bool
+}
+
+func runConfirmTUI(prompt string) (bool, error) {
+	model := confirmModel{prompt: strings.TrimSpace(prompt), yes: false}
+	program := tea.NewProgram(model, tea.WithInput(stdinReader), tea.WithOutput(stderrWriter))
+	out, err := program.Run()
+	if err != nil {
+		return false, err
+	}
+	m, ok := out.(confirmModel)
+	if !ok || m.cancel {
+		return false, nil
+	}
+	return m.yes, nil
+}
+
+func (m confirmModel) Init() tea.Cmd { return nil }
+
+func (m confirmModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "ctrl+c", "esc", "q":
+			m.cancel = true
+			return m, tea.Quit
+		case "left", "h", "n":
+			m.yes = false
+		case "right", "l", "y":
+			m.yes = true
+		case "tab", " ":
+			m.yes = !m.yes
+		case "enter":
+			return m, tea.Quit
+		}
+	}
+	return m, nil
+}
+
+func (m confirmModel) View() string {
+	s := selectorStyles()
+	prompt := strings.TrimSpace(m.prompt)
+	prompt = strings.TrimSuffix(prompt, ":")
+	prompt = strings.TrimSuffix(prompt, "[y/N]")
+	prompt = strings.TrimSpace(prompt)
+	noStyle := s.Selected
+	yesStyle := s.Help
+	if m.yes {
+		noStyle = s.Help
+		yesStyle = s.Selected
+	}
+	return fmt.Sprintf("%s\n\n  %s   %s\n\n%s\n", s.Title.Render(prompt), noStyle.Render("No"), yesStyle.Render("Yes"), s.Help.Render("←/→ choose  enter confirm  q cancel"))
+}
+
+type textPromptModel struct {
+	prompt      string
+	placeholder string
+	value       string
+	cancel      bool
+}
+
+func promptText(prompt string, placeholder string) (string, error) {
+	if canUseTUI() {
+		model := textPromptModel{prompt: prompt, placeholder: placeholder}
+		program := tea.NewProgram(model, tea.WithInput(stdinReader), tea.WithOutput(stderrWriter))
+		out, err := program.Run()
+		if err != nil {
+			return "", err
+		}
+		m, ok := out.(textPromptModel)
+		if !ok || m.cancel {
+			return "", nil
+		}
+		return strings.TrimSpace(m.value), nil
+	}
+	s := cliStylesForWriter(stderrWriter)
+	fmt.Fprintf(stderrWriter, "%s ", s.Warn.Render(prompt+":"))
+	reader := bufio.NewReader(stdinReader)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(line), nil
+}
+
+func (m textPromptModel) Init() tea.Cmd { return nil }
+
+func (m textPromptModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "ctrl+c", "esc":
+			m.cancel = true
+			return m, tea.Quit
+		case "enter":
+			return m, tea.Quit
+		case "backspace", "ctrl+h":
+			if len(m.value) > 0 {
+				runes := []rune(m.value)
+				m.value = string(runes[:len(runes)-1])
+			}
+		default:
+			if len(msg.String()) == 1 {
+				r := []rune(msg.String())[0]
+				if unicode.IsPrint(r) {
+					m.value += msg.String()
+				}
+			}
+		}
+	}
+	return m, nil
+}
+
+func (m textPromptModel) View() string {
+	s := selectorStyles()
+	value := m.value
+	if value == "" && m.placeholder != "" {
+		value = s.Help.Render(m.placeholder)
+	}
+	return fmt.Sprintf("%s\n\n  %s\n\n%s\n", s.Title.Render(m.prompt), value, s.Help.Render("type a path  enter accept  esc cancel"))
 }
 
 func canUseTUI() bool {
@@ -2026,6 +2499,11 @@ func (m selectorModel) submit() selectorModel {
 	}
 	idx := visible[m.cursor]
 	item := m.opts.Items[idx]
+	selectedItems := m.selectedItems()
+	if len(selectedItems) > 0 {
+		m.result = selectorResult{Items: selectedItems, ForceEnabled: m.opts.ForceEnabled, StackOptions: m.opts.StackOptions}
+		return m
+	}
 	if item.All {
 		items := []selectorItem{}
 		for _, candidate := range m.opts.Items {
@@ -2037,22 +2515,28 @@ func (m selectorModel) submit() selectorModel {
 		return m
 	}
 	if !item.Disabled {
-		m.selected[idx] = true
+		m.result = selectorResult{Items: []selectorItem{item}, ForceEnabled: m.opts.ForceEnabled, StackOptions: m.opts.StackOptions}
+		return m
 	}
+	m.result = selectorResult{ForceEnabled: m.opts.ForceEnabled, StackOptions: m.opts.StackOptions}
+	return m
+}
+
+func (m selectorModel) selectedItems() []selectorItem {
 	items := []selectorItem{}
-	for selectedIdx, selected := range m.selected {
-		if selected {
-			items = append(items, m.opts.Items[selectedIdx])
+	for idx, item := range m.opts.Items {
+		if m.selected[idx] && !item.Disabled && !item.All {
+			items = append(items, item)
 		}
 	}
-	m.result = selectorResult{Items: items, ForceEnabled: m.opts.ForceEnabled, StackOptions: m.opts.StackOptions}
-	return m
+	return items
 }
 
 func (m selectorModel) View() string {
 	var b strings.Builder
 	styles := selectorStyles()
 	fmt.Fprintln(&b, styles.Title.Render(m.opts.Title))
+	fmt.Fprintln(&b, styles.Help.Render(selectorHint(m.opts)))
 	if m.filter != "" {
 		fmt.Fprintln(&b, styles.Help.Render("filter: "+m.filter))
 	}
@@ -2082,14 +2566,17 @@ func (m selectorModel) View() string {
 			line = styles.Disabled.Render(line)
 		} else if row == m.cursor {
 			line = styles.Selected.Render(line)
+		} else if itemHasMarker(item, "main") {
+			line = styles.Main.Render(line)
 		} else {
 			line = styleStatus(styles, item.Status, line)
 		}
 		fmt.Fprintln(&b, line)
 	}
+	fmt.Fprintln(&b, styles.Help.Render(selectorLegend(m.opts)))
 	footer := "↑/↓ move  type filter  enter choose  q quit"
 	if m.opts.Mode == selectorMulti {
-		footer = "↑/↓ move  space toggle  enter submit/all  type filter  q quit"
+		footer = "↑/↓ move  space toggle  enter submit selected  type filter  q quit"
 	}
 	if m.opts.AllowForceToggle {
 		footer += fmt.Sprintf("  f force:%v", m.opts.ForceEnabled)
@@ -2099,6 +2586,29 @@ func (m selectorModel) View() string {
 	}
 	fmt.Fprintln(&b, styles.Help.Render(footer))
 	return b.String()
+}
+
+func selectorLegend(opts selectorOptions) string {
+	if opts.AllDefault {
+		return "status: unstacked/conflict = stack-relevant; stacked/empty/missing = shown for context"
+	}
+	if opts.AllowForceToggle {
+		return "status: empty/stacked = closable; unstacked/conflict need Stacking or Forced Closing; missing cannot close"
+	}
+	return "status: current/main markers show where you are; missing rows cannot be opened"
+}
+
+func selectorHint(opts selectorOptions) string {
+	if opts.Mode == selectorSingle {
+		return "Choose the Workspace to open. Type to filter by handle, status, marker, or path."
+	}
+	if opts.AllDefault {
+		return "Choose Stack Inputs. The All row submits every stack-relevant Workspace only when no boxes are checked. Disabled rows are shown for context."
+	}
+	if opts.AllowForceToggle {
+		return "Choose Workspaces to close. Press f to preview Forced Closing availability instead of re-running with --force."
+	}
+	return "Choose Workspaces. Type to filter by handle, status, marker, or path."
 }
 
 func (m selectorModel) visibleItems() []int {
@@ -2143,22 +2653,35 @@ func selectorItemsForStack(infos []workspaceInfo) []selectorItem {
 	return items
 }
 
-type styles struct{ Title, Selected, Disabled, Help, Conflict, Stacked, Empty lipgloss.Style }
+type styles struct{ Title, Selected, Disabled, Help, Conflict, Stacked, Empty, Missing, Unstacked, Marker, Main lipgloss.Style }
 
 func selectorStyles() styles {
 	if os.Getenv("NO_COLOR") != "" {
 		base := lipgloss.NewStyle()
-		return styles{Title: base.Bold(true), Selected: base.Bold(true), Disabled: base.Faint(true), Help: base.Faint(true), Conflict: base, Stacked: base, Empty: base}
+		return styles{Title: base.Bold(true), Selected: base.Bold(true), Disabled: base.Faint(true), Help: base.Faint(true), Conflict: base, Stacked: base, Empty: base, Missing: base, Unstacked: base, Marker: base, Main: base.Bold(true)}
 	}
 	return styles{
-		Title:    lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("63")),
-		Selected: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212")),
-		Disabled: lipgloss.NewStyle().Faint(true),
-		Help:     lipgloss.NewStyle().Faint(true),
-		Conflict: lipgloss.NewStyle().Foreground(lipgloss.Color("196")),
-		Stacked:  lipgloss.NewStyle().Foreground(lipgloss.Color("42")),
-		Empty:    lipgloss.NewStyle().Foreground(lipgloss.Color("244")),
+		Title:     lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("63")),
+		Selected:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212")),
+		Disabled:  lipgloss.NewStyle().Faint(true),
+		Help:      lipgloss.NewStyle().Faint(true),
+		Conflict:  lipgloss.NewStyle().Foreground(lipgloss.Color("196")),
+		Stacked:   lipgloss.NewStyle().Foreground(lipgloss.Color("42")),
+		Empty:     lipgloss.NewStyle().Foreground(lipgloss.Color("244")),
+		Missing:   lipgloss.NewStyle().Foreground(lipgloss.Color("214")),
+		Unstacked: lipgloss.NewStyle().Foreground(lipgloss.Color("81")),
+		Marker:    lipgloss.NewStyle().Foreground(lipgloss.Color("141")),
+		Main:      lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("111")),
 	}
+}
+
+func itemHasMarker(item selectorItem, marker string) bool {
+	for _, part := range strings.Split(item.Markers, ",") {
+		if strings.TrimSpace(part) == marker {
+			return true
+		}
+	}
+	return false
 }
 
 func styleStatus(s styles, status string, line string) string {
@@ -2167,8 +2690,12 @@ func styleStatus(s styles, status string, line string) string {
 		return s.Conflict.Render(line)
 	case "stacked":
 		return s.Stacked.Render(line)
-	case "empty", "missing":
+	case "empty":
 		return s.Empty.Render(line)
+	case "missing":
+		return s.Missing.Render(line)
+	case "unstacked":
+		return s.Unstacked.Render(line)
 	default:
 		return line
 	}

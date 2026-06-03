@@ -5,7 +5,7 @@ jjw() {
   local out rc
   case "$1" in
     create|open|close|main)
-      out="$(command jjw "$@")"
+      out="$(JJW_SHELL_WRAPPED=1 command jjw "$@")"
       rc=$?
       if [ $rc -ne 0 ]; then
         return $rc

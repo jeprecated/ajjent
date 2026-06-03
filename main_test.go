@@ -27,7 +27,7 @@ func TestLoadConfigRejectsLegacyUnknownKeys(t *testing.T) {
 	}
 }
 
-func TestLoadConfigUsesRedesignedVocabulary(t *testing.T) {
+func TestLoadConfigUsesAssimilatedPathsVocabulary(t *testing.T) {
 	repoRoot := t.TempDir()
 	xdg := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(xdg, "jjw"), 0o755); err != nil {
@@ -40,7 +40,7 @@ func TestLoadConfigUsesRedesignedVocabulary(t *testing.T) {
 		"workspace_handles:",
 		"  - kilo",
 		"main_workspace: default",
-		"assimilated_folders:",
+		"assimilated_paths:",
 		"  - scratch",
 		"stack:",
 		"  rebase_mode: revision",
@@ -51,7 +51,7 @@ func TestLoadConfigUsesRedesignedVocabulary(t *testing.T) {
 		"  direnv_allow: true",
 		"projects:",
 		"  my-project:",
-		"    assimilated_folders:",
+		"    assimilated_paths:",
 		"      - .local-notes",
 		"",
 	}, "\n"))
@@ -72,13 +72,13 @@ func TestLoadConfigUsesRedesignedVocabulary(t *testing.T) {
 	if !cfg.Create.Envrc || !cfg.Create.DirenvAllow {
 		t.Fatalf("expected create setup config, got %+v", cfg.Create)
 	}
-	folders := effectiveAssimilatedFolders(cfg, "my-project")
-	if strings.Join(folders, ",") != "scratch,.local-notes" {
-		t.Fatalf("unexpected assimilated folders: %v", folders)
+	paths := effectiveAssimilatedPaths(cfg, "my-project")
+	if strings.Join(paths, ",") != "scratch,.local-notes" {
+		t.Fatalf("unexpected assimilated paths: %v", paths)
 	}
 }
 
-func TestLoadConfigMergesGlobalAndProjectAssimilatedFolders(t *testing.T) {
+func TestLoadConfigAcceptsDeprecatedAssimilatedFoldersAlias(t *testing.T) {
 	repoRoot := t.TempDir()
 	xdg := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(xdg, "jjw"), 0o755); err != nil {
@@ -88,10 +88,40 @@ func TestLoadConfigMergesGlobalAndProjectAssimilatedFolders(t *testing.T) {
 		"workspaces_root: /tmp/workspaces",
 		"assimilated_folders:",
 		"  - scratch",
-		"  - logs",
 		"projects:",
 		"  proj:",
 		"    assimilated_folders:",
+		"      - .local-tools",
+		"",
+	}, "\n"))
+	if err := os.WriteFile(filepath.Join(xdg, "jjw", "config.yaml"), cfgText, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	cfg, err := loadConfig(repoRoot)
+	if err != nil {
+		t.Fatalf("loadConfig failed: %v", err)
+	}
+	paths := effectiveAssimilatedPaths(cfg, "proj")
+	if strings.Join(paths, ",") != "scratch,.local-tools" {
+		t.Fatalf("unexpected assimilated paths from deprecated alias: %v", paths)
+	}
+}
+
+func TestLoadConfigMergesGlobalAndProjectAssimilatedPaths(t *testing.T) {
+	repoRoot := t.TempDir()
+	xdg := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(xdg, "jjw"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfgText := []byte(strings.Join([]string{
+		"workspaces_root: /tmp/workspaces",
+		"assimilated_paths:",
+		"  - scratch",
+		"  - logs",
+		"projects:",
+		"  proj:",
+		"    assimilated_paths:",
 		"      - logs",
 		"      - .local-tools",
 		"",
@@ -104,26 +134,26 @@ func TestLoadConfigMergesGlobalAndProjectAssimilatedFolders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadConfig failed: %v", err)
 	}
-	folders := effectiveAssimilatedFolders(cfg, "proj")
-	if strings.Join(folders, ",") != "scratch,logs,.local-tools" {
-		t.Fatalf("unexpected merged assimilated folders: %v", folders)
+	paths := effectiveAssimilatedPaths(cfg, "proj")
+	if strings.Join(paths, ",") != "scratch,logs,.local-tools" {
+		t.Fatalf("unexpected merged assimilated paths: %v", paths)
 	}
 }
 
-func TestLoadConfigRejectsUnsafeAssimilatedFolders(t *testing.T) {
+func TestLoadConfigRejectsUnsafeAssimilatedPaths(t *testing.T) {
 	repoRoot := t.TempDir()
 	xdg := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(xdg, "jjw"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	cfgText := []byte("workspaces_root: /tmp/workspaces\nassimilated_folders:\n  - ../scratch\n")
+	cfgText := []byte("workspaces_root: /tmp/workspaces\nassimilated_paths:\n  - ../scratch\n")
 	if err := os.WriteFile(filepath.Join(xdg, "jjw", "config.yaml"), cfgText, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("XDG_CONFIG_HOME", xdg)
 	_, err := loadConfig(repoRoot)
-	if err == nil || !strings.Contains(err.Error(), "assimilated_folders") {
-		t.Fatalf("expected unsafe assimilated_folders error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "assimilated_paths") {
+		t.Fatalf("expected unsafe assimilated_paths error, got %v", err)
 	}
 }
 
@@ -178,10 +208,286 @@ func TestRunRejectsLegacyCommands(t *testing.T) {
 	}
 }
 
+func TestRunUnknownCommandSuggestsHelp(t *testing.T) {
+	err := run([]string{"wat"})
+	if err == nil || !strings.Contains(err.Error(), "jjw help") {
+		t.Fatalf("expected help suggestion, got %v", err)
+	}
+}
+
+func TestShellInitPrintsNavigationWrapperIncludingMain(t *testing.T) {
+	out, err := captureStdout(func() error { return run([]string{"shell-init", "zsh"}) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"jjw()", "create|open|close|main", "JJW_SHELL_WRAPPED=1 command jjw", "cd \"$out\""} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("shell init missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestNavigationHintMentionsShellInitForRawMain(t *testing.T) {
+	hint := navigationHint("main", "zsh")
+	for _, want := range []string{"jjw main", "cd automatically", "eval \"$(jjw shell-init zsh)\""} {
+		if !strings.Contains(hint, want) {
+			t.Fatalf("navigation hint missing %q in %q", want, hint)
+		}
+	}
+}
+
+func TestRunShellInitRejectsUnknownShell(t *testing.T) {
+	err := run([]string{"shell-init", "fish"})
+	if err == nil || !strings.Contains(err.Error(), "expected bash or zsh") {
+		t.Fatalf("expected shell rejection, got %v", err)
+	}
+}
+
+func TestSelectorHintMentionsForceToggleInsteadOfReRun(t *testing.T) {
+	hint := selectorHint(selectorOptions{Mode: selectorMulti, AllowForceToggle: true})
+	if !strings.Contains(hint, "Press f") || !strings.Contains(hint, "instead of re-running") {
+		t.Fatalf("expected force-toggle hint, got %q", hint)
+	}
+}
+
+func TestStackSelectorHintExplainsAllRowDoesNotOverrideCheckedBoxes(t *testing.T) {
+	hint := selectorHint(selectorOptions{Mode: selectorMulti, AllDefault: true})
+	if !strings.Contains(hint, "only when no boxes are checked") {
+		t.Fatalf("expected All-row caveat, got %q", hint)
+	}
+}
+
+func TestStackPlanPromptShowsExactInputsAndOptions(t *testing.T) {
+	prompt := stackPlanPrompt([]string{"alpha", "charlie"}, stackConfig{Shape: "merge", RebaseMode: "revision", ConflictStrategy: "off"})
+	for _, want := range []string{"Stack 2 Workspaces", "alpha, charlie", "shape:merge", "rebase:revision", "conflicts:off"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("expected %q in prompt %q", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, "bravo") {
+		t.Fatalf("prompt should only show selected inputs, got %q", prompt)
+	}
+}
+
+func TestShouldConfirmStackPlanOnlyForInteractiveSelectorWithoutYes(t *testing.T) {
+	cases := []struct {
+		name         string
+		selectorUsed bool
+		yes          bool
+		canUseTUI    bool
+		want         bool
+	}{
+		{name: "interactive selector", selectorUsed: true, canUseTUI: true, want: true},
+		{name: "yes skips", selectorUsed: true, yes: true, canUseTUI: true, want: false},
+		{name: "positional skips", selectorUsed: false, canUseTUI: true, want: false},
+		{name: "non tty skips", selectorUsed: true, canUseTUI: false, want: false},
+	}
+	for _, tc := range cases {
+		if got := shouldConfirmStackPlan(tc.selectorUsed, tc.yes, tc.canUseTUI); got != tc.want {
+			t.Fatalf("%s: expected %v, got %v", tc.name, tc.want, got)
+		}
+	}
+}
+
+func TestMultiSelectorEnterDoesNotReAddExcludedCursorItem(t *testing.T) {
+	model := selectorModel{
+		opts: selectorOptions{Mode: selectorMulti, Items: []selectorItem{
+			{Handle: "All", All: true},
+			{Handle: "alpha"},
+			{Handle: "bravo"},
+			{Handle: "charlie"},
+		}},
+		cursor:   2, // bravo is highlighted but intentionally not selected.
+		selected: map[int]bool{1: true, 3: true},
+	}
+	model = model.submit()
+	if got := selectorHandles(model.result.Items); strings.Join(got, ",") != "alpha,charlie" {
+		t.Fatalf("expected explicit selections without cursor item, got %v", got)
+	}
+}
+
+func TestMultiSelectorAllRowRespectsExplicitSelections(t *testing.T) {
+	model := selectorModel{
+		opts: selectorOptions{Mode: selectorMulti, Items: []selectorItem{
+			{Handle: "All", All: true},
+			{Handle: "alpha"},
+			{Handle: "bravo"},
+			{Handle: "charlie"},
+		}},
+		cursor:   0,
+		selected: map[int]bool{1: true, 3: true},
+	}
+	model = model.submit()
+	if got := selectorHandles(model.result.Items); strings.Join(got, ",") != "alpha,charlie" {
+		t.Fatalf("expected explicit selections from All row, got %v", got)
+	}
+}
+
+func selectorHandles(items []selectorItem) []string {
+	handles := make([]string, 0, len(items))
+	for _, item := range items {
+		handles = append(handles, item.Handle)
+	}
+	return handles
+}
+
+func TestWorkspaceSummaryIncludesStatuses(t *testing.T) {
+	summary := workspaceSummary([]workspaceInfo{{Ref: workspaceRef{Handle: "alpha"}}, {Ref: workspaceRef{Handle: "bravo"}, Conflict: true}})
+	if summary != "Workspaces alpha (unstacked), bravo (conflict)" {
+		t.Fatalf("unexpected summary: %q", summary)
+	}
+}
+
+func TestPromptTextFallbackReadsLine(t *testing.T) {
+	origIn, origErr := stdinReader, stderrWriter
+	stdinReader = strings.NewReader("~/w\n")
+	stderrWriter = io.Discard
+	defer func() { stdinReader, stderrWriter = origIn, origErr }()
+	got, err := promptText("Workspaces root", "")
+	if err != nil || got != "~/w" {
+		t.Fatalf("expected prompt value, got %q err=%v", got, err)
+	}
+}
+
 func TestRunOpenRejectsMultipleHandles(t *testing.T) {
 	err := runOpen([]string{"alpha", "bravo"})
 	if err == nil || !strings.Contains(err.Error(), "at most one") {
 		t.Fatalf("expected multiple handle error, got %v", err)
+	}
+}
+
+func TestSortWorkspaceInfosPutsMainFirst(t *testing.T) {
+	infos := []workspaceInfo{
+		{Ref: workspaceRef{Handle: "alpha"}},
+		{Ref: workspaceRef{Handle: "default"}, Main: true},
+		{Ref: workspaceRef{Handle: "bravo"}},
+	}
+	sortWorkspaceInfos(infos)
+	got := []string{infos[0].Ref.Handle, infos[1].Ref.Handle, infos[2].Ref.Handle}
+	if strings.Join(got, ",") != "default,alpha,bravo" {
+		t.Fatalf("expected main/default first, got %v", got)
+	}
+}
+
+func TestLoadWorkspaceInfosTreatsEmptyHeadWithUnstackedAncestorAsUnstacked(t *testing.T) {
+	repoRoot := t.TempDir()
+	workspacesRoot := filepath.Join(t.TempDir(), "workspaces")
+	mainPath := filepath.Join(workspacesRoot, "proj", "default")
+	alphaPath := filepath.Join(workspacesRoot, "proj", "alpha")
+	for _, path := range []string{mainPath, alphaPath} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := config{WorkspacesRoot: workspacesRoot, Project: "proj", MainWorkspace: "default"}
+	withCommandCapture(t, func(name string, args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "workspace list") {
+			return "default\tmain111\t" + mainPath + "\nalpha\talpha111\t" + alphaPath + "\n", nil
+		}
+		if strings.Contains(joined, "log -r @") {
+			return "alpha111\n", nil
+		}
+		if strings.Contains(joined, "reachable(alpha@, mutable()) & ~::default@ & ~empty()") {
+			return "lower-unstacked\n", nil
+		}
+		if strings.Contains(joined, "empty() & alpha@") {
+			return "alpha111\n", nil
+		}
+		return "", nil
+	})
+	infos, _, err := loadWorkspaceInfos(repoRoot, cfg, "proj")
+	if err != nil {
+		t.Fatal(err)
+	}
+	byHandle := mapInfosByHandle(infos)
+	alpha := byHandle["alpha"]
+	if alpha.Empty || alpha.Stacked || statusLabel(alpha) != "unstacked" {
+		t.Fatalf("expected alpha to be unstacked despite empty head, got empty=%v stacked=%v status=%s", alpha.Empty, alpha.Stacked, statusLabel(alpha))
+	}
+}
+
+func TestWorkspaceHasUnstackedCommitsChecksReachableStackNotJustHead(t *testing.T) {
+	withCommandCapture(t, func(name string, args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		if !strings.Contains(joined, "reachable(alpha@, mutable()) & ~::default@ & ~empty()") {
+			t.Fatalf("expected reachable-stack revset, got %q", joined)
+		}
+		return "lower-unstacked\n", nil
+	})
+	got, err := workspaceHasUnstackedCommits("/repo", "alpha", "default")
+	if err != nil || !got {
+		t.Fatalf("expected unstacked commit match, got %v err=%v", got, err)
+	}
+}
+
+func TestLoadWorkspaceInfosUsesMainRepoForStatusWhenWorkspacePathIsStale(t *testing.T) {
+	workspacesRoot := filepath.Join(t.TempDir(), "workspaces")
+	mainPath := filepath.Join(workspacesRoot, "proj", "default")
+	repoRoot := mainPath
+	deltaPath := filepath.Join(workspacesRoot, "proj", "delta")
+	for _, path := range []string{mainPath, deltaPath} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := config{WorkspacesRoot: workspacesRoot, Project: "proj", MainWorkspace: "default"}
+	withCommandCapture(t, func(name string, args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "workspace list") {
+			return "default\tmain111\t" + mainPath + "\ndelta\tdelta111\t" + deltaPath + "\n", nil
+		}
+		if len(args) >= 2 && args[0] == "-R" && args[1] == deltaPath {
+			return "", errors.New("The working copy is stale")
+		}
+		if len(args) >= 2 && args[0] == "-R" && args[1] != mainPath {
+			t.Fatalf("expected status probe through main path %q, got args %v", mainPath, args)
+		}
+		if strings.Contains(joined, "reachable(delta@, mutable()) & ~::default@ & ~empty()") {
+			return "", nil
+		}
+		if strings.Contains(joined, "empty() & delta@") {
+			return "delta-head\n", nil
+		}
+		if strings.Contains(joined, "delta@::default@") {
+			return "stacked\n", nil
+		}
+		return "", nil
+	})
+	infos, _, err := loadWorkspaceInfos(repoRoot, cfg, "proj")
+	if err != nil {
+		t.Fatal(err)
+	}
+	delta := mapInfosByHandle(infos)["delta"]
+	if !delta.Empty || statusLabel(delta) != "empty" {
+		t.Fatalf("expected stale-path delta to be classified from main graph as empty, got empty=%v stacked=%v status=%s", delta.Empty, delta.Stacked, statusLabel(delta))
+	}
+}
+
+func TestLoadWorkspaceInfosSurfacesStatusProbeErrors(t *testing.T) {
+	workspacesRoot := filepath.Join(t.TempDir(), "workspaces")
+	mainPath := filepath.Join(workspacesRoot, "proj", "default")
+	repoRoot := mainPath
+	alphaPath := filepath.Join(workspacesRoot, "proj", "alpha")
+	for _, path := range []string{mainPath, alphaPath} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := config{WorkspacesRoot: workspacesRoot, Project: "proj", MainWorkspace: "default"}
+	withCommandCapture(t, func(name string, args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "workspace list") {
+			return "default\tmain111\t" + mainPath + "\nalpha\talpha111\t" + alphaPath + "\n", nil
+		}
+		if strings.Contains(joined, "reachable(alpha@, mutable()) & ~::default@ & ~empty()") {
+			return "", errors.New("graph probe failed")
+		}
+		return "", nil
+	})
+	_, _, err := loadWorkspaceInfos(repoRoot, cfg, "proj")
+	if err == nil || !strings.Contains(err.Error(), "probe unstacked status for Workspace \"alpha\"") || !strings.Contains(err.Error(), "graph probe failed") {
+		t.Fatalf("expected clear status probe error, got %v", err)
 	}
 }
 
@@ -212,6 +518,27 @@ func TestListIncludesCurrentAndMainMarkers(t *testing.T) {
 	}
 	if !strings.Contains(out, "default\tmain") || !strings.Contains(out, "alpha\tcurrent") {
 		t.Fatalf("expected main and current markers, got %q", out)
+	}
+}
+
+func TestRunInitWritesAssimilatedPathsVocabulary(t *testing.T) {
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	out, err := captureStdout(func() error { return runInit([]string{"--workspaces-root", "/tmp/workspaces"}) })
+	if err != nil {
+		t.Fatalf("init failed: %v", err)
+	}
+	cfgPath := strings.TrimSpace(out)
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "assimilated_paths:") {
+		t.Fatalf("expected assimilated_paths in generated config, got:\n%s", text)
+	}
+	if strings.Contains(text, "assimilated_folders:") {
+		t.Fatalf("generated config should not use deprecated assimilated_folders, got:\n%s", text)
 	}
 }
 
@@ -292,7 +619,10 @@ func TestMaterializeAssimilatedFoldersSymlinksExistingSources(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(mainPath, "scratch", "note.md"), []byte("one-off"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg := config{AssimilatedFolders: []string{"scratch", "missing"}}
+	if err := os.WriteFile(filepath.Join(mainPath, ".env.local"), []byte("secret-ish local config"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config{AssimilatedPaths: []string{"scratch", ".env.local", "missing"}}
 	if err := materializeAssimilatedFolders(mainPath, workspacePath, cfg, "proj"); err != nil {
 		t.Fatal(err)
 	}
@@ -302,6 +632,13 @@ func TestMaterializeAssimilatedFoldersSymlinksExistingSources(t *testing.T) {
 	}
 	if target != filepath.Join(mainPath, "scratch") {
 		t.Fatalf("expected symlink to main scratch, got %q", target)
+	}
+	fileTarget, err := os.Readlink(filepath.Join(workspacePath, ".env.local"))
+	if err != nil {
+		t.Fatalf("expected file symlink: %v", err)
+	}
+	if fileTarget != filepath.Join(mainPath, ".env.local") {
+		t.Fatalf("expected symlink to main file, got %q", fileTarget)
 	}
 	if exists(filepath.Join(workspacePath, "missing")) {
 		t.Fatal("missing source should be skipped, not created")
@@ -317,9 +654,41 @@ func TestMaterializeAssimilatedFoldersRefusesToReplaceWorkspaceContent(t *testin
 	if err := os.WriteFile(filepath.Join(workspacePath, "scratch"), []byte("workspace-local"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cfg := config{AssimilatedFolders: []string{"scratch"}}
+	cfg := config{AssimilatedPaths: []string{"scratch"}}
 	if err := materializeAssimilatedFolders(mainPath, workspacePath, cfg, "proj"); err == nil || !strings.Contains(err.Error(), "refusing to replace") {
 		t.Fatalf("expected refusal to replace existing content, got %v", err)
+	}
+}
+
+func TestCreateWorkspaceHelperCreatesPrintsAndMaterializes(t *testing.T) {
+	mainPath := t.TempDir()
+	workspacesRoot := filepath.Join(t.TempDir(), "workspaces")
+	if err := os.MkdirAll(filepath.Join(mainPath, "scratch"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config{WorkspacesRoot: workspacesRoot, Project: "proj", MainWorkspace: "default", AssimilatedPaths: []string{"scratch"}}
+	withCommandCapture(t, func(name string, args ...string) (string, error) {
+		if strings.Contains(strings.Join(args, " "), "workspace list") {
+			return "default\tmain111\t" + mainPath + "\n", nil
+		}
+		return "", nil
+	})
+	withCommandToStderr(t, func(name string, args ...string) error {
+		if name == "jj" && strings.Contains(strings.Join(args, " "), "workspace add") {
+			return os.MkdirAll(args[len(args)-1], 0o755)
+		}
+		return nil
+	})
+	out, err := captureStdout(func() error { return createWorkspace(mainPath, cfg, "proj", "alpha", false, false) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspacePath := filepath.Join(workspacesRoot, "proj", "alpha")
+	if strings.TrimSpace(out) != workspacePath {
+		t.Fatalf("expected helper to print workspace path, got %q", out)
+	}
+	if target, err := os.Readlink(filepath.Join(workspacePath, "scratch")); err != nil || target != filepath.Join(mainPath, "scratch") {
+		t.Fatalf("expected helper to materialize scratch symlink to main, got target=%q err=%v", target, err)
 	}
 }
 
@@ -332,7 +701,7 @@ func TestRunCreateMaterializesAssimilatedFolders(t *testing.T) {
 	writeConfig(t, mainPath, strings.Join([]string{
 		"workspaces_root: " + workspacesRoot,
 		"project: proj",
-		"assimilated_folders:",
+		"assimilated_paths:",
 		"  - scratch",
 		"",
 	}, "\n"))
@@ -373,7 +742,7 @@ func TestRunOpenMaterializesAssimilatedFoldersBeforePrintingPath(t *testing.T) {
 	writeConfig(t, mainPath, strings.Join([]string{
 		"workspaces_root: /tmp/workspaces",
 		"project: proj",
-		"assimilated_folders:",
+		"assimilated_paths:",
 		"  - scratch",
 		"",
 	}, "\n"))
@@ -430,6 +799,54 @@ func TestCloseAllSelectsOnlyClosableWithoutForce(t *testing.T) {
 	}
 	if strings.Join(closable, ",") != "empty,stacked" {
 		t.Fatalf("unexpected closable set: %v", closable)
+	}
+}
+
+func TestRunCloseStackedStaleWorkspaceDoesNotRequireForcedClosing(t *testing.T) {
+	workspacesRoot := filepath.Join(t.TempDir(), "workspaces")
+	mainPath := filepath.Join(workspacesRoot, "proj", "default")
+	deltaPath := filepath.Join(workspacesRoot, "proj", "delta")
+	for _, path := range []string{mainPath, deltaPath} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeConfig(t, mainPath, "workspaces_root: "+workspacesRoot+"\nproject: proj\nmain_workspace: default\n")
+	withCommandCapture(t, func(name string, args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "workspace list") {
+			return "default\tmain111\t" + mainPath + "\ndelta\tdelta111\t" + deltaPath + "\n", nil
+		}
+		if len(args) >= 2 && args[0] == "-R" && args[1] == deltaPath {
+			return "", errors.New("The working copy is stale")
+		}
+		if strings.Contains(joined, "reachable(delta@, mutable()) & ~::default@ & ~empty()") {
+			return "", nil
+		}
+		if strings.Contains(joined, "empty() & delta@") {
+			return "", nil
+		}
+		if strings.Contains(joined, "delta@::default@") {
+			return "stacked\n", nil
+		}
+		return "", nil
+	})
+	forgot := false
+	withCommandToStderr(t, func(name string, args ...string) error {
+		if strings.Contains(strings.Join(args, " "), "workspace forget delta") {
+			forgot = true
+		}
+		return nil
+	})
+	out, err := captureStdout(func() error { return runClose([]string{"delta", "--repo", mainPath, "--yes"}) })
+	if err != nil {
+		t.Fatalf("expected normal close without forced-closing prompt/error, got %v", err)
+	}
+	if !forgot {
+		t.Fatal("expected delta workspace to be forgotten")
+	}
+	if exists(deltaPath) {
+		t.Fatalf("expected delta workspace directory removed, stdout=%q", out)
 	}
 }
 
