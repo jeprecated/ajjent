@@ -521,6 +521,79 @@ func TestListIncludesCurrentAndMainMarkers(t *testing.T) {
 	}
 }
 
+func TestRunTidyClosesWorkspacesWithNoUniqueNonEmptyCommits(t *testing.T) {
+	workspacesRoot := filepath.Join(t.TempDir(), "workspaces")
+	mainPath := filepath.Join(workspacesRoot, "proj", "default")
+	deltaPath := filepath.Join(workspacesRoot, "proj", "delta")
+	alphaPath := filepath.Join(workspacesRoot, "proj", "alpha")
+	for _, path := range []string{mainPath, deltaPath, alphaPath} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeConfig(t, mainPath, "workspaces_root: "+workspacesRoot+"\nproject: proj\nmain_workspace: default\n")
+	withCommandCapture(t, func(name string, args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "workspace list") {
+			return "default\tmain111\t" + mainPath + "\ndelta\tdelta111\t" + deltaPath + "\nalpha\talpha111\t" + alphaPath + "\n", nil
+		}
+		if strings.Contains(joined, "reachable(alpha@, mutable()) & ~::default@ & ~empty()") {
+			return "unique-alpha\n", nil
+		}
+		if strings.Contains(joined, "reachable(delta@, mutable()) & ~::default@ & ~empty()") {
+			return "", nil
+		}
+		if strings.Contains(joined, "empty() & delta@") {
+			return "delta-empty\n", nil
+		}
+		if strings.Contains(joined, "empty() & mutable() & (delta@)") {
+			return "delta-empty\n", nil
+		}
+		return "", nil
+	})
+	forgotDelta := false
+	abandonedDelta := false
+	updatedStale := false
+	withCommandToStderr(t, func(name string, args ...string) error {
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "workspace forget delta") {
+			forgotDelta = true
+		}
+		if strings.Contains(joined, "workspace forget alpha") {
+			t.Fatal("tidy must not close Workspace with unique non-empty commits")
+		}
+		if strings.Contains(joined, "abandon -r empty() & mutable() & (delta@)") {
+			abandonedDelta = true
+		}
+		if strings.Contains(joined, "workspace update-stale") {
+			updatedStale = true
+		}
+		return nil
+	})
+	origOut, origErr := stdoutWriter, stderrWriter
+	var out, errOut bytes.Buffer
+	stdoutWriter, stderrWriter = &out, &errOut
+	defer func() { stdoutWriter, stderrWriter = origOut, origErr }()
+	if err := runTidy([]string{"--repo", mainPath, "--yes"}); err != nil {
+		t.Fatal(err)
+	}
+	if !forgotDelta || !abandonedDelta || !updatedStale {
+		t.Fatalf("expected forget/abandon/update-stale, got forget=%v abandon=%v update=%v", forgotDelta, abandonedDelta, updatedStale)
+	}
+	if exists(deltaPath) {
+		t.Fatal("expected tidy to remove closed delta Workspace directory")
+	}
+	if !exists(alphaPath) {
+		t.Fatal("tidy removed Workspace with unique non-empty commits")
+	}
+	if !strings.Contains(out.String(), deltaPath) {
+		t.Fatalf("expected closed Workspace path on stdout, got %q", out.String())
+	}
+	if !strings.Contains(errOut.String(), "delta") || strings.Contains(errOut.String(), "alpha (unstacked)") {
+		t.Fatalf("expected stderr to identify only tidyable Workspace, got %q", errOut.String())
+	}
+}
+
 func TestRunInitWritesAssimilatedPathsVocabulary(t *testing.T) {
 	xdg := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", xdg)

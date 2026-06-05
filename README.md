@@ -42,7 +42,7 @@ When `prefer-clean` is used with `--stack-shape auto`, `jjw` tries the auto-sele
 
 - `jjw list` — print a parseable table: handle, markers, status, path. Includes Current and Main markers.
 - `jjw list --paths` — print paths only.
-- `jjw tidy` — remove empty leftover directories under the Project layout and report non-empty leftovers. `tidy` never closes active Workspaces.
+- `jjw tidy` — list and offer to close active Workspaces with no unique non-empty commits, then remove empty leftover directories under the Project layout and report non-empty leftovers. Use `--yes` to skip confirmation.
 - `jjw shell-init [bash|zsh]` — print shell integration so `create`, `open`, `close`, and `main` can change the current shell's directory.
 
 ## Config

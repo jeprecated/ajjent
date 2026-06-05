@@ -156,7 +156,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, s.Section.Render("Inspect and housekeeping:"))
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "list", 18), "List Workspaces with status and markers")
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "main", 18), "Print the Main Workspace path")
-	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "tidy", 18), "Remove empty leftover Workspace directories")
+	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "tidy", 18), "Close tidy Workspaces and remove empty leftover directories")
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "shell-init", 18), "Print shell integration for cd-on-open/main")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, s.Muted.Render("Run `jjw <command> --help` for command-specific options."))
@@ -671,23 +671,28 @@ func runMain(args []string) error {
 func runTidy(args []string) error {
 	fs := flag.NewFlagSet("tidy", flag.ContinueOnError)
 	var repoRootOverride, projectOverride, rootOverride string
+	var yes bool
 	fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
 	fs.StringVar(&projectOverride, "project", "", "Project override")
 	fs.StringVar(&rootOverride, "workspaces-root", "", "Workspaces root override")
-	if handled, err := parseCommandFlags(fs, args, "jjw tidy [options]", "Remove empty leftover Workspace directories."); handled || err != nil {
+	fs.BoolVar(&yes, "yes", false, "skip confirmation")
+	if handled, err := parseCommandFlags(fs, args, "jjw tidy [options]", "Close Workspaces with no unique non-empty commits, then remove empty leftover Workspace directories."); handled || err != nil {
 		return err
 	}
 	repoRoot, cfg, project, err := commandContext(repoRootOverride, projectOverride, rootOverride)
 	if err != nil {
 		return err
 	}
-	refs, err := listWorkspaceRefs(repoRoot)
+	infos, _, err := loadWorkspaceInfos(repoRoot, cfg, project)
 	if err != nil {
 		return err
 	}
-	active := make(map[string]struct{}, len(refs))
-	for _, ref := range refs {
-		active[ref.Handle] = struct{}{}
+	if err := tidyClosableWorkspaces(repoRoot, cfg, project, infos, yes); err != nil {
+		return err
+	}
+	active := make(map[string]struct{}, len(infos))
+	for _, info := range infos {
+		active[info.Ref.Handle] = struct{}{}
 	}
 	projectRoot := filepath.Join(cfg.WorkspacesRoot, project)
 	entries, err := os.ReadDir(projectRoot)
@@ -723,9 +728,50 @@ func runTidy(args []string) error {
 		deleted++
 	}
 	if deleted == 0 {
-		fmt.Fprintln(stderrWriter, cliStylesForWriter(stderrWriter).Muted.Render("No empty leftover Workspaces to tidy."))
+		fmt.Fprintln(stderrWriter, cliStylesForWriter(stderrWriter).Muted.Render("No empty leftover Workspace directories to tidy."))
 	}
 	return nil
+}
+
+func tidyClosableWorkspaces(repoRoot string, cfg config, project string, infos []workspaceInfo, yes bool) error {
+	targets := []workspaceInfo{}
+	for _, info := range infos {
+		if isClosable(info) {
+			targets = append(targets, info)
+		}
+	}
+	if len(targets) == 0 {
+		fmt.Fprintln(stderrWriter, cliStylesForWriter(stderrWriter).Muted.Render("No Workspaces with no unique non-empty commits to tidy."))
+		return nil
+	}
+	fmt.Fprintf(stderrWriter, "%s\n", cliStylesForWriter(stderrWriter).Info.Render("Workspaces with no unique non-empty commits: "+workspaceSummary(targets)))
+	if !yes {
+		ok, err := confirm(fmt.Sprintf("Close %d tidy Workspace(s)? [y/N]: ", len(targets)))
+		if err != nil || !ok {
+			return err
+		}
+	}
+	mainInfo, ok := mapInfosByHandle(infos)[cfg.MainWorkspace]
+	if !ok {
+		return fmt.Errorf("Main Workspace %q not found", cfg.MainWorkspace)
+	}
+	if mainInfo.Missing {
+		return fmt.Errorf("Main Workspace path missing: %s", mainInfo.Path)
+	}
+	if err := abandonEmptyWorkspaceHeads(mainInfo.Path, targets); err != nil {
+		return err
+	}
+	closed, err := closeWorkspaces(repoRoot, cfg, project, targets, false, yes)
+	if err != nil {
+		return err
+	}
+	for _, path := range closed {
+		fmt.Fprintln(stdoutWriter, path)
+	}
+	if err := abandonTopEmptyMutableAncestors(mainInfo.Path); err != nil {
+		return err
+	}
+	return commandToStderrFn("jj", "-R", mainInfo.Path, "workspace", "update-stale")
 }
 
 func runClose(args []string) error {
@@ -1820,6 +1866,29 @@ func isAncestorOfAny(repoPath string, ancestor string, descendants []string) (bo
 	}
 	revset := fmt.Sprintf("%s::(%s)", ancestor, strings.Join(descendants, " | "))
 	return revisionMatches(repoPath, revset)
+}
+
+func abandonEmptyWorkspaceHeads(repoPath string, infos []workspaceInfo) error {
+	revs := []string{}
+	for _, info := range infos {
+		if info.Empty {
+			revs = append(revs, info.Ref.Handle+"@")
+		}
+	}
+	revs = uniqueNonEmptyStrings(revs)
+	if len(revs) == 0 {
+		return nil
+	}
+	revset := "empty() & mutable() & (" + strings.Join(revs, " | ") + ")"
+	hasEmpty, err := revisionMatches(repoPath, revset)
+	if err != nil {
+		return err
+	}
+	if !hasEmpty {
+		return nil
+	}
+	fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Abandon empty Workspace heads"))
+	return commandToStderrFn("jj", "-R", repoPath, "abandon", "-r", revset)
 }
 
 func abandonTopEmptyMutableAncestors(repoPath string) error {
