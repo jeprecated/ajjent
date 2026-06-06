@@ -8,8 +8,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
+	pathpkg "path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -1963,13 +1965,23 @@ func normalizeAssimilatedPath(path string) (string, error) {
 	if filepath.IsAbs(trimmed) {
 		return "", fmt.Errorf("invalid assimilated_paths entry %q; expected a relative path", path)
 	}
+	for _, part := range strings.Split(filepath.ToSlash(trimmed), "/") {
+		if part == ".." {
+			return "", fmt.Errorf("invalid assimilated_paths entry %q; expected a relative path without traversal", path)
+		}
+	}
 	cleaned := filepath.Clean(trimmed)
 	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(os.PathSeparator)) {
 		return "", fmt.Errorf("invalid assimilated_paths entry %q; expected a relative path without traversal", path)
 	}
-	for _, part := range strings.Split(cleaned, string(os.PathSeparator)) {
+	for _, part := range strings.Split(filepath.ToSlash(cleaned), "/") {
 		if part == "" || part == "." || part == ".." {
 			return "", fmt.Errorf("invalid assimilated_paths entry %q; expected a relative path without traversal", path)
+		}
+		if hasGlobMeta(part) {
+			if _, err := pathpkg.Match(part, ""); err != nil {
+				return "", fmt.Errorf("invalid assimilated_paths glob entry %q: %w", path, err)
+			}
 		}
 	}
 	return cleaned, nil
@@ -2000,7 +2012,15 @@ func materializeAssimilatedFolders(mainPath string, workspacePath string, cfg co
 	if mainPath == workspacePath {
 		return nil
 	}
-	for _, path := range effectiveAssimilatedPaths(cfg, project) {
+	paths, err := expandAssimilatedPaths(mainPath, effectiveAssimilatedPaths(cfg, project))
+	if err != nil {
+		return err
+	}
+	symlinkedDirs := []string{}
+	for _, path := range paths {
+		if isWithinAssimilatedDir(path, symlinkedDirs) {
+			continue
+		}
 		source := filepath.Join(mainPath, path)
 		st, err := os.Stat(source)
 		if err != nil {
@@ -2016,8 +2036,107 @@ func materializeAssimilatedFolders(mainPath string, workspacePath string, cfg co
 		if err := ensureAssimilatedSymlink(source, dest); err != nil {
 			return err
 		}
+		if st.IsDir() {
+			symlinkedDirs = append(symlinkedDirs, path)
+		}
 	}
 	return nil
+}
+
+func isWithinAssimilatedDir(candidate string, dirs []string) bool {
+	candidate = filepath.ToSlash(filepath.Clean(candidate))
+	for _, dir := range dirs {
+		dir = filepath.ToSlash(filepath.Clean(dir))
+		if candidate != dir && strings.HasPrefix(candidate, dir+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func expandAssimilatedPaths(mainPath string, configured []string) ([]string, error) {
+	out := []string{}
+	seen := map[string]struct{}{}
+	for _, configuredPath := range configured {
+		matches, err := expandAssimilatedPath(mainPath, configuredPath)
+		if err != nil {
+			return nil, err
+		}
+		for _, match := range matches {
+			if _, ok := seen[match]; ok {
+				continue
+			}
+			seen[match] = struct{}{}
+			out = append(out, match)
+		}
+	}
+	return out, nil
+}
+
+func expandAssimilatedPath(mainPath string, configuredPath string) ([]string, error) {
+	if !hasGlobMeta(configuredPath) {
+		return []string{configuredPath}, nil
+	}
+	matches := []string{}
+	if err := filepath.WalkDir(mainPath, func(candidate string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if candidate == mainPath {
+			return nil
+		}
+		rel, err := filepath.Rel(mainPath, candidate)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		ok, err := matchAssimilatedGlob(filepath.ToSlash(configuredPath), rel)
+		if err != nil {
+			return fmt.Errorf("invalid assimilated_paths glob %q: %w", configuredPath, err)
+		}
+		if ok {
+			matches = append(matches, filepath.FromSlash(rel))
+		}
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("expand assimilated_paths glob %q: %w", configuredPath, err)
+	}
+	sort.Strings(matches)
+	return matches, nil
+}
+
+func hasGlobMeta(value string) bool {
+	return strings.ContainsAny(value, "*?[")
+}
+
+func matchAssimilatedGlob(pattern string, name string) (bool, error) {
+	patternParts := strings.Split(pattern, "/")
+	nameParts := strings.Split(name, "/")
+	return matchAssimilatedGlobParts(patternParts, nameParts)
+}
+
+func matchAssimilatedGlobParts(patternParts []string, nameParts []string) (bool, error) {
+	if len(patternParts) == 0 {
+		return len(nameParts) == 0, nil
+	}
+	if patternParts[0] == "**" {
+		ok, err := matchAssimilatedGlobParts(patternParts[1:], nameParts)
+		if ok || err != nil {
+			return ok, err
+		}
+		if len(nameParts) == 0 {
+			return false, nil
+		}
+		return matchAssimilatedGlobParts(patternParts, nameParts[1:])
+	}
+	if len(nameParts) == 0 {
+		return false, nil
+	}
+	ok, err := pathpkg.Match(patternParts[0], nameParts[0])
+	if err != nil || !ok {
+		return ok, err
+	}
+	return matchAssimilatedGlobParts(patternParts[1:], nameParts[1:])
 }
 
 func ensureAssimilatedSymlink(source string, dest string) error {

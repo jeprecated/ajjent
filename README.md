@@ -96,20 +96,23 @@ Config parsing rejects unknown keys. Legacy keys such as `worktrees_root`, `name
 
 ### Assimilated paths
 
-`assimilated_paths` declares repo-relative files or directories that should be shared by symlink across Workspaces. This is intended for git-ignored local development artifacts such as `scratch`, `.pi-scratch.md`, or `.env.local`.
+`assimilated_paths` declares repo-relative files, directories, or glob patterns that should be shared by symlink across Workspaces. This is intended for git-ignored local development artifacts such as `scratch`, `.pi-scratch.md`, or `.env.local`.
 
 ```yaml
 assimilated_paths:
   - scratch
   - .pi-scratch.md
   - .env.local
+  - "**/.env*"
 projects:
   nixfiles:
     assimilated_paths:
       - .local-notes
 ```
 
-Global entries apply to every Project. `projects.<project>.assimilated_paths` adds Project-specific entries. Entries must be relative paths without `..` traversal. When the source file or directory exists in the Main Workspace, `jjw create` and `jjw open` create a symlink at the same relative path in the target Workspace. Missing sources are skipped. Existing Workspace content is never overwritten. The old `assimilated_folders` key is still accepted as a deprecated alias.
+Use `**` as a whole path segment to match zero or more directories. For example, `"**/.env*"` symlinks `.env`, `.env.local`, and other `.env*` files from the Main Workspace at any depth.
+
+Global entries apply to every Project. `projects.<project>.assimilated_paths` adds Project-specific entries. Entries must be relative paths or glob patterns without `..` traversal. When the source file or directory exists in the Main Workspace, `jjw create` and `jjw open` create a symlink at the same relative path in the target Workspace. Missing sources and globs with no matches are skipped. Existing Workspace content is never overwritten. The old `assimilated_folders` key is still accepted as a deprecated alias.
 
 See `docs/assimilated-folders.md` for an agent-friendly setup guide.
 

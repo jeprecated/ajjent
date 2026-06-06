@@ -140,6 +140,27 @@ func TestLoadConfigMergesGlobalAndProjectAssimilatedPaths(t *testing.T) {
 	}
 }
 
+func TestLoadConfigAcceptsAssimilatedPathGlobs(t *testing.T) {
+	repoRoot := t.TempDir()
+	xdg := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(xdg, "jjw"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfgText := []byte("workspaces_root: /tmp/workspaces\nassimilated_paths:\n  - '**/.env*'\n")
+	if err := os.WriteFile(filepath.Join(xdg, "jjw", "config.yaml"), cfgText, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	cfg, err := loadConfig(repoRoot)
+	if err != nil {
+		t.Fatalf("loadConfig failed: %v", err)
+	}
+	paths := effectiveAssimilatedPaths(cfg, "proj")
+	if strings.Join(paths, ",") != "**/.env*" {
+		t.Fatalf("unexpected assimilated glob paths: %v", paths)
+	}
+}
+
 func TestLoadConfigRejectsUnsafeAssimilatedPaths(t *testing.T) {
 	repoRoot := t.TempDir()
 	xdg := t.TempDir()
@@ -715,6 +736,45 @@ func TestMaterializeAssimilatedFoldersSymlinksExistingSources(t *testing.T) {
 	}
 	if exists(filepath.Join(workspacePath, "missing")) {
 		t.Fatal("missing source should be skipped, not created")
+	}
+}
+
+func TestMaterializeAssimilatedFoldersExpandsGlobstarEnvFiles(t *testing.T) {
+	mainPath := t.TempDir()
+	workspacePath := filepath.Join(t.TempDir(), "workspace")
+	files := []string{
+		".env",
+		"apps/web/.env",
+		"apps/web/.env.local",
+		"services/api/.env.test",
+	}
+	for _, rel := range files {
+		path := filepath.Join(mainPath, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(rel), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(mainPath, "apps", "web", "README.md"), []byte("not env"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config{AssimilatedPaths: []string{"**/.env*"}}
+	if err := materializeAssimilatedFolders(mainPath, workspacePath, cfg, "proj"); err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range files {
+		target, err := os.Readlink(filepath.Join(workspacePath, rel))
+		if err != nil {
+			t.Fatalf("expected %s symlink: %v", rel, err)
+		}
+		if target != filepath.Join(mainPath, rel) {
+			t.Fatalf("expected %s symlink to main path, got %q", rel, target)
+		}
+	}
+	if exists(filepath.Join(workspacePath, "apps", "web", "README.md")) {
+		t.Fatal("glob should not materialize non-matching files")
 	}
 }
 

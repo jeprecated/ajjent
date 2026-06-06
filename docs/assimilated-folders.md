@@ -6,14 +6,17 @@ Use this for directories such as `scratch/` that contain local notes, or files s
 
 ## Configure globally
 
-Add repo-relative file or directory paths to `assimilated_paths`:
+Add repo-relative file or directory paths, or glob patterns, to `assimilated_paths`:
 
 ```yaml
 assimilated_paths:
   - scratch
   - .pi-scratch.md
   - .env.local
+  - "**/.env*"
 ```
+
+Use `**` as a whole path segment to match zero or more directories. For example, `"**/.env*"` symlinks `.env`, `.env.local`, and other `.env*` files from the Main Workspace at any depth.
 
 Global entries apply to every Project handled by this config.
 
@@ -60,9 +63,9 @@ projects:
 
 On `jjw create` and `jjw open`, for each configured assimilated path:
 
-1. `jjw` looks for the source file or directory in the Main Workspace at the same relative path.
+1. `jjw` expands glob patterns against the Main Workspace, or looks for an explicit source file or directory at the same relative path.
 2. If the source exists and is a regular file or directory, `jjw` creates a symlink in the target Workspace.
-3. If the source does not exist, `jjw` skips it.
+3. If the source does not exist, or a glob has no matches, `jjw` skips it.
 4. If the target path already contains real Workspace content, `jjw` refuses to overwrite it.
 
 Example result:
@@ -81,7 +84,7 @@ When a Workspace is closed, only the Workspace symlink is deleted. The source fi
 
 ## Requirements
 
-Assimilated entries must be relative paths inside the repo. They may not be absolute paths and may not contain `..` traversal. Sources must be regular files or directories.
+Assimilated entries must be relative paths or glob patterns inside the repo. They may not be absolute paths and may not contain `..` traversal. Sources must be regular files or directories.
 
 Good:
 
@@ -92,6 +95,7 @@ assimilated_paths:
   - local/generated
   - .pi-scratch.md
   - .env.local
+  - "**/.env*"
 ```
 
 Bad:

@@ -32,6 +32,7 @@ main_workspace: default
 assimilated_paths:
   - scratch
   - .env.local
+  - "**/.env*"
 projects:
   example-project:
     assimilated_paths:
