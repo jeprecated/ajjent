@@ -8,6 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 )
 
 func TestLoadConfigRejectsLegacyUnknownKeys(t *testing.T) {
@@ -310,6 +313,23 @@ func TestShouldConfirmStackPlanOnlyForInteractiveSelectorWithoutYes(t *testing.T
 	}
 }
 
+func TestHumanFacingStylesUseOutputRendererEvenWhenStdoutIsPlain(t *testing.T) {
+	defaultRenderer := lipgloss.DefaultRenderer()
+	plainDefault := lipgloss.NewRenderer(io.Discard)
+	plainDefault.SetColorProfile(termenv.Ascii)
+	lipgloss.SetDefaultRenderer(plainDefault)
+	t.Cleanup(func() { lipgloss.SetDefaultRenderer(defaultRenderer) })
+
+	renderer := lipgloss.NewRenderer(io.Discard)
+	renderer.SetColorProfile(termenv.ANSI256)
+	if got := cliStylesForRenderer(renderer).Danger.Render("jjw:"); !strings.Contains(got, "\x1b[") {
+		t.Fatalf("expected CLI stderr style to use output renderer color, got %q", got)
+	}
+	if got := selectorStylesForRenderer(renderer, false).Empty.Render("empty"); !strings.Contains(got, "\x1b[") {
+		t.Fatalf("expected selector style to use output renderer color, got %q", got)
+	}
+}
+
 func TestMultiSelectorEnterDoesNotReAddExcludedCursorItem(t *testing.T) {
 	model := selectorModel{
 		opts: selectorOptions{Mode: selectorMulti, Items: []selectorItem{
@@ -350,6 +370,65 @@ func selectorHandles(items []selectorItem) []string {
 		handles = append(handles, item.Handle)
 	}
 	return handles
+}
+
+func TestMarkersUseOutsideLayoutVocabularyForExternalPaths(t *testing.T) {
+	got := strings.Join(markers(workspaceInfo{External: true}), ",")
+	if got != "outside-layout" {
+		t.Fatalf("expected user-facing outside-layout marker, got %q", got)
+	}
+}
+
+func TestFormatAlignedListRowsKeepsPathColumnStable(t *testing.T) {
+	rows := []listRow{
+		{Handle: "default", Markers: "main", Ahead: "0", Behind: "0", Action: "main", Path: "/repo/default"},
+		{Handle: "alpha", Markers: "outside-layout", Ahead: "0", Behind: "2", Action: "move-to-main", Path: "/outside/alpha"},
+		{Handle: "cli", Markers: "current", Ahead: "\x1b[36m1\x1b[0m", Behind: "0", Action: "\x1b[36mstack\x1b[0m", Path: "/repo/cli"},
+		{Handle: "notifications", Markers: "-", Ahead: "2", Behind: "1", Action: "rebase-or-merge", Path: "/repo/notifications"},
+	}
+	lines := formatAlignedListRows(rows)
+	if len(lines) != len(rows) {
+		t.Fatalf("expected %d lines, got %d", len(rows), len(lines))
+	}
+	wantPathColumn := visibleColumnOfSubstring(t, lines[0], rows[0].Path)
+	for i, line := range lines {
+		if strings.Contains(line, "\t") {
+			t.Fatalf("line %d should use spaces, not tabs: %q", i, line)
+		}
+		if got := visibleColumnOfSubstring(t, line, rows[i].Path); got != wantPathColumn {
+			t.Fatalf("line %d path starts at visible column %d, want %d: %q", i, got, wantPathColumn, line)
+		}
+	}
+}
+
+func visibleColumnOfSubstring(t *testing.T, line string, substring string) int {
+	t.Helper()
+	idx := strings.Index(line, substring)
+	if idx < 0 {
+		t.Fatalf("%q does not contain %q", line, substring)
+	}
+	return lipgloss.Width(line[:idx])
+}
+
+func TestWorkspaceActionSummarizesAheadBehindCounts(t *testing.T) {
+	cases := []struct {
+		name string
+		info workspaceInfo
+		want string
+	}{
+		{name: "main", info: workspaceInfo{Main: true}, want: "main"},
+		{name: "clean", info: workspaceInfo{}, want: "ok"},
+		{name: "behind only", info: workspaceInfo{Behind: 2}, want: "move-to-main"},
+		{name: "ahead only", info: workspaceInfo{Ahead: 1}, want: "stack"},
+		{name: "ahead and behind", info: workspaceInfo{Ahead: 2, Behind: 1}, want: "rebase-or-merge"},
+		{name: "conflict", info: workspaceInfo{Ahead: 1, Conflict: true}, want: "resolve-conflict"},
+		{name: "missing", info: workspaceInfo{Missing: true}, want: "missing"},
+	}
+	for _, tc := range cases {
+		if got := workspaceAction(tc.info); got != tc.want {
+			t.Fatalf("%s: expected %q, got %q", tc.name, tc.want, got)
+		}
+	}
 }
 
 func TestWorkspaceSummaryIncludesStatuses(t *testing.T) {
@@ -409,7 +488,7 @@ func TestLoadWorkspaceInfosTreatsEmptyHeadWithUnstackedAncestorAsUnstacked(t *te
 		if strings.Contains(joined, "log -r @") {
 			return "alpha111\n", nil
 		}
-		if strings.Contains(joined, "reachable(alpha@, mutable()) & ~::default@ & ~empty()") {
+		if strings.Contains(joined, workspaceAheadRevset("alpha", "default")) {
 			return "lower-unstacked\n", nil
 		}
 		if strings.Contains(joined, "empty() & alpha@") {
@@ -428,11 +507,11 @@ func TestLoadWorkspaceInfosTreatsEmptyHeadWithUnstackedAncestorAsUnstacked(t *te
 	}
 }
 
-func TestWorkspaceHasUnstackedCommitsChecksReachableStackNotJustHead(t *testing.T) {
+func TestWorkspaceHasUnstackedCommitsChecksAncestorStackNotJustHead(t *testing.T) {
 	withCommandCapture(t, func(name string, args ...string) (string, error) {
 		joined := strings.Join(args, " ")
-		if !strings.Contains(joined, "reachable(alpha@, mutable()) & ~::default@ & ~empty()") {
-			t.Fatalf("expected reachable-stack revset, got %q", joined)
+		if !strings.Contains(joined, workspaceAheadRevset("alpha", "default")) {
+			t.Fatalf("expected ancestor-stack revset, got %q", joined)
 		}
 		return "lower-unstacked\n", nil
 	})
@@ -464,7 +543,7 @@ func TestLoadWorkspaceInfosUsesMainRepoForStatusWhenWorkspacePathIsStale(t *test
 		if len(args) >= 2 && args[0] == "-R" && args[1] != mainPath {
 			t.Fatalf("expected status probe through main path %q, got args %v", mainPath, args)
 		}
-		if strings.Contains(joined, "reachable(delta@, mutable()) & ~::default@ & ~empty()") {
+		if strings.Contains(joined, workspaceAheadRevset("delta", "default")) {
 			return "", nil
 		}
 		if strings.Contains(joined, "empty() & delta@") {
@@ -501,13 +580,13 @@ func TestLoadWorkspaceInfosSurfacesStatusProbeErrors(t *testing.T) {
 		if strings.Contains(joined, "workspace list") {
 			return "default\tmain111\t" + mainPath + "\nalpha\talpha111\t" + alphaPath + "\n", nil
 		}
-		if strings.Contains(joined, "reachable(alpha@, mutable()) & ~::default@ & ~empty()") {
+		if strings.Contains(joined, workspaceAheadRevset("alpha", "default")) {
 			return "", errors.New("graph probe failed")
 		}
 		return "", nil
 	})
 	_, _, err := loadWorkspaceInfos(repoRoot, cfg, "proj")
-	if err == nil || !strings.Contains(err.Error(), "probe unstacked status for Workspace \"alpha\"") || !strings.Contains(err.Error(), "graph probe failed") {
+	if err == nil || !strings.Contains(err.Error(), "probe ahead status for Workspace \"alpha\"") || !strings.Contains(err.Error(), "graph probe failed") {
 		t.Fatalf("expected clear status probe error, got %v", err)
 	}
 }
@@ -558,10 +637,10 @@ func TestRunTidyClosesWorkspacesWithNoUniqueNonEmptyCommits(t *testing.T) {
 		if strings.Contains(joined, "workspace list") {
 			return "default\tmain111\t" + mainPath + "\ndelta\tdelta111\t" + deltaPath + "\nalpha\talpha111\t" + alphaPath + "\n", nil
 		}
-		if strings.Contains(joined, "reachable(alpha@, mutable()) & ~::default@ & ~empty()") {
+		if strings.Contains(joined, workspaceAheadRevset("alpha", "default")) {
 			return "unique-alpha\n", nil
 		}
-		if strings.Contains(joined, "reachable(delta@, mutable()) & ~::default@ & ~empty()") {
+		if strings.Contains(joined, workspaceAheadRevset("delta", "default")) {
 			return "", nil
 		}
 		if strings.Contains(joined, "empty() & delta@") {
@@ -935,6 +1014,43 @@ func TestCloseAllSelectsOnlyClosableWithoutForce(t *testing.T) {
 	}
 }
 
+func TestCloseWorkspacesConfirmsExternalDeletionOnce(t *testing.T) {
+	repoRoot := t.TempDir()
+	alphaPath := filepath.Join(t.TempDir(), "alpha")
+	bravoPath := filepath.Join(t.TempDir(), "bravo")
+	for _, path := range []string{alphaPath, bravoPath} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	origIn, origErr := stdinReader, stderrWriter
+	stdinReader = strings.NewReader("y\n")
+	var errOut bytes.Buffer
+	stderrWriter = &errOut
+	defer func() { stdinReader, stderrWriter = origIn, origErr }()
+	forgot := []string{}
+	withCommandToStderr(t, func(name string, args ...string) error {
+		if len(args) >= 5 && args[2] == "workspace" && args[3] == "forget" {
+			forgot = append(forgot, args[4])
+		}
+		return nil
+	})
+
+	_, err := closeWorkspaces(repoRoot, config{}, "proj", []workspaceInfo{
+		{Ref: workspaceRef{Handle: "alpha"}, Path: alphaPath, External: true},
+		{Ref: workspaceRef{Handle: "bravo"}, Path: bravoPath, External: true},
+	}, false, false)
+	if err != nil {
+		t.Fatalf("expected one confirmation to cover all external deletes, got %v", err)
+	}
+	if strings.Count(errOut.String(), "outside the canonical Project layout") != 1 {
+		t.Fatalf("expected one external delete prompt, got %q", errOut.String())
+	}
+	if strings.Join(forgot, ",") != "alpha,bravo" {
+		t.Fatalf("expected both workspaces forgotten, got %v", forgot)
+	}
+}
+
 func TestRunCloseStackedStaleWorkspaceDoesNotRequireForcedClosing(t *testing.T) {
 	workspacesRoot := filepath.Join(t.TempDir(), "workspaces")
 	mainPath := filepath.Join(workspacesRoot, "proj", "default")
@@ -953,7 +1069,7 @@ func TestRunCloseStackedStaleWorkspaceDoesNotRequireForcedClosing(t *testing.T) 
 		if len(args) >= 2 && args[0] == "-R" && args[1] == deltaPath {
 			return "", errors.New("The working copy is stale")
 		}
-		if strings.Contains(joined, "reachable(delta@, mutable()) & ~::default@ & ~empty()") {
+		if strings.Contains(joined, workspaceAheadRevset("delta", "default")) {
 			return "", nil
 		}
 		if strings.Contains(joined, "empty() & delta@") {
@@ -1000,6 +1116,107 @@ func TestRunStackAllUsesStackRelevantOnly(t *testing.T) {
 	}
 	if strings.Join(relevant, ",") != "conflict,unstacked" {
 		t.Fatalf("unexpected relevant set: %v", relevant)
+	}
+}
+
+func TestRunStackExplicitWorkspaceStacksPayloadParentThenAdvancesWorkspaceHead(t *testing.T) {
+	workspacesRoot := filepath.Join(t.TempDir(), "workspaces")
+	mainPath := filepath.Join(workspacesRoot, "proj", "default")
+	teamsPath := filepath.Join(workspacesRoot, "proj", "teams")
+	for _, path := range []string{mainPath, teamsPath} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeConfig(t, mainPath, "workspaces_root: "+workspacesRoot+"\nproject: proj\nmain_workspace: default\n")
+	withCommandCapture(t, func(name string, args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "workspace list") {
+			return "default\tmain111\t" + mainPath + "\nteams\tteams111\t" + teamsPath + "\n", nil
+		}
+		if strings.Contains(joined, " op log ") {
+			return "op-before-stack\n", nil
+		}
+		if strings.Contains(joined, "heads(teams@-)") {
+			return "teams-parent\n", nil
+		}
+		if strings.Contains(joined, workspaceAheadRevset("teams", "default")) {
+			return "", nil
+		}
+		if strings.Contains(joined, "empty() & teams@") {
+			return "empty\n", nil
+		}
+		return "", nil
+	})
+	rebaseCommands := [][]string{}
+	withCommandToStderr(t, func(name string, args ...string) error {
+		if strings.Contains(strings.Join(args, " "), " rebase ") {
+			rebaseCommands = append(rebaseCommands, append([]string(nil), args...))
+		}
+		return nil
+	})
+	origErr := stderrWriter
+	var errOut bytes.Buffer
+	stderrWriter = &errOut
+	defer func() { stderrWriter = origErr }()
+	if err := runStack([]string{"teams", "--repo", mainPath, "--yes"}); err != nil {
+		t.Fatalf("expected explicit Workspace to stack through its payload parent and advance its head, got %v", err)
+	}
+	if len(rebaseCommands) != 2 {
+		t.Fatalf("expected stack rebase plus Workspace advance rebase, got %v", rebaseCommands)
+	}
+	stackDests := rebaseDestinations(rebaseCommands[0])
+	if strings.Join(stackDests, ",") != "teams-parent" {
+		t.Fatalf("expected teams@- payload destination, got args=%v dests=%v", rebaseCommands[0], stackDests)
+	}
+	advanceDests := rebaseDestinations(rebaseCommands[1])
+	if !strings.Contains(strings.Join(rebaseCommands[1], " "), "-r teams@") || strings.Join(advanceDests, ",") != "@" {
+		t.Fatalf("expected teams@ to advance onto new Main @, got args=%v dests=%v", rebaseCommands[1], advanceDests)
+	}
+	if !strings.Contains(errOut.String(), "To undo this run: jj op restore op-before-stack") {
+		t.Fatalf("expected undo restore hint, got stderr %q", errOut.String())
+	}
+}
+
+func TestCurrentOperationIDReadsCurrentOperationWithoutSnapshot(t *testing.T) {
+	withCommandCapture(t, func(name string, args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		if name != "jj" || !strings.Contains(joined, "--ignore-working-copy --at-op=@ op log") || !strings.Contains(joined, "id.short()") {
+			t.Fatalf("expected current op log probe without snapshot, got %s %s", name, joined)
+		}
+		return "abc123\n", nil
+	})
+	got, err := currentOperationID("/repo")
+	if err != nil || got != "abc123" {
+		t.Fatalf("expected current operation id, got %q err=%v", got, err)
+	}
+}
+
+func TestRevisionCountIgnoresWorkingCopyStaleness(t *testing.T) {
+	withCommandCapture(t, func(name string, args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		if name != "jj" || !strings.Contains(joined, " --ignore-working-copy log ") {
+			t.Fatalf("expected graph probe to ignore stale working copies, got %s %s", name, joined)
+		}
+		return "one\ntwo\n", nil
+	})
+	got, err := revisionCount("/repo", "conflicts() & reachable(other@, mutable())")
+	if err != nil || got != 2 {
+		t.Fatalf("expected revision count 2, got %d err=%v", got, err)
+	}
+}
+
+func TestListWorkspaceRefsIgnoresWorkingCopyStaleness(t *testing.T) {
+	withCommandCapture(t, func(name string, args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		if name != "jj" || !strings.Contains(joined, " --ignore-working-copy workspace list ") {
+			t.Fatalf("expected workspace list to ignore stale working copies, got %s %s", name, joined)
+		}
+		return "default\tmain111\t/repo\n", nil
+	})
+	refs, err := listWorkspaceRefs("/repo")
+	if err != nil || len(refs) != 1 || refs[0].Handle != "default" {
+		t.Fatalf("expected one default ref, got %#v err=%v", refs, err)
 	}
 }
 

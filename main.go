@@ -82,6 +82,8 @@ type workspaceInfo struct {
 	Current  bool
 	Main     bool
 	External bool
+	Ahead    int
+	Behind   int
 }
 
 const (
@@ -167,10 +169,14 @@ func printUsage(w io.Writer) {
 type cliStyles struct{ Title, Section, Command, Option, Muted, Success, Warn, Danger, Info, Marker lipgloss.Style }
 
 func cliStylesForWriter(w io.Writer) cliStyles {
-	base := lipgloss.NewStyle()
 	if !canColorWriter(w) {
 		return cliStyles{}
 	}
+	return cliStylesForRenderer(lipgloss.NewRenderer(w))
+}
+
+func cliStylesForRenderer(r *lipgloss.Renderer) cliStyles {
+	base := r.NewStyle()
 	return cliStyles{
 		Title:   base.Bold(true).Foreground(lipgloss.Color("63")),
 		Section: base.Bold(true).Foreground(lipgloss.Color("75")),
@@ -194,9 +200,10 @@ func paddedStyled(style lipgloss.Style, text string, width int) string {
 }
 
 func canColorWriter(w io.Writer) bool {
-	if os.Getenv("NO_COLOR") != "" {
-		return false
-	}
+	return os.Getenv("NO_COLOR") == "" && isTerminalWriter(w)
+}
+
+func isTerminalWriter(w io.Writer) bool {
 	f, ok := w.(*os.File)
 	return ok && term.IsTerminal(int(f.Fd()))
 }
@@ -629,14 +636,24 @@ func runList(args []string) error {
 	if err != nil {
 		return err
 	}
-	color := canColorWriter(stdoutWriter) && !pathsOnly
-	for _, info := range infos {
-		if pathsOnly {
+	if pathsOnly {
+		for _, info := range infos {
 			fmt.Fprintln(stdoutWriter, info.Path)
-			continue
 		}
-		handle, markerText, status, path := listFields(info, color)
-		fmt.Fprintf(stdoutWriter, "%s\t%s\t%s\t%s\n", handle, markerText, status, path)
+		return nil
+	}
+	humanTable := isTerminalWriter(stdoutWriter)
+	color := humanTable && os.Getenv("NO_COLOR") == ""
+	rows := listRows(infos, color)
+	if humanTable {
+		rows = append([]listRow{listHeaderRow()}, rows...)
+		for _, line := range formatAlignedListRows(rows) {
+			fmt.Fprintln(stdoutWriter, line)
+		}
+		return nil
+	}
+	for _, row := range rows {
+		fmt.Fprintf(stdoutWriter, "%s\t%s\t%s\t%s\t%s\t%s\n", row.Handle, row.Markers, row.Ahead, row.Behind, row.Action, row.Path)
 	}
 	return nil
 }
@@ -1006,6 +1023,10 @@ func runStack(args []string) error {
 	if mainInfo.Missing {
 		return fmt.Errorf("Main Workspace path missing: %s", mainInfo.Path)
 	}
+	undoOpID, err := currentOperationID(mainInfo.Path)
+	if err != nil {
+		return fmt.Errorf("record pre-Stack operation id: %w", err)
+	}
 	if err := validateLinearSelection(mainInfo.Path, inputs, cfg.Stack.Shape); err != nil {
 		return err
 	}
@@ -1017,6 +1038,9 @@ func runStack(args []string) error {
 		if err := abandonTopEmptyMutableAncestors(mainInfo.Path); err != nil {
 			return err
 		}
+	}
+	if err := advanceStackInputWorkspaces(mainInfo.Path, inputs); err != nil {
+		return err
 	}
 	if err := commandToStderrFn("jj", "-R", mainInfo.Path, "workspace", "update-stale"); err != nil {
 		return err
@@ -1048,6 +1072,7 @@ func runStack(args []string) error {
 			}
 		}
 	}
+	printStackUndoHint(undoOpID)
 	return nil
 }
 
@@ -1366,11 +1391,15 @@ func loadWorkspaceInfos(repoRoot string, cfg config, project string) ([]workspac
 			return nil, "", fmt.Errorf("probe conflict status for Workspace %q from %s: %w", ref.Handle, graphRepoPath, err)
 		}
 		if !info.Main && cfg.MainWorkspace != "" {
-			unstacked, err := workspaceHasUnstackedCommits(graphRepoPath, ref.Handle, cfg.MainWorkspace)
+			info.Ahead, err = workspaceAheadCount(graphRepoPath, ref.Handle, cfg.MainWorkspace)
 			if err != nil {
-				return nil, "", fmt.Errorf("probe unstacked status for Workspace %q from %s: %w", ref.Handle, graphRepoPath, err)
+				return nil, "", fmt.Errorf("probe ahead status for Workspace %q from %s: %w", ref.Handle, graphRepoPath, err)
 			}
-			if unstacked {
+			info.Behind, err = workspaceBehindCount(graphRepoPath, ref.Handle, cfg.MainWorkspace)
+			if err != nil {
+				return nil, "", fmt.Errorf("probe behind status for Workspace %q from %s: %w", ref.Handle, graphRepoPath, err)
+			}
+			if info.Ahead > 0 {
 				info.Empty = false
 				info.Stacked = false
 			} else {
@@ -1423,7 +1452,23 @@ func workspaceHasConflictCommits(repoPath, handle string) (bool, error) {
 }
 
 func workspaceHasUnstackedCommits(repoPath, handle, mainHandle string) (bool, error) {
-	return revisionMatches(repoPath, "reachable("+handle+"@, mutable()) & ~::"+mainHandle+"@ & ~empty()")
+	return revisionMatches(repoPath, workspaceAheadRevset(handle, mainHandle))
+}
+
+func workspaceAheadCount(repoPath, handle, mainHandle string) (int, error) {
+	return revisionCount(repoPath, workspaceAheadRevset(handle, mainHandle))
+}
+
+func workspaceBehindCount(repoPath, handle, mainHandle string) (int, error) {
+	return revisionCount(repoPath, workspaceBehindRevset(handle, mainHandle))
+}
+
+func workspaceAheadRevset(handle, mainHandle string) string {
+	return "::" + handle + "@ & ~::" + mainHandle + "@ & ~empty()"
+}
+
+func workspaceBehindRevset(handle, mainHandle string) string {
+	return "::" + mainHandle + "@ & ~::" + handle + "@ & ~empty()"
 }
 
 func mapInfosByHandle(infos []workspaceInfo) map[string]workspaceInfo {
@@ -1467,6 +1512,122 @@ func statusLabel(info workspaceInfo) string {
 		return "stacked"
 	}
 	return "unstacked"
+}
+
+type listRow struct {
+	Handle  string
+	Markers string
+	Ahead   string
+	Behind  string
+	Action  string
+	Path    string
+}
+
+func listRows(infos []workspaceInfo, color bool) []listRow {
+	rows := make([]listRow, 0, len(infos))
+	for _, info := range infos {
+		rows = append(rows, listRowForInfo(info, color))
+	}
+	return rows
+}
+
+func listHeaderRow() listRow {
+	return listRow{Handle: "workspace", Markers: "markers", Ahead: "ahead", Behind: "behind", Action: "action", Path: "path"}
+}
+
+func formatAlignedListRows(rows []listRow) []string {
+	widths := [5]int{}
+	for _, row := range rows {
+		widths[0] = max(widths[0], lipgloss.Width(row.Handle))
+		widths[1] = max(widths[1], lipgloss.Width(row.Markers))
+		widths[2] = max(widths[2], lipgloss.Width(row.Ahead))
+		widths[3] = max(widths[3], lipgloss.Width(row.Behind))
+		widths[4] = max(widths[4], lipgloss.Width(row.Action))
+	}
+	lines := make([]string, 0, len(rows))
+	for _, row := range rows {
+		lines = append(lines, padVisible(row.Handle, widths[0])+"  "+padVisible(row.Markers, widths[1])+"  "+padVisible(row.Ahead, widths[2])+"  "+padVisible(row.Behind, widths[3])+"  "+padVisible(row.Action, widths[4])+"  "+row.Path)
+	}
+	return lines
+}
+
+func padVisible(text string, width int) string {
+	padding := width - lipgloss.Width(text)
+	if padding < 0 {
+		padding = 0
+	}
+	return text + strings.Repeat(" ", padding)
+}
+
+func listRowForInfo(info workspaceInfo, color bool) listRow {
+	handle := info.Ref.Handle
+	markerText := strings.Join(markers(info), ",")
+	ahead := fmt.Sprintf("%d", info.Ahead)
+	behind := fmt.Sprintf("%d", info.Behind)
+	action := workspaceAction(info)
+	path := info.Path
+	if !color {
+		return listRow{Handle: handle, Markers: markerText, Ahead: ahead, Behind: behind, Action: action, Path: path}
+	}
+	s := cliStylesForWriter(stdoutWriter)
+	if info.Main {
+		handle = s.Section.Render(handle)
+	} else if info.Current {
+		handle = s.Command.Render(handle)
+	}
+	markerText = s.Marker.Render(markerText)
+	action = styleCLIAction(s, action)
+	if info.Ahead > 0 {
+		ahead = s.Info.Render(ahead)
+	}
+	if info.Behind > 0 {
+		behind = s.Warn.Render(behind)
+	}
+	if info.Missing || info.External {
+		path = s.Warn.Render(path)
+	} else {
+		path = s.Muted.Render(path)
+	}
+	return listRow{Handle: handle, Markers: markerText, Ahead: ahead, Behind: behind, Action: action, Path: path}
+}
+
+func workspaceAction(info workspaceInfo) string {
+	if info.Missing {
+		return "missing"
+	}
+	if info.Conflict {
+		return "resolve-conflict"
+	}
+	if info.Main {
+		return "main"
+	}
+	if info.Ahead == 0 && info.Behind == 0 {
+		return "ok"
+	}
+	if info.Ahead == 0 {
+		return "move-to-main"
+	}
+	if info.Behind == 0 {
+		return "stack"
+	}
+	return "rebase-or-merge"
+}
+
+func styleCLIAction(s cliStyles, action string) string {
+	switch action {
+	case "main":
+		return s.Section.Render(action)
+	case "ok":
+		return s.Success.Render(action)
+	case "stack":
+		return s.Info.Render(action)
+	case "move-to-main", "rebase-or-merge":
+		return s.Warn.Render(action)
+	case "resolve-conflict", "missing":
+		return s.Danger.Render(action)
+	default:
+		return action
+	}
 }
 
 func listFields(info workspaceInfo, color bool) (string, string, string, string) {
@@ -1521,7 +1682,7 @@ func markers(info workspaceInfo) []string {
 		out = append(out, "current")
 	}
 	if info.External {
-		out = append(out, "external")
+		out = append(out, "outside-layout")
 	}
 	if len(out) == 0 {
 		out = append(out, "-")
@@ -1531,13 +1692,19 @@ func markers(info workspaceInfo) []string {
 
 func closeWorkspaces(repoRoot string, cfg config, project string, targets []workspaceInfo, force bool, yes bool) ([]string, error) {
 	closed := []string{}
+	externalTargets := []workspaceInfo{}
 	for _, info := range targets {
-		if info.External && !yes {
-			ok, err := confirm(fmt.Sprintf("Workspace %q is outside the canonical Project layout: %s. Delete this directory? [y/N]: ", info.Ref.Handle, info.Path))
-			if err != nil || !ok {
-				return closed, err
-			}
+		if info.External {
+			externalTargets = append(externalTargets, info)
 		}
+	}
+	if len(externalTargets) > 0 && !yes {
+		ok, err := confirm(externalDeletePrompt(externalTargets))
+		if err != nil || !ok {
+			return closed, err
+		}
+	}
+	for _, info := range targets {
 		if force {
 			if err := abandonUniqueMutableChanges(repoRoot, info.Ref.Handle); err != nil {
 				return closed, err
@@ -1552,6 +1719,18 @@ func closeWorkspaces(repoRoot string, cfg config, project string, targets []work
 		closed = append(closed, info.Path)
 	}
 	return closed, nil
+}
+
+func externalDeletePrompt(targets []workspaceInfo) string {
+	if len(targets) == 1 {
+		info := targets[0]
+		return fmt.Sprintf("Workspace %q is outside the canonical Project layout: %s. Delete this directory? [y/N]: ", info.Ref.Handle, info.Path)
+	}
+	handles := make([]string, 0, len(targets))
+	for _, info := range targets {
+		handles = append(handles, info.Ref.Handle)
+	}
+	return fmt.Sprintf("%d Workspaces are outside the canonical Project layout: %s. Delete these directories? [y/N]: ", len(targets), strings.Join(handles, ", "))
 }
 
 func abandonUniqueMutableChanges(repoRoot, handle string) error {
@@ -1688,7 +1867,7 @@ func validateLinearSelection(repoPath string, inputs []string, requested string)
 	if mode != "linear" {
 		return nil
 	}
-	revs := stackInputHeadRevsets(inputs)
+	revs := stackInputPayloadRevsets(inputs)
 	frontier, err := frontierHeads(repoPath, revs)
 	if err != nil {
 		return err
@@ -1704,7 +1883,7 @@ func resolveStackShape(repoPath string, inputs []string, requested string) (stri
 	if mode == "" {
 		mode = "auto"
 	}
-	inputRevs := stackInputHeadRevsets(inputs)
+	inputRevs := stackInputPayloadRevsets(inputs)
 	frontier, err := frontierHeads(repoPath, inputRevs)
 	if err != nil {
 		return "", "", nil, err
@@ -1730,16 +1909,30 @@ func resolveStackShape(repoPath string, inputs []string, requested string) (stri
 	}
 }
 
-func stackInputHeadRevsets(inputs []string) []string {
+func stackInputPayloadRevsets(inputs []string) []string {
 	revs := make([]string, 0, len(inputs))
 	for _, name := range inputs {
-		revs = append(revs, stackInputHeadRevset(name))
+		revs = append(revs, stackInputPayloadRevset(name))
 	}
 	return revs
 }
 
-func stackInputHeadRevset(handle string) string {
-	return "heads(reachable(" + handle + "@, mutable()) & ~::@ & ~empty())"
+func stackInputPayloadRevset(handle string) string {
+	return handle + "@-"
+}
+
+func advanceStackInputWorkspaces(mainPath string, inputs []string) error {
+	inputs = uniqueNonEmptyStrings(inputs)
+	if len(inputs) == 0 {
+		return nil
+	}
+	fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Advance Stack Input Workspaces"))
+	for _, handle := range inputs {
+		if err := commandToStderrFn("jj", "-R", mainPath, "rebase", "-r", handle+"@", "-d", "@"); err != nil {
+			return fmt.Errorf("advance Workspace %q onto Main: %w", handle, err)
+		}
+	}
+	return nil
 }
 
 func resolveStackConflictStrategy(requested string) (string, error) {
@@ -1807,16 +2000,45 @@ func workingCopyHasConflicts(repoPath string) (bool, error) {
 }
 
 func revisionMatches(repoPath, revset string) (bool, error) {
-	out, err := commandCaptureFn("jj", "-R", repoPath, "log", "-r", revset, "--no-graph", "-T", "change_id.short() ++ \"\\n\"")
+	count, err := revisionCount(repoPath, revset)
 	if err != nil {
 		return false, err
 	}
+	return count > 0, nil
+}
+
+func revisionCount(repoPath, revset string) (int, error) {
+	out, err := commandCaptureFn("jj", "-R", repoPath, "--ignore-working-copy", "log", "-r", revset, "--no-graph", "-T", "change_id.short() ++ \"\\n\"")
+	if err != nil {
+		return 0, err
+	}
+	count := 0
 	for _, line := range strings.Split(out, "\n") {
 		if strings.TrimSpace(line) != "" {
-			return true, nil
+			count++
 		}
 	}
-	return false, nil
+	return count, nil
+}
+
+func currentOperationID(repoPath string) (string, error) {
+	out, err := commandCaptureFn("jj", "-R", repoPath, "--ignore-working-copy", "--at-op=@", "op", "log", "-n", "1", "--no-graph", "-T", "id.short() ++ \"\\n\"")
+	if err != nil {
+		return "", err
+	}
+	id := strings.TrimSpace(out)
+	if id == "" {
+		return "", errors.New("current operation id is empty")
+	}
+	return id, nil
+}
+
+func printStackUndoHint(opID string) {
+	opID = strings.TrimSpace(opID)
+	if opID == "" {
+		return
+	}
+	fmt.Fprintf(stderrWriter, "\n%s %s\n", cliStylesForWriter(stderrWriter).Muted.Render("To undo this run:"), "jj op restore "+opID)
 }
 
 func revisionIsAncestor(repoPath, ancestor, descendant string) (bool, error) {
@@ -2214,7 +2436,7 @@ func listWorkspaceHandles(repoRoot string) ([]string, error) {
 }
 
 func listWorkspaceRefs(repoRoot string) ([]workspaceRef, error) {
-	out, err := commandCaptureFn("jj", "-R", repoRoot, "workspace", "list", "-T", "name ++ \"\\t\" ++ target.change_id().short() ++ \"\\t\" ++ root ++ \"\\n\"")
+	out, err := commandCaptureFn("jj", "-R", repoRoot, "--ignore-working-copy", "workspace", "list", "-T", "name ++ \"\\t\" ++ target.change_id().short() ++ \"\\t\" ++ root ++ \"\\n\"")
 	if err != nil {
 		return nil, err
 	}
@@ -2844,22 +3066,30 @@ func selectorItemsForStack(infos []workspaceInfo) []selectorItem {
 type styles struct{ Title, Selected, Disabled, Help, Conflict, Stacked, Empty, Missing, Unstacked, Marker, Main lipgloss.Style }
 
 func selectorStyles() styles {
-	if os.Getenv("NO_COLOR") != "" {
-		base := lipgloss.NewStyle()
+	return selectorStylesForWriter(stderrWriter)
+}
+
+func selectorStylesForWriter(w io.Writer) styles {
+	return selectorStylesForRenderer(lipgloss.NewRenderer(w), os.Getenv("NO_COLOR") != "")
+}
+
+func selectorStylesForRenderer(r *lipgloss.Renderer, noColor bool) styles {
+	base := r.NewStyle()
+	if noColor {
 		return styles{Title: base.Bold(true), Selected: base.Bold(true), Disabled: base.Faint(true), Help: base.Faint(true), Conflict: base, Stacked: base, Empty: base, Missing: base, Unstacked: base, Marker: base, Main: base.Bold(true)}
 	}
 	return styles{
-		Title:     lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("63")),
-		Selected:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212")),
-		Disabled:  lipgloss.NewStyle().Faint(true),
-		Help:      lipgloss.NewStyle().Faint(true),
-		Conflict:  lipgloss.NewStyle().Foreground(lipgloss.Color("196")),
-		Stacked:   lipgloss.NewStyle().Foreground(lipgloss.Color("42")),
-		Empty:     lipgloss.NewStyle().Foreground(lipgloss.Color("244")),
-		Missing:   lipgloss.NewStyle().Foreground(lipgloss.Color("214")),
-		Unstacked: lipgloss.NewStyle().Foreground(lipgloss.Color("81")),
-		Marker:    lipgloss.NewStyle().Foreground(lipgloss.Color("141")),
-		Main:      lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("111")),
+		Title:     r.NewStyle().Bold(true).Foreground(lipgloss.Color("63")),
+		Selected:  r.NewStyle().Bold(true).Foreground(lipgloss.Color("212")),
+		Disabled:  r.NewStyle().Faint(true),
+		Help:      r.NewStyle().Faint(true),
+		Conflict:  r.NewStyle().Foreground(lipgloss.Color("196")),
+		Stacked:   r.NewStyle().Foreground(lipgloss.Color("42")),
+		Empty:     r.NewStyle().Foreground(lipgloss.Color("244")),
+		Missing:   r.NewStyle().Foreground(lipgloss.Color("214")),
+		Unstacked: r.NewStyle().Foreground(lipgloss.Color("81")),
+		Marker:    r.NewStyle().Foreground(lipgloss.Color("141")),
+		Main:      r.NewStyle().Bold(true).Foreground(lipgloss.Color("111")),
 	}
 }
 

@@ -30,7 +30,7 @@ Canonical layout for Workspaces created by `jjw`:
 - `jjw stack [handle...]` — Stack selected Workspaces into the Main Workspace.
 - `jjw stack --all` — non-interactive equivalent of the selector's All row.
 
-Stack's All row includes unstacked/conflicted Workspaces and excludes empty, missing, and already-stacked Workspaces. If you check specific boxes, Enter submits exactly those checked Workspaces; the All row only expands to every stack-relevant Workspace when nothing is checked. Before rebasing from the selector, `jjw` confirms the exact Stack Inputs and option values. Positional handles skip the TUI. Advanced graph controls remain available as flags and TUI footer toggles:
+Stack's All row includes Workspaces with commits ahead of Main or conflicts and excludes empty, missing, and already-stacked Workspaces. If you check specific boxes, Enter submits exactly those checked Workspaces; the All row only expands to every stack-relevant Workspace when nothing is checked. Before rebasing from the selector, `jjw` confirms the exact Stack Inputs and option values. Positional handles skip the TUI. Stack uses each Workspace's payload parent (`handle@-`) as the Main input, then advances each selected Workspace head (`handle@`) onto the new Main so empty cursors and in-progress changes move forward. Advanced graph controls remain available as flags and TUI footer toggles:
 
 - `--rebase-mode auto|branch|revision`
 - `--stack-shape auto|linear|merge`
@@ -40,7 +40,7 @@ When `prefer-clean` is used with `--stack-shape auto`, `jjw` tries the auto-sele
 
 ### Inspect and housekeeping
 
-- `jjw list` — print a parseable table: handle, markers, status, path. Includes Current and Main markers.
+- `jjw list` — print Workspaces as handle, markers, ahead, behind, action, path. Terminal output is aligned for reading; redirected output is tab-separated for parsing. Includes Current and Main markers. `ahead` counts non-empty Workspace commits not in Main; `behind` counts non-empty Main commits not in that Workspace.
 - `jjw list --paths` — print paths only.
 - `jjw tidy` — list and offer to close active Workspaces with no unique non-empty commits, then remove empty leftover directories under the Project layout and report non-empty leftovers. Use `--yes` to skip confirmation.
 - `jjw shell-init [bash|zsh]` — print shell integration so `create`, `open`, `close`, and `main` can change the current shell's directory.

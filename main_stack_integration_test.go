@@ -5,15 +5,15 @@ import (
 	"testing"
 )
 
-func TestStackInputHeadRevsetExcludesEmptyWorkspaceHeadAndMainAncestors(t *testing.T) {
-	got := stackInputHeadRevset("bravo")
-	want := "heads(reachable(bravo@, mutable()) & ~::@ & ~empty())"
+func TestStackInputPayloadRevsetUsesWorkspaceParent(t *testing.T) {
+	got := stackInputPayloadRevset("bravo")
+	want := "bravo@-"
 	if got != want {
 		t.Fatalf("expected %q, got %q", want, got)
 	}
 }
 
-func TestResolveStackShapeMergeUsesNonEmptyStackHeads(t *testing.T) {
+func TestResolveStackShapeMergeUsesWorkspacePayloadParents(t *testing.T) {
 	orig := commandCaptureFn
 	defer func() { commandCaptureFn = orig }()
 
@@ -24,7 +24,7 @@ func TestResolveStackShapeMergeUsesNonEmptyStackHeads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{stackInputHeadRevset("alpha"), stackInputHeadRevset("bravo")}
+	want := []string{stackInputPayloadRevset("alpha"), stackInputPayloadRevset("bravo")}
 	if shape != "merge" || strings.Join(dests, ",") != strings.Join(want, ",") {
 		t.Fatalf("expected merge destinations %v, got shape=%s dests=%v", want, shape, dests)
 	}
@@ -52,7 +52,7 @@ func TestResolveStackShapeAutoLinearAndMerge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantDests := []string{stackInputHeadRevset("alpha"), stackInputHeadRevset("bravo")}
+	wantDests := []string{stackInputPayloadRevset("alpha"), stackInputPayloadRevset("bravo")}
 	if shape != "merge" || reason != "2 frontier heads" || strings.Join(dests, ",") != strings.Join(wantDests, ",") {
 		t.Fatalf("unexpected merge resolution: %s %s %v", shape, reason, dests)
 	}
@@ -70,13 +70,13 @@ func TestResolveStackShapeLinearRejectsDivergence(t *testing.T) {
 	}
 }
 
-func TestRunStackRebaseMergeUsesFrontierRevsetsForEmptyWorkspaceHeads(t *testing.T) {
+func TestRunStackRebaseMergeUsesWorkspacePayloadParents(t *testing.T) {
 	withCommandCapture(t, func(name string, args ...string) (string, error) {
 		joined := strings.Join(args, " ")
 		if strings.Contains(joined, "conflicts() & @") {
 			return "", nil
 		}
-		return "delta-non-empty\nbravo-non-empty\n", nil
+		return "delta-parent\nbravo-parent\n", nil
 	})
 	rebaseArgs := []string{}
 	withCommandToStderr(t, func(name string, args ...string) error {
@@ -90,24 +90,19 @@ func TestRunStackRebaseMergeUsesFrontierRevsetsForEmptyWorkspaceHeads(t *testing
 		t.Fatalf("expected clean rebase, conflicted=%v err=%v", conflicted, err)
 	}
 	dests := rebaseDestinations(rebaseArgs)
-	want := []string{stackInputHeadRevset("delta"), stackInputHeadRevset("bravo")}
+	want := []string{stackInputPayloadRevset("delta"), stackInputPayloadRevset("bravo")}
 	if strings.Join(dests, ",") != strings.Join(want, ",") {
-		t.Fatalf("expected frontier revset destinations %v, got args=%v dests=%v", want, rebaseArgs, dests)
-	}
-	for _, dest := range dests {
-		if dest == "delta@" || dest == "bravo@" {
-			t.Fatalf("raw empty Workspace head leaked into destinations: %v", dests)
-		}
+		t.Fatalf("expected Workspace payload destinations %v, got args=%v dests=%v", want, rebaseArgs, dests)
 	}
 }
 
-func TestRunStackRebaseAutoLinearUsesResolvedNonEmptyFrontier(t *testing.T) {
+func TestRunStackRebaseAutoLinearUsesResolvedWorkspacePayloadFrontier(t *testing.T) {
 	withCommandCapture(t, func(name string, args ...string) (string, error) {
 		joined := strings.Join(args, " ")
 		if strings.Contains(joined, "conflicts() & @") {
 			return "", nil
 		}
-		return "delta-non-empty\n", nil
+		return "delta-parent\n", nil
 	})
 	rebaseArgs := []string{}
 	withCommandToStderr(t, func(name string, args ...string) error {
@@ -121,8 +116,8 @@ func TestRunStackRebaseAutoLinearUsesResolvedNonEmptyFrontier(t *testing.T) {
 		t.Fatalf("expected clean rebase, conflicted=%v err=%v", conflicted, err)
 	}
 	dests := rebaseDestinations(rebaseArgs)
-	if strings.Join(dests, ",") != "delta-non-empty" {
-		t.Fatalf("expected resolved non-empty frontier destination, got args=%v dests=%v", rebaseArgs, dests)
+	if strings.Join(dests, ",") != "delta-parent" {
+		t.Fatalf("expected resolved Workspace payload frontier destination, got args=%v dests=%v", rebaseArgs, dests)
 	}
 }
 
