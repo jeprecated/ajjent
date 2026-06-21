@@ -10,6 +10,8 @@ Canonical layout for Workspaces created by `jjw`:
 
 `workspaces_root` is required. `project` defaults to the repo/default-workspace basename unless configured or overridden with `--project`. A Workspace Handle is a reusable safe slug such as `alpha`, `kilo`, or `feature-2`.
 
+Repo-aware commands can target another checkout with either the global form `jjw --repo PATH <command> ...` or the command-local form `jjw <command> --repo PATH ...`; using both in one invocation is rejected.
+
 ## Commands
 
 ### Setup
@@ -27,16 +29,30 @@ Canonical layout for Workspaces created by `jjw`:
 
 ### Stacking
 
-- `jjw stack [handle...]` — Stack selected Workspaces into the Main Workspace.
+- `jjw stack [handle...]` — Stack selected Workspaces into the target Workspace.
+- `jjw stack --workspace HANDLE [handle...]` — explicitly choose the target Workspace.
 - `jjw stack --all` — non-interactive equivalent of the selector's All row.
+- `jjw stack --line [handle...]` — Line Stack selected Workspaces onto one ordered line while leaving omitted Workspaces untouched.
 
-Stack's All row includes Workspaces with commits ahead of Main or conflicts and excludes empty, missing, and already-stacked Workspaces. If you check specific boxes, Enter submits exactly those checked Workspaces; the All row only expands to every stack-relevant Workspace when nothing is checked. Before rebasing from the selector, `jjw` confirms the exact Stack Inputs and option values. Positional handles skip the TUI. Stack uses each Workspace's payload parent (`handle@-`) as the Main input, then advances each selected Workspace head (`handle@`) onto the new Main so empty cursors and in-progress changes move forward. Advanced graph controls remain available as flags and TUI footer toggles:
+The stack target resolves in this order: explicit `--workspace`, then the current Workspace from `--repo`/cwd, then configured `main_workspace` for compatibility. This means `jjw stack child --repo /path/to/speed --yes` advances `speed@` by default; use `--workspace default` when you intentionally want to advance `default@`. When the current non-default Workspace becomes the target, `--all` does not silently include the configured `main_workspace`. JJW refuses to stack the target Workspace into itself and asks for `--workspace` when the target should be something else.
+
+Stack's All row includes Workspaces with commits ahead of the target or conflicts and excludes empty, missing, and already-stacked Workspaces. If you check specific boxes, Enter submits exactly those checked Workspaces; the All row only expands to every stack-relevant Workspace when nothing is checked. Before rebasing from the selector, `jjw` confirms the exact Stack Inputs and option values. Positional handles skip the TUI. Stack uses each Workspace's payload parent (`handle@-`) as the target input, then advances each selected Workspace head (`handle@`) onto the new target so empty cursors and in-progress changes move forward. Advanced graph controls remain available as flags and TUI footer toggles:
 
 - `--rebase-mode auto|branch|revision`
 - `--stack-shape auto|linear|merge`
 - `--conflict-strategy off|prefer-clean`
 
 When `prefer-clean` is used with `--stack-shape auto`, `jjw` tries the auto-selected shape, undoes on conflict, and tries the alternative shape. If every fallback conflicts, it keeps the merge-shaped conflicted Main Workspace so the conflict can be resolved there.
+
+Line Stacking is an ordered variant for the common "make these selected Workspaces one line, but leave the others alone" workflow described in ADR 0008. Positional handles define the line order: the first payload Workspace is the bottom and the last payload Workspace becomes the final tip. With no handles, the TUI preserves selection order; selected rows show payload (`P`) or follow-only (`F`), and `a` toggles that role. Empty or already represented Workspaces default to follow-only so their Workspace heads move to the final tip without contributing payload commits. A non-empty Workspace head with no description is treated as in-progress working-copy state: it is excluded from the payload line and rebased on top of the final Line Stack tip. `jjw` always prints a preview to stderr with the projected log, ordered inputs, payload rebases, follow-only advances, in-progress rebases, excluded Workspaces, and the undo command; interactive runs ask for confirmation unless `--yes` is passed. If a Line Stack operation conflicts, `jjw` stops and leaves the conflicted state for manual resolution.
+
+Example:
+
+```sh
+jjw stack --line agentleman manual-ingestion switchyard-tracer-mono loop
+```
+
+This stacks `agentleman`, `manual-ingestion`, and `switchyard-tracer-mono` in that order, advances `loop` if it is follow-only, and intentionally leaves unlisted Workspaces such as `frontloop-mobile-markdown` untouched. Human-facing preview and progress stay on stderr; stdout remains reserved for path/data protocols.
 
 ### Inspect and housekeeping
 

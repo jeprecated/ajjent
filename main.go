@@ -110,28 +110,45 @@ func main() {
 }
 
 func run(args []string) error {
+	globalRepo, args, err := extractGlobalRepoFlag(args)
+	if err != nil {
+		return err
+	}
 	if len(args) == 0 {
 		return errors.New("missing command\n\nRun `jjw help` to see available commands.")
 	}
+	commandArgs := args[1:]
+	if commandAcceptsRepoFlag(args[0]) {
+		commandRepoFlags := countRepoFlags(commandArgs)
+		if globalRepo != "" && commandRepoFlags > 0 {
+			return errors.New("provide --repo either before the command or in command options, not both")
+		}
+		if commandRepoFlags > 1 {
+			return errors.New("provide --repo at most once")
+		}
+		if globalRepo != "" {
+			commandArgs = append([]string{"--repo", globalRepo}, commandArgs...)
+		}
+	}
 	switch args[0] {
 	case "init":
-		return runInit(args[1:])
+		return runInit(commandArgs)
 	case "create":
-		return runCreate(args[1:])
+		return runCreate(commandArgs)
 	case "open":
-		return runOpen(args[1:])
+		return runOpen(commandArgs)
 	case "list":
-		return runList(args[1:])
+		return runList(commandArgs)
 	case "main":
-		return runMain(args[1:])
+		return runMain(commandArgs)
 	case "shell-init":
-		return runShellInit(args[1:])
+		return runShellInit(commandArgs)
 	case "close":
-		return runClose(args[1:])
+		return runClose(commandArgs)
 	case "tidy":
-		return runTidy(args[1:])
+		return runTidy(commandArgs)
 	case "stack":
-		return runStack(args[1:])
+		return runStack(commandArgs)
 	case "help", "-h", "--help":
 		printUsage(stdoutWriter)
 		return nil
@@ -140,11 +157,69 @@ func run(args []string) error {
 	}
 }
 
+func extractGlobalRepoFlag(args []string) (string, []string, error) {
+	repo := ""
+	seenRepo := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--repo" {
+			if seenRepo {
+				return "", nil, errors.New("provide --repo at most once")
+			}
+			if i+1 >= len(args) {
+				return "", nil, errors.New("flag --repo requires a value")
+			}
+			repo = args[i+1]
+			if strings.TrimSpace(repo) == "" {
+				return "", nil, errors.New("flag --repo requires a value")
+			}
+			seenRepo = true
+			i++
+			continue
+		}
+		if strings.HasPrefix(arg, "--repo=") {
+			if seenRepo {
+				return "", nil, errors.New("provide --repo at most once")
+			}
+			repo = strings.TrimPrefix(arg, "--repo=")
+			if strings.TrimSpace(repo) == "" {
+				return "", nil, errors.New("flag --repo requires a value")
+			}
+			seenRepo = true
+			continue
+		}
+		return repo, args[i:], nil
+	}
+	return repo, nil, nil
+}
+
+func countRepoFlags(args []string) int {
+	count := 0
+	for _, arg := range args {
+		if arg == "--repo" || strings.HasPrefix(arg, "--repo=") {
+			count++
+		}
+	}
+	return count
+}
+
+func commandAcceptsRepoFlag(command string) bool {
+	switch command {
+	case "init", "create", "open", "list", "main", "close", "tidy", "stack":
+		return true
+	default:
+		return false
+	}
+}
+
 func printUsage(w io.Writer) {
 	s := cliStylesForWriter(w)
 	fmt.Fprintln(w, s.Title.Render("jjw — Jujutsu Workspace lifecycle helper"))
 	fmt.Fprintln(w)
-	fmt.Fprintf(w, "%s %s\n", s.Section.Render("Usage:"), s.Command.Render("jjw <command> [options]"))
+	fmt.Fprintf(w, "%s %s\n", s.Section.Render("Usage:"), s.Command.Render("jjw [--repo PATH] <command> [options]"))
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, s.Section.Render("Global options:"))
+	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Option, "--repo PATH", 18), "run a repo-aware command against this repository root")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, s.Section.Render("Setup:"))
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "init", 18), "Create jjw config")
@@ -155,7 +230,8 @@ func printUsage(w io.Writer) {
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "close [handle...]", 18), "Close Workspaces; with no handle, use the selector")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, s.Section.Render("Stacking:"))
-	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "stack [handle...]", 18), "Stack selected Workspaces into Main; with no handles, use the selector")
+	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "stack [handle...]", 18), "Stack selected Workspaces into the target Workspace; with no handles, use the selector")
+	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "stack --line [handle...]", 18), "Line Stack selected Workspaces in explicit order")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, s.Section.Render("Inspect and housekeeping:"))
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "list", 18), "List Workspaces with status and markers")
@@ -440,7 +516,7 @@ func createWorkspace(repoRoot string, cfg config, project string, handle string,
 			return err
 		}
 	}
-	if err := materializeAssimilatedFolders(mainWorkspaceRoot(repoRoot), target, cfg, project); err != nil {
+	if err := materializeAndReportAssimilatedFolders(mainWorkspaceRoot(repoRoot), target, cfg, project); err != nil {
 		return err
 	}
 	if direnvAllow || cfg.Create.DirenvAllow {
@@ -462,7 +538,7 @@ func openExistingWorkspace(repoRoot string, cfg config, project string, handle s
 			if info.Missing {
 				return fmt.Errorf("Workspace %q path not found: %s", handle, info.Path)
 			}
-			if err := materializeAssimilatedFolders(mainWorkspaceRoot(repoRoot), info.Path, cfg, project); err != nil {
+			if err := materializeAndReportAssimilatedFolders(mainWorkspaceRoot(repoRoot), info.Path, cfg, project); err != nil {
 				return err
 			}
 			printNavigationPath(info.Path, "open")
@@ -512,7 +588,7 @@ func runOpen(args []string) error {
 				if info.Missing {
 					return fmt.Errorf("Workspace %q path not found: %s", handle, info.Path)
 				}
-				if err := materializeAssimilatedFolders(mainWorkspaceRoot(repoRoot), info.Path, cfg, project); err != nil {
+				if err := materializeAndReportAssimilatedFolders(mainWorkspaceRoot(repoRoot), info.Path, cfg, project); err != nil {
 					return err
 				}
 				printNavigationPath(info.Path, "open")
@@ -539,7 +615,7 @@ func runOpen(args []string) error {
 	if len(selected) == 0 {
 		return errors.New("no Workspace selected")
 	}
-	if err := materializeAssimilatedFolders(mainWorkspaceRoot(repoRoot), selected[0].Path, cfg, project); err != nil {
+	if err := materializeAndReportAssimilatedFolders(mainWorkspaceRoot(repoRoot), selected[0].Path, cfg, project); err != nil {
 		return err
 	}
 	printNavigationPath(selected[0].Path, "open")
@@ -574,8 +650,19 @@ func shellIntegrationSnippet(shellName string) (string, error) {
 	case "bash", "zsh":
 		return `# jjw shell integration: source this to make create/open/close/main change directory.
 jjw() {
-  local out rc
+  local out rc cmd
   case "$1" in
+    --repo)
+      cmd="$3"
+      ;;
+    --repo=*)
+      cmd="$2"
+      ;;
+    *)
+      cmd="$1"
+      ;;
+  esac
+  case "$cmd" in
     create|open|close|main)
       out="$(JJW_SHELL_WRAPPED=1 command jjw "$@")"
       rc=$?
@@ -780,7 +867,7 @@ func tidyClosableWorkspaces(repoRoot string, cfg config, project string, infos [
 	if err := abandonEmptyWorkspaceHeads(mainInfo.Path, targets); err != nil {
 		return err
 	}
-	closed, err := closeWorkspaces(repoRoot, cfg, project, targets, false, yes)
+	closed, err := closeWorkspaces(mainInfo.Path, targets, false, yes)
 	if err != nil {
 		return err
 	}
@@ -900,6 +987,9 @@ func runClose(args []string) error {
 	if !ok {
 		return fmt.Errorf("Main Workspace %q not found", cfg.MainWorkspace)
 	}
+	if mainInfo.Missing {
+		return fmt.Errorf("Main Workspace path missing: %s", mainInfo.Path)
+	}
 	if force && !yes && !confirmedForce {
 		ok, err := confirm(fmt.Sprintf("Forced Closing will abandon unique mutable changes for %d Workspace(s). Continue? [y/N]: ", len(targets)))
 		if err != nil || !ok {
@@ -912,7 +1002,7 @@ func runClose(args []string) error {
 			return err
 		}
 	}
-	if _, err := closeWorkspaces(repoRoot, cfg, project, targets, force, yes); err != nil {
+	if _, err := closeWorkspaces(mainInfo.Path, targets, force, yes); err != nil {
 		return err
 	}
 	if err := abandonTopEmptyMutableAncestors(mainInfo.Path); err != nil {
@@ -920,6 +1010,72 @@ func runClose(args []string) error {
 	}
 	printNavigationPath(mainInfo.Path, "close")
 	return nil
+}
+
+type stackTargetResolution struct {
+	Handle         string
+	Path           string
+	ConfiguredMain string
+	Explicit       bool
+	FromCurrent    bool
+}
+
+func resolveStackTargetWorkspace(repoRoot string, cfg config, project string, workspaceOverride string) (config, []workspaceInfo, map[string]workspaceInfo, stackTargetResolution, error) {
+	refs, err := listWorkspaceRefs(repoRoot)
+	if err != nil {
+		return config{}, nil, nil, stackTargetResolution{}, err
+	}
+	current := ""
+	if detected, err := currentWorkspaceHandle(repoRoot, refs); err == nil {
+		current = detected
+	} else if strings.Contains(err.Error(), "ambiguous Current Workspace") {
+		return config{}, nil, nil, stackTargetResolution{}, err
+	}
+	configuredMain := cfg.MainWorkspace
+	targetHandle := strings.TrimSpace(workspaceOverride)
+	resolution := stackTargetResolution{ConfiguredMain: configuredMain}
+	if targetHandle != "" {
+		if err := validateWorkspaceHandle(targetHandle); err != nil {
+			return config{}, nil, nil, stackTargetResolution{}, err
+		}
+		resolution.Explicit = true
+	} else if strings.TrimSpace(current) != "" {
+		targetHandle = current
+		resolution.FromCurrent = true
+	} else {
+		targetHandle = configuredMain
+	}
+	cfg.MainWorkspace = targetHandle
+	infos, err := workspaceInfosForRefs(repoRoot, cfg, project, refs, current)
+	if err != nil {
+		return config{}, nil, nil, stackTargetResolution{}, err
+	}
+	byHandle := mapInfosByHandle(infos)
+	targetInfo, ok := byHandle[targetHandle]
+	if !ok {
+		return config{}, nil, nil, stackTargetResolution{}, fmt.Errorf("target Workspace %q not found", targetHandle)
+	}
+	if targetInfo.Missing {
+		return config{}, nil, nil, stackTargetResolution{}, fmt.Errorf("target Workspace path missing: %s", targetInfo.Path)
+	}
+	resolution.Handle = targetHandle
+	resolution.Path = targetInfo.Path
+	return cfg, infos, byHandle, resolution, nil
+}
+
+func printStackTargetResolution(target stackTargetResolution) {
+	fmt.Fprintf(stderrWriter, "Stack target workspace: %s (%s)\n", target.Handle, target.Path)
+	if target.FromCurrent && target.ConfiguredMain != "" && target.ConfiguredMain != target.Handle {
+		fmt.Fprintf(stderrWriter, "Configured main_workspace %s was not used because --repo/cwd resolved to %s.\n", target.ConfiguredMain, target.Handle)
+	}
+}
+
+func rejectTargetWorkspaceInput(handle string) error {
+	return fmt.Errorf("Stack Input %q is the target workspace; pass --workspace to choose a different target workspace", handle)
+}
+
+func stackInputProtectedByTarget(info workspaceInfo, target stackTargetResolution) bool {
+	return target.FromCurrent && target.ConfiguredMain != "" && target.ConfiguredMain != target.Handle && info.Ref.Handle == target.ConfiguredMain
 }
 
 func runStack(args []string) error {
@@ -931,43 +1087,49 @@ func runStack(args []string) error {
 	fs := flag.NewFlagSet("stack", flag.ContinueOnError)
 	var repoRootOverride, projectOverride, rootOverride string
 	var workspaceOverride, rebaseMode, shape, conflictStrategy string
-	var all, yes bool
+	var all, yes, lineStack bool
 	fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
 	fs.StringVar(&projectOverride, "project", "", "Project override")
 	fs.StringVar(&rootOverride, "workspaces-root", "", "Workspaces root override")
-	fs.StringVar(&workspaceOverride, "workspace", "", "Main Workspace handle override")
+	fs.StringVar(&workspaceOverride, "workspace", "", "target Workspace handle override (defaults to current Workspace, then main_workspace)")
 	fs.StringVar(&rebaseMode, "rebase-mode", "", "advanced: auto, branch, revision")
 	fs.StringVar(&shape, "stack-shape", "", "advanced: auto, linear, merge")
 	fs.StringVar(&conflictStrategy, "conflict-strategy", "", "advanced: off, prefer-clean")
 	fs.BoolVar(&all, "all", false, "stack all stack-relevant Workspaces")
-	fs.BoolVar(&yes, "yes", false, "skip Stack confirmation and post-Stack Close prompt")
-	if handled, err := parseCommandFlags(fs, args, "jjw stack [handle...] [options]", "Stack selected Workspaces into the Main Workspace."); handled || err != nil {
+	fs.BoolVar(&lineStack, "line", false, "Line Stack selected Workspaces onto one ordered line")
+	fs.BoolVar(&yes, "yes", false, "skip confirmation prompts")
+	if handled, err := parseCommandFlags(fs, args, "jjw stack [handle...] [options]", "Stack selected Workspaces into the target Workspace. The target defaults to --workspace, then the current --repo/cwd Workspace, then configured main_workspace; use --line for ordered Line Stacking."); handled || err != nil {
 		return err
 	}
 	positionals := fs.Args()
 	if all && len(positionals) > 0 {
 		return errors.New("provide either --all or Stack Input Handles, not both")
 	}
+	if lineStack && all {
+		return errors.New("--line cannot be combined with --all")
+	}
+	if lineStack && (strings.TrimSpace(rebaseMode) != "" || strings.TrimSpace(shape) != "" || strings.TrimSpace(conflictStrategy) != "") {
+		return errors.New("--line cannot be combined with --rebase-mode, --stack-shape, or --conflict-strategy")
+	}
 	repoRoot, cfg, project, err := commandContext(repoRootOverride, projectOverride, rootOverride)
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(workspaceOverride) != "" {
-		if err := validateWorkspaceHandle(workspaceOverride); err != nil {
-			return err
-		}
-		cfg.MainWorkspace = strings.TrimSpace(workspaceOverride)
-	}
 	applyStackOverrides(&cfg, rebaseMode, shape, conflictStrategy)
-	infos, _, err := loadWorkspaceInfos(repoRoot, cfg, project)
+	cfg, infos, byHandle, target, err := resolveStackTargetWorkspace(repoRoot, cfg, project, workspaceOverride)
 	if err != nil {
 		return err
 	}
-	byHandle := mapInfosByHandle(infos)
+	if lineStack {
+		return runLineStack(cfg, infos, byHandle, target, positionals, yes)
+	}
 	inputs := []string{}
 	selectorUsed := false
 	if all {
 		for _, info := range infos {
+			if stackInputProtectedByTarget(info, target) {
+				continue
+			}
 			if isStackRelevant(info) {
 				inputs = append(inputs, info.Ref.Handle)
 			}
@@ -983,7 +1145,7 @@ func runStack(args []string) error {
 				return fmt.Errorf("Workspace %q not found", h)
 			}
 			if info.Main {
-				return fmt.Errorf("Main Workspace %q cannot be a Stack Input", h)
+				return rejectTargetWorkspaceInput(h)
 			}
 			if info.Missing {
 				return fmt.Errorf("Workspace %q path missing: %s", h, info.Path)
@@ -994,7 +1156,7 @@ func runStack(args []string) error {
 		if !canUseTUI() {
 			return errors.New("stack requires Workspace Handles or --all when not running in a terminal")
 		}
-		items := selectorItemsForStack(infos)
+		items := selectorItemsForStackWithTarget(infos, target)
 		selected, opts, err := runSelector(selectorOptions{Title: "Stack Workspaces", Mode: selectorMulti, Items: items, AllDefault: true, StackOptions: cfg.Stack})
 		if err != nil {
 			return err
@@ -1016,13 +1178,8 @@ func runStack(args []string) error {
 			return err
 		}
 	}
-	mainInfo, ok := byHandle[cfg.MainWorkspace]
-	if !ok {
-		return fmt.Errorf("Main Workspace %q not found", cfg.MainWorkspace)
-	}
-	if mainInfo.Missing {
-		return fmt.Errorf("Main Workspace path missing: %s", mainInfo.Path)
-	}
+	mainInfo := byHandle[cfg.MainWorkspace]
+	printStackTargetResolution(target)
 	undoOpID, err := currentOperationID(mainInfo.Path)
 	if err != nil {
 		return fmt.Errorf("record pre-Stack operation id: %w", err)
@@ -1061,7 +1218,7 @@ func runStack(args []string) error {
 					return err
 				}
 				if ok {
-					closed, err := closeWorkspaces(repoRoot, cfg, project, closable, false, true)
+					closed, err := closeWorkspaces(mainInfo.Path, closable, false, true)
 					if err != nil {
 						return err
 					}
@@ -1074,6 +1231,620 @@ func runStack(args []string) error {
 	}
 	printStackUndoHint(undoOpID)
 	return nil
+}
+
+type lineStackInput struct {
+	Handle string
+	Role   string
+}
+
+type lineStackPayloadRebase struct {
+	Handle            string
+	SourceRevset      string
+	DestinationRevset string
+}
+
+type lineStackAdvance struct {
+	Handle           string
+	Path             string
+	Role             string
+	InProgress       bool
+	InProgressRevset string
+}
+
+type lineStackPlan struct {
+	Inputs         []lineStackInput
+	Payloads       []lineStackInput
+	FollowOnly     []lineStackInput
+	Excluded       []string
+	PayloadRebases []lineStackPayloadRebase
+	Advances       []lineStackAdvance
+	FinalTip       string
+}
+
+func runLineStack(cfg config, infos []workspaceInfo, byHandle map[string]workspaceInfo, target stackTargetResolution, positionals []string, yes bool) error {
+	mainInfo, ok := byHandle[cfg.MainWorkspace]
+	if !ok {
+		return fmt.Errorf("target Workspace %q not found", cfg.MainWorkspace)
+	}
+	if mainInfo.Missing {
+		return fmt.Errorf("target Workspace path missing: %s", mainInfo.Path)
+	}
+	requested := []lineStackInput{}
+	if len(positionals) > 0 {
+		for _, h := range positionals {
+			requested = append(requested, lineStackInput{Handle: h})
+		}
+	} else {
+		if !canUseTUI() {
+			return errors.New("stack --line requires ordered Workspace Handles when not running in a terminal")
+		}
+		items := selectorItemsForLineStack(infos)
+		var opts selectorOptions
+		var err error
+		selected, opts, err := runSelector(selectorOptions{Title: "Line Stack Workspaces", Mode: selectorMulti, Items: items, OrderedSelection: true, AllowRoleToggle: true})
+		_ = opts
+		if err != nil {
+			return err
+		}
+		requested = lineStackInputsFromSelectorItems(selected)
+	}
+	if len(requested) == 0 {
+		return errors.New("no Line Stack Workspaces selected")
+	}
+	for _, input := range requested {
+		if strings.TrimSpace(input.Handle) == cfg.MainWorkspace {
+			return fmt.Errorf("Line Stack Input %q is the target workspace; pass --workspace to choose a different target workspace", input.Handle)
+		}
+	}
+	plan, err := buildLineStackPlan(infos, requested)
+	if err != nil {
+		return err
+	}
+	plan, err = resolveLineStackPlan(mainInfo.Path, plan)
+	if err != nil {
+		return err
+	}
+	projectedLog, err := lineStackProjectedLogForWriter(mainInfo.Path, plan, stderrWriter)
+	if err != nil {
+		return fmt.Errorf("build Line Stack projected log: %w", err)
+	}
+	undoOpID, err := currentOperationID(mainInfo.Path)
+	if err != nil {
+		return fmt.Errorf("record pre-Line Stack operation id: %w", err)
+	}
+	printStackTargetResolution(target)
+	fmt.Fprintln(stderrWriter, lineStackPlanText(plan, undoOpID, projectedLog))
+	if !yes && canUseTUI() {
+		ok, err := confirm("Run Line Stack? [y/N]: ")
+		if err != nil || !ok {
+			fmt.Fprintln(stderrWriter, cliStylesForWriter(stderrWriter).Muted.Render("Line Stack cancelled."))
+			return err
+		}
+	}
+	if err := executeLineStackPlan(mainInfo.Path, plan); err != nil {
+		printStackUndoHint(undoOpID)
+		return err
+	}
+	printStackUndoHint(undoOpID)
+	return nil
+}
+
+func selectorItemForLineStackInfo(info workspaceInfo) selectorItem {
+	return selectorItem{Handle: info.Ref.Handle, Path: info.Path, Status: statusLabel(info), Markers: strings.Join(markers(info), ","), Role: lineStackRoleForInfo(info), Disabled: info.Missing}
+}
+
+func lineStackInputsFromSelectorItems(items []selectorItem) []lineStackInput {
+	inputs := make([]lineStackInput, 0, len(items))
+	for _, item := range items {
+		inputs = append(inputs, lineStackInput{Handle: item.Handle, Role: item.Role})
+	}
+	return inputs
+}
+
+func buildLineStackPlan(infos []workspaceInfo, requested []lineStackInput) (lineStackPlan, error) {
+	byHandle := mapInfosByHandle(infos)
+	plan := lineStackPlan{}
+	selected := map[string]bool{}
+	for _, input := range requested {
+		handle := strings.TrimSpace(input.Handle)
+		if err := validateWorkspaceHandle(handle); err != nil {
+			return lineStackPlan{}, err
+		}
+		if selected[handle] {
+			return lineStackPlan{}, fmt.Errorf("duplicate Line Stack Workspace %q", handle)
+		}
+		info, ok := byHandle[handle]
+		if !ok {
+			return lineStackPlan{}, fmt.Errorf("Workspace %q not found", handle)
+		}
+		if info.Missing {
+			return lineStackPlan{}, fmt.Errorf("Workspace %q path missing: %s", handle, info.Path)
+		}
+		role, err := normalizeLineStackRole(input.Role)
+		if err != nil {
+			return lineStackPlan{}, err
+		}
+		if role == "" {
+			role = lineStackRoleForInfo(info)
+		}
+		if lineStackRoleForInfo(info) == selectorRoleFollow {
+			role = selectorRoleFollow
+		}
+		if role == selectorRoleFollow && !info.Empty && !info.Stacked {
+			return lineStackPlan{}, fmt.Errorf("Line Stack follow-only Workspace %q has unique non-empty commits; select it as payload or omit it", handle)
+		}
+		normalized := lineStackInput{Handle: handle, Role: role}
+		selected[handle] = true
+		plan.Inputs = append(plan.Inputs, normalized)
+		plan.Advances = append(plan.Advances, lineStackAdvance{Handle: handle, Path: info.Path, Role: role})
+		if role == selectorRoleFollow {
+			plan.FollowOnly = append(plan.FollowOnly, normalized)
+		} else {
+			plan.Payloads = append(plan.Payloads, normalized)
+		}
+	}
+	if len(plan.Inputs) == 0 {
+		return lineStackPlan{}, errors.New("no Line Stack Workspaces selected")
+	}
+	if len(plan.Payloads) == 0 {
+		return lineStackPlan{}, errors.New("Line Stack requires at least one payload Workspace")
+	}
+	for _, info := range infos {
+		if !selected[info.Ref.Handle] {
+			plan.Excluded = append(plan.Excluded, info.Ref.Handle)
+		}
+	}
+	for i := 1; i < len(plan.Payloads); i++ {
+		previous := plan.Payloads[i-1].Handle
+		current := plan.Payloads[i].Handle
+		plan.PayloadRebases = append(plan.PayloadRebases, lineStackPayloadRebase{Handle: current, SourceRevset: lineStackPayloadSourceRevset(current, previous), DestinationRevset: lineStackPayloadDestinationRevset(previous)})
+	}
+	plan.FinalTip = lineStackPayloadDestinationRevset(plan.Payloads[len(plan.Payloads)-1].Handle)
+	return plan, nil
+}
+
+func resolveLineStackPlan(repoPath string, plan lineStackPlan) (lineStackPlan, error) {
+	inProgressHeads := map[string][]string{}
+	for i := range plan.Advances {
+		ids, err := revisionChangeIDs(repoPath, lineStackInProgressHeadRevset(plan.Advances[i].Handle))
+		if err != nil {
+			return lineStackPlan{}, err
+		}
+		if len(ids) == 0 {
+			continue
+		}
+		plan.Advances[i].InProgress = true
+		plan.Advances[i].InProgressRevset = revsetUnion(ids)
+		inProgressHeads[plan.Advances[i].Handle] = ids
+	}
+	for _, advance := range plan.Advances {
+		if !advance.InProgress {
+			continue
+		}
+		for _, excluded := range plan.Excluded {
+			descendant, err := revisionMatches(repoPath, excluded+"@ & descendants("+advance.InProgressRevset+")")
+			if err != nil {
+				return lineStackPlan{}, err
+			}
+			if descendant {
+				return lineStackPlan{}, fmt.Errorf("Line Stack would rewrite omitted Workspace %q because it descends from in-progress Workspace %q", excluded, advance.Handle)
+			}
+		}
+	}
+	frontiers := map[string][]string{}
+	for _, payload := range plan.Payloads {
+		frontierRevset := lineStackPayloadDestinationRevsetExcluding(payload.Handle, inProgressHeads[payload.Handle])
+		frontier, err := revisionChangeIDs(repoPath, frontierRevset)
+		if err != nil {
+			return lineStackPlan{}, err
+		}
+		if len(frontier) == 0 {
+			return lineStackPlan{}, fmt.Errorf("Line Stack payload Workspace %q has no non-empty frontier", payload.Handle)
+		}
+		frontiers[payload.Handle] = frontier
+	}
+	resolvedRebases := make([]lineStackPayloadRebase, 0, len(plan.PayloadRebases))
+	for i := 1; i < len(plan.Payloads); i++ {
+		previous := plan.Payloads[i-1].Handle
+		current := plan.Payloads[i].Handle
+		sourceRevset := lineStackExcludeRevset(lineStackPayloadSourceRevset(current, previous), inProgressHeads[current])
+		immutable, err := revisionMatches(repoPath, "immutable() & "+sourceRevset)
+		if err != nil {
+			return lineStackPlan{}, err
+		}
+		if immutable {
+			return lineStackPlan{}, fmt.Errorf("Line Stack payload Workspace %q has unique immutable commits; rebase or make them mutable before Line Stacking", current)
+		}
+		for _, excluded := range plan.Excluded {
+			descendant, err := revisionMatches(repoPath, excluded+"@ & descendants("+sourceRevset+")")
+			if err != nil {
+				return lineStackPlan{}, err
+			}
+			if descendant {
+				return lineStackPlan{}, fmt.Errorf("Line Stack would rewrite omitted Workspace %q because it descends from payload Workspace %q", excluded, current)
+			}
+		}
+		sourceIDs, err := revisionChangeIDs(repoPath, sourceRevset)
+		if err != nil {
+			return lineStackPlan{}, err
+		}
+		if len(sourceIDs) == 0 {
+			return lineStackPlan{}, fmt.Errorf("Line Stack payload Workspace %q has no unique non-empty commits relative to %q", current, previous)
+		}
+		resolvedRebases = append(resolvedRebases, lineStackPayloadRebase{Handle: current, SourceRevset: revsetUnion(sourceIDs), DestinationRevset: revsetUnion(frontiers[previous])})
+	}
+	plan.PayloadRebases = resolvedRebases
+	plan.FinalTip = revsetUnion(frontiers[plan.Payloads[len(plan.Payloads)-1].Handle])
+	return plan, nil
+}
+
+func lineStackRoleForInfo(info workspaceInfo) string {
+	if !info.Main && (info.Empty || info.Stacked) {
+		return selectorRoleFollow
+	}
+	return selectorRolePayload
+}
+
+func normalizeLineStackRole(role string) (string, error) {
+	switch strings.TrimSpace(strings.ToLower(role)) {
+	case "":
+		return "", nil
+	case selectorRolePayload:
+		return selectorRolePayload, nil
+	case selectorRoleFollow, "follow-only":
+		return selectorRoleFollow, nil
+	default:
+		return "", fmt.Errorf("invalid Line Stack role %q (expected payload or follow-only)", role)
+	}
+}
+
+func lineStackPayloadSourceRevset(handle string, baseHandle string) string {
+	return fmt.Sprintf("(::%s@ & ~::%s@ & ~empty())", handle, baseHandle)
+}
+
+func lineStackPayloadDestinationRevset(handle string) string {
+	return lineStackPayloadDestinationRevsetExcluding(handle, nil)
+}
+
+func lineStackPayloadDestinationRevsetExcluding(handle string, excluded []string) string {
+	return fmt.Sprintf("heads(%s)", lineStackExcludeRevset(fmt.Sprintf("(::%s@ & ~empty())", handle), excluded))
+}
+
+func lineStackInProgressHeadRevset(handle string) string {
+	return fmt.Sprintf("(description(\"\") & ~empty() & %s@)", handle)
+}
+
+func lineStackExcludeRevset(revset string, excluded []string) string {
+	excluded = uniqueNonEmptyStrings(excluded)
+	if len(excluded) == 0 {
+		return revset
+	}
+	return fmt.Sprintf("(%s & ~(%s))", revset, revsetUnion(excluded))
+}
+
+func lineStackFirstPayloadPreviewRevset(handle string, nextHandle string) string {
+	if strings.TrimSpace(nextHandle) == "" {
+		return lineStackPayloadDestinationRevset(handle)
+	}
+	return fmt.Sprintf("(::%s@ & ~::%s@ & ~empty())", handle, nextHandle)
+}
+
+func lineStackProjectedLog(repoPath string, plan lineStackPlan) (string, error) {
+	return lineStackProjectedLogWithColor(repoPath, plan, false)
+}
+
+func lineStackProjectedLogForWriter(repoPath string, plan lineStackPlan, w io.Writer) (string, error) {
+	return lineStackProjectedLogWithColor(repoPath, plan, canColorWriter(w))
+}
+
+func lineStackProjectedLogWithColor(repoPath string, plan lineStackPlan, color bool) (string, error) {
+	if len(plan.Payloads) == 0 {
+		return "", nil
+	}
+	seen := map[string]bool{}
+	rows := []lineStackProjectedRow{}
+	advancesByHandle := lineStackAdvancesByHandle(plan.Advances)
+	for i := len(plan.Payloads) - 1; i >= 0; i-- {
+		advance := advancesByHandle[plan.Payloads[i].Handle]
+		revset := lineStackExcludeRevset(lineStackProjectedPayloadPreviewRevset(plan.Payloads, i), lineStackInProgressExcludes(advance))
+		payloadRows, err := lineStackProjectedRowsWithColor(repoPath, revset, plan.Payloads[i].Handle, color)
+		if err != nil {
+			return "", err
+		}
+		if i == 0 && len(payloadRows) == 0 && len(plan.Payloads) > 1 {
+			fallbackRevset := lineStackPayloadDestinationRevsetExcluding(plan.Payloads[i].Handle, lineStackInProgressExcludes(advance))
+			payloadRows, err = lineStackProjectedRowsWithColor(repoPath, fallbackRevset, plan.Payloads[i].Handle, color)
+			if err != nil {
+				return "", err
+			}
+		}
+		for _, row := range payloadRows {
+			if seen[row.ChangeID] {
+				continue
+			}
+			seen[row.ChangeID] = true
+			rows = append(rows, row)
+		}
+	}
+	var b strings.Builder
+	for _, line := range lineStackProjectedCursorLinesStyled(plan.Advances, color) {
+		fmt.Fprintln(&b, line)
+	}
+	if len(rows) == 0 {
+		fmt.Fprintf(&b, "%s  %s\n", lineStackGraphStyle("│", color), lineStackMutedStyle("(no non-empty payload commits to show)", color))
+		return strings.TrimRight(b.String(), "\n"), nil
+	}
+	for _, row := range rows {
+		description := row.RenderedDescription
+		if strings.TrimSpace(stripANSI(description)) == "" {
+			description = lineStackDescriptionStyle("(no description set)", color)
+		} else if color && !strings.Contains(description, "\x1b[") {
+			description = lineStackDescriptionStyle(description, color)
+		}
+		changeID := row.RenderedChangeID
+		if strings.TrimSpace(stripANSI(changeID)) == "" {
+			changeID = row.ChangeID
+		}
+		if color && !strings.Contains(changeID, "\x1b[") {
+			changeID = lineStackChangeIDStyle(changeID, color)
+		}
+		fmt.Fprintf(&b, "%s  %s %s\n", lineStackGraphStyle("○", color), changeID, description)
+	}
+	return strings.TrimRight(b.String(), "\n"), nil
+}
+
+func lineStackProjectedPayloadPreviewRevset(payloads []lineStackInput, index int) string {
+	if index <= 0 {
+		next := ""
+		if len(payloads) > 1 {
+			next = payloads[1].Handle
+		}
+		return lineStackFirstPayloadPreviewRevset(payloads[0].Handle, next)
+	}
+	return lineStackPayloadSourceRevset(payloads[index].Handle, payloads[index-1].Handle)
+}
+
+type lineStackProjectedRow struct {
+	ChangeID            string
+	Description         string
+	RenderedChangeID    string
+	RenderedDescription string
+	Handle              string
+}
+
+func lineStackProjectedRows(repoPath string, revset string, handle string) ([]lineStackProjectedRow, error) {
+	return lineStackProjectedRowsWithColor(repoPath, revset, handle, false)
+}
+
+func lineStackProjectedRowsWithColor(repoPath string, revset string, handle string, color bool) ([]lineStackProjectedRow, error) {
+	args := []string{"-R", repoPath, "--ignore-working-copy"}
+	if color {
+		args = append(args, "--color=always")
+	} else {
+		args = append(args, "--color=never")
+	}
+	args = append(args, "log", "-r", revset, "--no-graph", "-T", "change_id.short() ++ \"\\t\" ++ description.first_line() ++ \"\\n\"")
+	out, err := commandCaptureFn("jj", args...)
+	if err != nil {
+		return nil, err
+	}
+	rows := []lineStackProjectedRow{}
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 2)
+		renderedChangeID := strings.TrimSpace(parts[0])
+		row := lineStackProjectedRow{ChangeID: strings.TrimSpace(stripANSI(renderedChangeID)), RenderedChangeID: renderedChangeID, Handle: handle}
+		if len(parts) > 1 {
+			row.RenderedDescription = strings.TrimSpace(parts[1])
+			row.Description = strings.TrimSpace(stripANSI(row.RenderedDescription))
+		}
+		if row.ChangeID != "" {
+			rows = append(rows, row)
+		}
+	}
+	return rows, nil
+}
+
+func lineStackProjectedCursorLines(advances []lineStackAdvance) []string {
+	return lineStackProjectedCursorLinesStyled(advances, false)
+}
+
+func lineStackProjectedCursorLinesStyled(advances []lineStackAdvance, color bool) []string {
+	if len(advances) == 0 {
+		return []string{lineStackCursorStyle("@", color) + "  " + lineStackMutedStyle("<planned Workspace cursor>", color)}
+	}
+	lines := make([]string, 0, len(advances)*2-1)
+	for i, advance := range advances {
+		label := lineStackProjectedCursorLabelStyled(advance, color)
+		if i == 0 {
+			lines = append(lines, lineStackCursorStyle("@", color)+"  "+label)
+			continue
+		}
+		lines = append(lines, lineStackGraphStyle("│", color)+" "+lineStackGraphStyle("○", color)+"  "+label)
+		lines = append(lines, lineStackGraphStyle("├─╯", color))
+	}
+	return lines
+}
+
+func lineStackProjectedCursorLabel(advance lineStackAdvance) string {
+	return lineStackProjectedCursorLabelStyled(advance, false)
+}
+
+func lineStackProjectedCursorLabelStyled(advance lineStackAdvance, color bool) string {
+	if advance.InProgress {
+		id := strings.TrimSpace(advance.InProgressRevset)
+		if id == "" {
+			id = advance.Handle + "@"
+		}
+		return fmt.Sprintf("%s %s %s", lineStackChangeIDStyle(id, color), lineStackWorkspaceStyle(advance.Handle+"@", color), lineStackMutedStyle("(in-progress; will rebase on top)", color))
+	}
+	return fmt.Sprintf("%s %s", lineStackWorkspaceStyle(advance.Handle+"@", color), lineStackMutedStyle("(planned empty cursor)", color))
+}
+
+var ansiEscapeRE = regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`)
+
+func stripANSI(s string) string {
+	return ansiEscapeRE.ReplaceAllString(s, "")
+}
+
+func lineStackGraphStyle(s string, color bool) string {
+	return lineStackANSI256(s, color, 7)
+}
+
+func lineStackCursorStyle(s string, color bool) string {
+	return lineStackANSI256(s, color, 10)
+}
+
+func lineStackWorkspaceStyle(s string, color bool) string {
+	return lineStackANSI256(s, color, 13)
+}
+
+func lineStackChangeIDStyle(s string, color bool) string {
+	return lineStackANSI256(s, color, 5)
+}
+
+func lineStackDescriptionStyle(s string, color bool) string {
+	return lineStackANSI256(s, color, 10)
+}
+
+func lineStackMutedStyle(s string, color bool) string {
+	return lineStackANSI256(s, color, 8)
+}
+
+func lineStackANSI256(s string, color bool, code int) string {
+	if !color || s == "" {
+		return s
+	}
+	return fmt.Sprintf("\x1b[38;5;%dm%s\x1b[39m", code, s)
+}
+
+func lineStackAdvancesByHandle(advances []lineStackAdvance) map[string]lineStackAdvance {
+	byHandle := map[string]lineStackAdvance{}
+	for _, advance := range advances {
+		byHandle[advance.Handle] = advance
+	}
+	return byHandle
+}
+
+func lineStackInProgressExcludes(advance lineStackAdvance) []string {
+	if !advance.InProgress || strings.TrimSpace(advance.InProgressRevset) == "" {
+		return nil
+	}
+	return []string{advance.InProgressRevset}
+}
+
+func lineStackPlanText(plan lineStackPlan, undoOpID string, projectedLog string) string {
+	var b strings.Builder
+	fmt.Fprintln(&b, "Line Stack preview")
+	if strings.TrimSpace(projectedLog) != "" {
+		fmt.Fprintln(&b, "Projected jj log after Line Stack:")
+		for _, line := range strings.Split(strings.TrimRight(projectedLog, "\n"), "\n") {
+			fmt.Fprintln(&b, line)
+		}
+	}
+	fmt.Fprintln(&b, "Options:")
+	fmt.Fprintln(&b, "  mode: line")
+	fmt.Fprintln(&b, "Inputs:")
+	for i, input := range plan.Inputs {
+		fmt.Fprintf(&b, "  %d. %s (%s)\n", i+1, input.Handle, lineStackRoleLabel(input.Role))
+	}
+	fmt.Fprintln(&b, "Payload rebases:")
+	if len(plan.PayloadRebases) == 0 {
+		fmt.Fprintln(&b, "  (none; single payload Workspace)")
+	}
+	for _, op := range plan.PayloadRebases {
+		fmt.Fprintf(&b, "  %s payload: %s -> %s\n", op.Handle, op.SourceRevset, op.DestinationRevset)
+	}
+	fmt.Fprintln(&b, "Follow-only advances:")
+	if len(plan.FollowOnly) == 0 {
+		fmt.Fprintln(&b, "  (none)")
+	} else {
+		for _, input := range plan.FollowOnly {
+			fmt.Fprintf(&b, "  %s@ -> %s\n", input.Handle, plan.FinalTip)
+		}
+	}
+	fmt.Fprintln(&b, "In-progress Workspace rebases:")
+	inProgressAdvanceCount := 0
+	for _, advance := range plan.Advances {
+		if advance.InProgress {
+			inProgressAdvanceCount++
+			fmt.Fprintf(&b, "  %s@ -> %s\n", advance.Handle, plan.FinalTip)
+		}
+	}
+	if inProgressAdvanceCount == 0 {
+		fmt.Fprintln(&b, "  (none)")
+	}
+	fmt.Fprintln(&b, "Payload Workspace head advances:")
+	payloadAdvanceCount := 0
+	for _, advance := range plan.Advances {
+		if advance.Role != selectorRoleFollow && !advance.InProgress {
+			payloadAdvanceCount++
+			fmt.Fprintf(&b, "  %s@ -> %s\n", advance.Handle, plan.FinalTip)
+		}
+	}
+	if payloadAdvanceCount == 0 {
+		fmt.Fprintln(&b, "  (none)")
+	}
+	fmt.Fprintln(&b, "Excluded:")
+	if len(plan.Excluded) == 0 {
+		fmt.Fprintln(&b, "  (none)")
+	} else {
+		for _, handle := range plan.Excluded {
+			fmt.Fprintf(&b, "  %s\n", handle)
+		}
+	}
+	if strings.TrimSpace(undoOpID) != "" {
+		fmt.Fprintf(&b, "To undo this run: jj op restore %s\n", undoOpID)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func lineStackRoleLabel(role string) string {
+	if role == selectorRoleFollow {
+		return "follow-only"
+	}
+	return "payload"
+}
+
+func executeLineStackPlan(repoPath string, plan lineStackPlan) error {
+	for _, op := range plan.PayloadRebases {
+		fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Line Stack payload: %s", op.Handle))
+		if err := commandToStderrFn("jj", "-R", repoPath, "rebase", "-r", op.SourceRevset, "-d", op.DestinationRevset); err != nil {
+			return err
+		}
+		conflicted, err := revisionMatches(repoPath, "conflicts() & "+op.SourceRevset)
+		if err != nil {
+			return err
+		}
+		if conflicted {
+			return fmt.Errorf("Line Stacking stopped with conflicts in Workspace %q; resolve conflicts manually or undo with the printed operation id", op.Handle)
+		}
+	}
+	fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Advance Line Stack Workspaces"))
+	for _, advance := range plan.Advances {
+		if err := commandToStderrFn("jj", "-R", advance.Path, "workspace", "update-stale"); err != nil {
+			return fmt.Errorf("update stale Workspace %q before Line Stack advance: %w", advance.Handle, err)
+		}
+		if advance.InProgress {
+			if err := commandToStderrFn("jj", "-R", advance.Path, "rebase", "-r", advance.Handle+"@", "-d", plan.FinalTip); err != nil {
+				return fmt.Errorf("rebase in-progress Workspace %q to Line Stack tip: %w", advance.Handle, err)
+			}
+		} else if err := commandToStderrFn("jj", "-R", advance.Path, "new", plan.FinalTip); err != nil {
+			return fmt.Errorf("advance Workspace %q to Line Stack tip: %w", advance.Handle, err)
+		}
+		conflicted, err := workspaceHasConflictCommits(repoPath, advance.Handle)
+		if err != nil {
+			return err
+		}
+		if conflicted {
+			return fmt.Errorf("Line Stacking stopped with conflicts in Workspace %q; resolve conflicts manually or undo with the printed operation id", advance.Handle)
+		}
+	}
+	return commandToStderrFn("jj", "-R", repoPath, "workspace", "update-stale")
 }
 
 func shouldConfirmStackPlan(selectorUsed bool, yes bool, canUseTUI bool) bool {
@@ -1142,9 +1913,15 @@ func loadConfig(repoRoot string) (config, error) {
 			return config{}, err
 		}
 	}
-	localPath := filepath.Join(repoRoot, ".jjw", "config.yaml")
-	if err := mergeConfigFile(&merged, localPath); err != nil {
-		return config{}, err
+	localRoots := []string{repoRoot}
+	if defaultRoot, ok := resolveDefaultWorkspaceRoot(repoRoot); ok && filepath.Clean(defaultRoot) != filepath.Clean(repoRoot) {
+		localRoots = []string{defaultRoot, repoRoot}
+	}
+	for _, root := range localRoots {
+		localPath := filepath.Join(root, ".jjw", "config.yaml")
+		if err := mergeConfigFile(&merged, localPath); err != nil {
+			return config{}, err
+		}
 	}
 	merged.WorkspacesRoot = expandPath(merged.WorkspacesRoot)
 	if strings.TrimSpace(merged.HandleStrategy) == "" {
@@ -1376,8 +2153,14 @@ func loadWorkspaceInfos(repoRoot string, cfg config, project string) ([]workspac
 	if detected, err := currentWorkspaceHandle(repoRoot, refs); err == nil {
 		current = detected
 	}
+	infos, err := workspaceInfosForRefs(repoRoot, cfg, project, refs, current)
+	return infos, current, err
+}
+
+func workspaceInfosForRefs(repoRoot string, cfg config, project string, refs []workspaceRef, current string) ([]workspaceInfo, error) {
 	graphRepoPath := workspaceGraphRepoPath(repoRoot, refs, cfg, project, current)
 	infos := make([]workspaceInfo, 0, len(refs))
+	var err error
 	for _, ref := range refs {
 		path := workspacePathForRef(repoRoot, cfg.WorkspacesRoot, project, ref, current)
 		info := workspaceInfo{Ref: ref, Path: path, Current: ref.Handle == current, Main: ref.Handle == cfg.MainWorkspace}
@@ -1388,16 +2171,16 @@ func loadWorkspaceInfos(repoRoot string, cfg config, project string) ([]workspac
 		info.External = !info.Missing && filepath.Clean(path) != canonical && !info.Main
 		info.Conflict, err = workspaceHasConflictCommits(graphRepoPath, ref.Handle)
 		if err != nil {
-			return nil, "", fmt.Errorf("probe conflict status for Workspace %q from %s: %w", ref.Handle, graphRepoPath, err)
+			return nil, fmt.Errorf("probe conflict status for Workspace %q from %s: %w", ref.Handle, graphRepoPath, err)
 		}
 		if !info.Main && cfg.MainWorkspace != "" {
 			info.Ahead, err = workspaceAheadCount(graphRepoPath, ref.Handle, cfg.MainWorkspace)
 			if err != nil {
-				return nil, "", fmt.Errorf("probe ahead status for Workspace %q from %s: %w", ref.Handle, graphRepoPath, err)
+				return nil, fmt.Errorf("probe ahead status for Workspace %q from %s: %w", ref.Handle, graphRepoPath, err)
 			}
 			info.Behind, err = workspaceBehindCount(graphRepoPath, ref.Handle, cfg.MainWorkspace)
 			if err != nil {
-				return nil, "", fmt.Errorf("probe behind status for Workspace %q from %s: %w", ref.Handle, graphRepoPath, err)
+				return nil, fmt.Errorf("probe behind status for Workspace %q from %s: %w", ref.Handle, graphRepoPath, err)
 			}
 			if info.Ahead > 0 {
 				info.Empty = false
@@ -1405,23 +2188,23 @@ func loadWorkspaceInfos(repoRoot string, cfg config, project string) ([]workspac
 			} else {
 				info.Empty, err = revisionMatches(graphRepoPath, "empty() & "+ref.Handle+"@")
 				if err != nil {
-					return nil, "", fmt.Errorf("probe empty status for Workspace %q from %s: %w", ref.Handle, graphRepoPath, err)
+					return nil, fmt.Errorf("probe empty status for Workspace %q from %s: %w", ref.Handle, graphRepoPath, err)
 				}
 				info.Stacked, err = revisionIsAncestor(graphRepoPath, ref.Handle+"@", cfg.MainWorkspace+"@")
 				if err != nil {
-					return nil, "", fmt.Errorf("probe stacked status for Workspace %q from %s: %w", ref.Handle, graphRepoPath, err)
+					return nil, fmt.Errorf("probe stacked status for Workspace %q from %s: %w", ref.Handle, graphRepoPath, err)
 				}
 			}
 		} else {
 			info.Empty, err = revisionMatches(graphRepoPath, "empty() & "+ref.Handle+"@")
 			if err != nil {
-				return nil, "", fmt.Errorf("probe empty status for Workspace %q from %s: %w", ref.Handle, graphRepoPath, err)
+				return nil, fmt.Errorf("probe empty status for Workspace %q from %s: %w", ref.Handle, graphRepoPath, err)
 			}
 		}
 		infos = append(infos, info)
 	}
 	sortWorkspaceInfos(infos)
-	return infos, current, nil
+	return infos, nil
 }
 
 func sortWorkspaceInfos(infos []workspaceInfo) {
@@ -1690,7 +2473,7 @@ func markers(info workspaceInfo) []string {
 	return out
 }
 
-func closeWorkspaces(repoRoot string, cfg config, project string, targets []workspaceInfo, force bool, yes bool) ([]string, error) {
+func closeWorkspaces(repoPath string, targets []workspaceInfo, force bool, yes bool) ([]string, error) {
 	closed := []string{}
 	externalTargets := []workspaceInfo{}
 	for _, info := range targets {
@@ -1706,11 +2489,11 @@ func closeWorkspaces(repoRoot string, cfg config, project string, targets []work
 	}
 	for _, info := range targets {
 		if force {
-			if err := abandonUniqueMutableChanges(repoRoot, info.Ref.Handle); err != nil {
+			if err := abandonUniqueMutableChanges(repoPath, info.Ref.Handle); err != nil {
 				return closed, err
 			}
 		}
-		if err := commandToStderrFn("jj", "-R", repoRoot, "workspace", "forget", info.Ref.Handle); err != nil {
+		if err := commandToStderrFn("jj", "-R", repoPath, "workspace", "forget", info.Ref.Handle); err != nil {
 			return closed, err
 		}
 		if err := os.RemoveAll(info.Path); err != nil {
@@ -2008,17 +2791,30 @@ func revisionMatches(repoPath, revset string) (bool, error) {
 }
 
 func revisionCount(repoPath, revset string) (int, error) {
-	out, err := commandCaptureFn("jj", "-R", repoPath, "--ignore-working-copy", "log", "-r", revset, "--no-graph", "-T", "change_id.short() ++ \"\\n\"")
+	ids, err := revisionChangeIDs(repoPath, revset)
 	if err != nil {
 		return 0, err
 	}
-	count := 0
-	for _, line := range strings.Split(out, "\n") {
-		if strings.TrimSpace(line) != "" {
-			count++
-		}
+	return len(ids), nil
+}
+
+func revisionChangeIDs(repoPath, revset string) ([]string, error) {
+	out, err := commandCaptureFn("jj", "-R", repoPath, "--ignore-working-copy", "log", "-r", revset, "--no-graph", "-T", "change_id.short() ++ \"\\n\"")
+	if err != nil {
+		return nil, err
 	}
-	return count, nil
+	return uniqueNonEmptyStrings(strings.Split(out, "\n")), nil
+}
+
+func revsetUnion(revs []string) string {
+	revs = uniqueNonEmptyStrings(revs)
+	if len(revs) == 0 {
+		return "none()"
+	}
+	if len(revs) == 1 {
+		return revs[0]
+	}
+	return "(" + strings.Join(revs, " | ") + ")"
 }
 
 func currentOperationID(repoPath string) (string, error) {
@@ -2228,16 +3024,36 @@ func mainWorkspaceRoot(repoRoot string) string {
 	return repoRoot
 }
 
-func materializeAssimilatedFolders(mainPath string, workspacePath string, cfg config, project string) error {
-	mainPath = filepath.Clean(mainPath)
-	workspacePath = filepath.Clean(workspacePath)
-	if mainPath == workspacePath {
-		return nil
-	}
-	paths, err := expandAssimilatedPaths(mainPath, effectiveAssimilatedPaths(cfg, project))
+type assimilatedSymlink struct {
+	Source string
+	Dest   string
+}
+
+func materializeAndReportAssimilatedFolders(mainPath string, workspacePath string, cfg config, project string) error {
+	links, err := materializeAssimilatedFolderSymlinks(mainPath, workspacePath, cfg, project)
 	if err != nil {
 		return err
 	}
+	printAssimilatedSymlinks(links)
+	return nil
+}
+
+func materializeAssimilatedFolders(mainPath string, workspacePath string, cfg config, project string) error {
+	_, err := materializeAssimilatedFolderSymlinks(mainPath, workspacePath, cfg, project)
+	return err
+}
+
+func materializeAssimilatedFolderSymlinks(mainPath string, workspacePath string, cfg config, project string) ([]assimilatedSymlink, error) {
+	mainPath = filepath.Clean(mainPath)
+	workspacePath = filepath.Clean(workspacePath)
+	if mainPath == workspacePath {
+		return nil, nil
+	}
+	paths, err := expandAssimilatedPaths(mainPath, effectiveAssimilatedPaths(cfg, project))
+	if err != nil {
+		return nil, err
+	}
+	links := []assimilatedSymlink{}
 	symlinkedDirs := []string{}
 	for _, path := range paths {
 		if isWithinAssimilatedDir(path, symlinkedDirs) {
@@ -2249,20 +3065,30 @@ func materializeAssimilatedFolders(mainPath string, workspacePath string, cfg co
 			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
-			return fmt.Errorf("stat assimilated path source %s: %w", source, err)
+			return nil, fmt.Errorf("stat assimilated path source %s: %w", source, err)
 		}
 		if !st.IsDir() && !st.Mode().IsRegular() {
-			return fmt.Errorf("assimilated path source is not a regular file or directory: %s", source)
+			return nil, fmt.Errorf("assimilated path source is not a regular file or directory: %s", source)
 		}
 		dest := filepath.Join(workspacePath, path)
-		if err := ensureAssimilatedSymlink(source, dest); err != nil {
-			return err
+		created, err := ensureAssimilatedSymlink(source, dest)
+		if err != nil {
+			return nil, err
+		}
+		if created {
+			links = append(links, assimilatedSymlink{Source: source, Dest: dest})
 		}
 		if st.IsDir() {
 			symlinkedDirs = append(symlinkedDirs, path)
 		}
 	}
-	return nil
+	return links, nil
+}
+
+func printAssimilatedSymlinks(links []assimilatedSymlink) {
+	for _, link := range links {
+		fmt.Fprintf(stderrWriter, "Linked assimilated path: %s -> %s\n", link.Dest, link.Source)
+	}
 }
 
 func isWithinAssimilatedDir(candidate string, dirs []string) bool {
@@ -2361,32 +3187,32 @@ func matchAssimilatedGlobParts(patternParts []string, nameParts []string) (bool,
 	return matchAssimilatedGlobParts(patternParts[1:], nameParts[1:])
 }
 
-func ensureAssimilatedSymlink(source string, dest string) error {
+func ensureAssimilatedSymlink(source string, dest string) (bool, error) {
 	if st, err := os.Lstat(dest); err == nil {
 		if st.Mode()&os.ModeSymlink == 0 {
-			return fmt.Errorf("refusing to replace existing Workspace content with assimilated path symlink: %s", dest)
+			return false, fmt.Errorf("refusing to replace existing Workspace content with assimilated path symlink: %s", dest)
 		}
 		target, err := os.Readlink(dest)
 		if err != nil {
-			return fmt.Errorf("read assimilated path symlink %s: %w", dest, err)
+			return false, fmt.Errorf("read assimilated path symlink %s: %w", dest, err)
 		}
 		if !filepath.IsAbs(target) {
 			target = filepath.Clean(filepath.Join(filepath.Dir(dest), target))
 		}
 		if filepath.Clean(target) != filepath.Clean(source) {
-			return fmt.Errorf("refusing to replace existing Workspace symlink %s -> %s with assimilated path source %s", dest, target, source)
+			return false, fmt.Errorf("refusing to replace existing Workspace symlink %s -> %s with assimilated path source %s", dest, target, source)
 		}
-		return nil
+		return false, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("stat assimilated path destination %s: %w", dest, err)
+		return false, fmt.Errorf("stat assimilated path destination %s: %w", dest, err)
 	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-		return fmt.Errorf("create assimilated path parent: %w", err)
+		return false, fmt.Errorf("create assimilated path parent: %w", err)
 	}
 	if err := os.Symlink(source, dest); err != nil {
-		return fmt.Errorf("symlink assimilated path %s -> %s: %w", dest, source, err)
+		return false, fmt.Errorf("symlink assimilated path %s -> %s: %w", dest, source, err)
 	}
-	return nil
+	return true, nil
 }
 
 func resolveRepoRoot(override string) (string, error) {
@@ -2462,20 +3288,34 @@ func listWorkspaceRefs(repoRoot string) ([]workspaceRef, error) {
 
 func currentWorkspaceHandle(repoRoot string, refs []workspaceRef) (string, error) {
 	cleanRepoRoot := filepath.Clean(repoRoot)
+	rootMatches := []string{}
 	for _, ref := range refs {
 		if strings.TrimSpace(ref.Root) != "" && filepath.Clean(ref.Root) == cleanRepoRoot {
-			return ref.Handle, nil
+			rootMatches = append(rootMatches, ref.Handle)
 		}
+	}
+	if len(rootMatches) == 1 {
+		return rootMatches[0], nil
+	}
+	if len(rootMatches) > 1 {
+		return "", fmt.Errorf("ambiguous Current Workspace for %s: %s", repoRoot, strings.Join(rootMatches, ", "))
 	}
 	out, err := commandCaptureFn("jj", "-R", repoRoot, "log", "-r", "@", "--no-graph", "-T", "change_id.short() ++ \"\\n\"")
 	if err != nil {
 		return "", err
 	}
 	current := strings.TrimSpace(out)
+	changeMatches := []string{}
 	for _, ref := range refs {
 		if ref.TargetChange == current {
-			return ref.Handle, nil
+			changeMatches = append(changeMatches, ref.Handle)
 		}
+	}
+	if len(changeMatches) == 1 {
+		return changeMatches[0], nil
+	}
+	if len(changeMatches) > 1 {
+		return "", fmt.Errorf("ambiguous Current Workspace for change %s: %s", current, strings.Join(changeMatches, ", "))
 	}
 	return "", errors.New("could not detect Current Workspace")
 }
@@ -2764,11 +3604,17 @@ const (
 	selectorMulti
 )
 
+const (
+	selectorRolePayload = "payload"
+	selectorRoleFollow  = "follow"
+)
+
 type selectorItem struct {
 	Handle   string
 	Path     string
 	Status   string
 	Markers  string
+	Role     string
 	Disabled bool
 	All      bool
 }
@@ -2780,6 +3626,8 @@ type selectorOptions struct {
 	AllDefault       bool
 	ForceEnabled     bool
 	AllowForceToggle bool
+	OrderedSelection bool
+	AllowRoleToggle  bool
 	StackOptions     stackConfig
 }
 
@@ -2790,17 +3638,19 @@ type selectorResult struct {
 }
 
 type selectorModel struct {
-	opts     selectorOptions
-	cursor   int
-	selected map[int]bool
-	filter   string
-	result   selectorResult
-	cancel   bool
-	width    int
+	opts          selectorOptions
+	cursor        int
+	selected      map[int]bool
+	selectedOrder []int
+	selectedRoles map[int]string
+	filter        string
+	result        selectorResult
+	cancel        bool
+	width         int
 }
 
 func runSelector(opts selectorOptions) ([]selectorItem, selectorOptions, error) {
-	model := selectorModel{opts: opts, selected: map[int]bool{}, width: 100}
+	model := selectorModel{opts: opts, selected: map[int]bool{}, selectedRoles: map[int]string{}, width: 100}
 	program := tea.NewProgram(model, tea.WithInput(stdinReader), tea.WithOutput(stderrWriter))
 	out, err := program.Run()
 	if err != nil {
@@ -2846,11 +3696,7 @@ func (m selectorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.opts.Mode == selectorMulti {
 				visible := m.visibleItems()
 				if m.cursor >= 0 && m.cursor < len(visible) {
-					idx := visible[m.cursor]
-					item := m.opts.Items[idx]
-					if !item.Disabled && !item.All {
-						m.selected[idx] = !m.selected[idx]
-					}
+					m.toggleSelection(visible[m.cursor])
 				}
 			}
 		case "enter":
@@ -2875,6 +3721,13 @@ func (m selectorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.opts.StackOptions.RebaseMode = cycle(m.opts.StackOptions.RebaseMode, []string{"auto", "branch", "revision"})
 		case "c":
 			m.opts.StackOptions.ConflictStrategy = cycle(m.opts.StackOptions.ConflictStrategy, []string{"prefer-clean", "off"})
+		case "a":
+			if m.opts.AllowRoleToggle {
+				visible := m.visibleItems()
+				if m.cursor >= 0 && m.cursor < len(visible) {
+					m.toggleSelectedRole(visible[m.cursor])
+				}
+			}
 		default:
 			if len(msg.String()) == 1 {
 				r := []rune(msg.String())[0]
@@ -2886,6 +3739,67 @@ func (m selectorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+func (m *selectorModel) toggleSelection(idx int) {
+	if idx < 0 || idx >= len(m.opts.Items) {
+		return
+	}
+	item := m.opts.Items[idx]
+	if item.Disabled || item.All {
+		return
+	}
+	if m.selected == nil {
+		m.selected = map[int]bool{}
+	}
+	if m.selected[idx] {
+		delete(m.selected, idx)
+		delete(m.selectedRoles, idx)
+		m.selectedOrder = removeInt(m.selectedOrder, idx)
+		return
+	}
+	m.selected[idx] = true
+	if m.opts.OrderedSelection {
+		m.selectedOrder = append(m.selectedOrder, idx)
+	}
+}
+
+func (m *selectorModel) toggleSelectedRole(idx int) {
+	if idx < 0 || idx >= len(m.opts.Items) || !m.selected[idx] {
+		return
+	}
+	if m.selectedRoles == nil {
+		m.selectedRoles = map[int]string{}
+	}
+	if m.selectedRole(idx) == selectorRoleFollow {
+		m.selectedRoles[idx] = selectorRolePayload
+	} else {
+		m.selectedRoles[idx] = selectorRoleFollow
+	}
+}
+
+func (m selectorModel) selectedRole(idx int) string {
+	if m.selectedRoles != nil {
+		if role := strings.TrimSpace(m.selectedRoles[idx]); role != "" {
+			return role
+		}
+	}
+	if idx >= 0 && idx < len(m.opts.Items) {
+		if role := strings.TrimSpace(m.opts.Items[idx].Role); role != "" {
+			return role
+		}
+	}
+	return selectorRolePayload
+}
+
+func removeInt(items []int, value int) []int {
+	out := items[:0]
+	for _, item := range items {
+		if item != value {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func (m selectorModel) submit() selectorModel {
@@ -2933,13 +3847,54 @@ func (m selectorModel) submit() selectorModel {
 }
 
 func (m selectorModel) selectedItems() []selectorItem {
+	if m.opts.OrderedSelection {
+		items := []selectorItem{}
+		seen := map[int]bool{}
+		for _, idx := range m.selectedOrder {
+			if idx < 0 || idx >= len(m.opts.Items) || seen[idx] {
+				continue
+			}
+			seen[idx] = true
+			if m.selected[idx] && !m.opts.Items[idx].Disabled && !m.opts.Items[idx].All {
+				item := m.opts.Items[idx]
+				item.Role = m.selectedRole(idx)
+				items = append(items, item)
+			}
+		}
+		return items
+	}
 	items := []selectorItem{}
 	for idx, item := range m.opts.Items {
 		if m.selected[idx] && !item.Disabled && !item.All {
+			item.Role = m.selectedRole(idx)
 			items = append(items, item)
 		}
 	}
 	return items
+}
+
+func (m selectorModel) selectedOrdinal(idx int) int {
+	if !m.opts.OrderedSelection {
+		return 0
+	}
+	ordinal := 1
+	for _, selectedIdx := range m.selectedOrder {
+		if selectedIdx < 0 || selectedIdx >= len(m.opts.Items) || !m.selected[selectedIdx] || m.opts.Items[selectedIdx].Disabled || m.opts.Items[selectedIdx].All {
+			continue
+		}
+		if selectedIdx == idx {
+			return ordinal
+		}
+		ordinal++
+	}
+	return 0
+}
+
+func selectorRoleInitial(role string) string {
+	if strings.TrimSpace(role) == selectorRoleFollow {
+		return "F"
+	}
+	return "P"
 }
 
 func (m selectorModel) View() string {
@@ -2951,6 +3906,7 @@ func (m selectorModel) View() string {
 		fmt.Fprintln(&b, styles.Help.Render("filter: "+m.filter))
 	}
 	visible := m.visibleItems()
+	widths := selectorColumnWidthsForItems(m.opts.Items, visible)
 	cursor := m.cursor
 	if cursor >= len(visible) && len(visible) > 0 {
 		cursor = len(visible) - 1
@@ -2960,6 +3916,7 @@ func (m selectorModel) View() string {
 	}
 	for row, idx := range visible {
 		item := m.opts.Items[idx]
+		displayItem := item
 		pointer := "  "
 		if row == cursor {
 			pointer = "> "
@@ -2968,10 +3925,14 @@ func (m selectorModel) View() string {
 		if m.opts.Mode == selectorMulti && !item.All {
 			mark = "[ ] "
 			if m.selected[idx] {
-				mark = "[x] "
+				if m.opts.OrderedSelection {
+					mark = fmt.Sprintf("[%d:%s] ", max(1, m.selectedOrdinal(idx)), selectorRoleInitial(m.selectedRole(idx)))
+				} else {
+					mark = "[x] "
+				}
 			}
 		}
-		line := fmt.Sprintf("%s%s%-14s %-10s %-18s %s", pointer, mark, item.Handle, item.Status, item.Markers, item.Path)
+		line := formatSelectorItemLine(pointer, mark, displayItem, widths)
 		if item.Disabled {
 			line = styles.Disabled.Render(line)
 		} else if row == m.cursor {
@@ -2991,6 +3952,9 @@ func (m selectorModel) View() string {
 	if m.opts.AllowForceToggle {
 		footer += fmt.Sprintf("  f force:%v", m.opts.ForceEnabled)
 	}
+	if m.opts.AllowRoleToggle {
+		footer += "  a toggle payload/follow-only"
+	}
 	if m.opts.StackOptions.Shape != "" || m.opts.StackOptions.RebaseMode != "" || m.opts.StackOptions.ConflictStrategy != "" {
 		footer += fmt.Sprintf("  s shape:%s  r rebase:%s  c conflicts:%s", emptyDefault(m.opts.StackOptions.Shape, "auto"), emptyDefault(m.opts.StackOptions.RebaseMode, "auto"), emptyDefault(m.opts.StackOptions.ConflictStrategy, "prefer-clean"))
 	}
@@ -2998,7 +3962,44 @@ func (m selectorModel) View() string {
 	return b.String()
 }
 
+type selectorColumnWidths struct {
+	Handle  int
+	Status  int
+	Markers int
+}
+
+const (
+	selectorHandleMinWidth  = 14
+	selectorStatusMinWidth  = 10
+	selectorMarkersMinWidth = 18
+)
+
+func selectorColumnWidthsForItems(items []selectorItem, visible []int) selectorColumnWidths {
+	widths := selectorColumnWidths{Handle: selectorHandleMinWidth, Status: selectorStatusMinWidth, Markers: selectorMarkersMinWidth}
+	for _, idx := range visible {
+		if idx < 0 || idx >= len(items) {
+			continue
+		}
+		item := items[idx]
+		widths.Handle = max(widths.Handle, lipgloss.Width(item.Handle))
+		widths.Status = max(widths.Status, lipgloss.Width(item.Status))
+		widths.Markers = max(widths.Markers, lipgloss.Width(item.Markers))
+	}
+	return widths
+}
+
+func formatSelectorItemLine(pointer string, mark string, item selectorItem, widths selectorColumnWidths) string {
+	line := pointer + mark + padVisible(item.Handle, widths.Handle) + " " + padVisible(item.Status, widths.Status) + " " + padVisible(item.Markers, widths.Markers)
+	if item.Path != "" {
+		line += " " + item.Path
+	}
+	return line
+}
+
 func selectorLegend(opts selectorOptions) string {
+	if opts.OrderedSelection {
+		return "status: selection order defines the line; P = payload, F = follow-only; missing rows are disabled"
+	}
 	if opts.AllDefault {
 		return "status: unstacked/conflict = stack-relevant; stacked/empty/missing = shown for context"
 	}
@@ -3011,6 +4012,9 @@ func selectorLegend(opts selectorOptions) string {
 func selectorHint(opts selectorOptions) string {
 	if opts.Mode == selectorSingle {
 		return "Choose the Workspace to open. Type to filter by handle, status, marker, or path."
+	}
+	if opts.OrderedSelection {
+		return "Choose Line Stacking order. Space selects in order; press a on a selected row to toggle payload/follow-only."
 	}
 	if opts.AllDefault {
 		return "Choose Stack Inputs. The All row submits every stack-relevant Workspace only when no boxes are checked. Disabled rows are shown for context."
@@ -3053,12 +4057,25 @@ func selectorItemsForClose(infos []workspaceInfo, force bool) []selectorItem {
 }
 
 func selectorItemsForStack(infos []workspaceInfo) []selectorItem {
+	return selectorItemsForStackWithTarget(infos, stackTargetResolution{})
+}
+
+func selectorItemsForStackWithTarget(infos []workspaceInfo, target stackTargetResolution) []selectorItem {
 	items := []selectorItem{{Handle: "All", Status: "default", Markers: "stack-relevant", All: true}}
 	for _, info := range infos {
 		if info.Main {
 			continue
 		}
-		items = append(items, selectorItem{Handle: info.Ref.Handle, Path: info.Path, Status: statusLabel(info), Markers: strings.Join(markers(info), ","), Disabled: !isStackRelevant(info)})
+		disabled := !isStackRelevant(info) || stackInputProtectedByTarget(info, target)
+		items = append(items, selectorItem{Handle: info.Ref.Handle, Path: info.Path, Status: statusLabel(info), Markers: strings.Join(markers(info), ","), Disabled: disabled})
+	}
+	return items
+}
+
+func selectorItemsForLineStack(infos []workspaceInfo) []selectorItem {
+	items := make([]selectorItem, 0, len(infos))
+	for _, info := range infos {
+		items = append(items, selectorItem{Handle: info.Ref.Handle, Path: info.Path, Status: statusLabel(info), Markers: strings.Join(markers(info), ","), Role: lineStackRoleForInfo(info), Disabled: info.Missing})
 	}
 	return items
 }
@@ -3138,6 +4155,7 @@ func emptyDefault(value, def string) string {
 
 func runCommandCapture(name string, args ...string) (string, error) {
 	cmd := exec.Command(name, args...)
+	setCommandWorkingDir(cmd, name, args...)
 	var out bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &out
@@ -3154,10 +4172,57 @@ func runCommandCapture(name string, args ...string) (string, error) {
 
 func runCommandToStderr(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
+	setCommandWorkingDir(cmd, name, args...)
 	cmd.Stdout = stderrWriter
 	cmd.Stderr = stderrWriter
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("%s %s failed: %w", name, strings.Join(args, " "), err)
 	}
 	return nil
+}
+
+func setCommandWorkingDir(cmd *exec.Cmd, name string, args ...string) {
+	if dir := commandWorkingDir(name, args...); dir != "" {
+		cmd.Dir = dir
+	}
+}
+
+func commandWorkingDir(name string, args ...string) string {
+	base := filepath.Base(name)
+	if base != "jj" && base != "jj.exe" {
+		return ""
+	}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-R" || arg == "--repository":
+			if i+1 >= len(args) {
+				return ""
+			}
+			return existingCommandDir(args[i+1])
+		case strings.HasPrefix(arg, "--repository="):
+			return existingCommandDir(strings.TrimPrefix(arg, "--repository="))
+		}
+	}
+	return ""
+}
+
+func existingCommandDir(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	path = expandPath(path)
+	if !filepath.IsAbs(path) {
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return ""
+		}
+		path = abs
+	}
+	path = filepath.Clean(path)
+	if st, err := os.Stat(path); err == nil && st.IsDir() {
+		return path
+	}
+	return ""
 }

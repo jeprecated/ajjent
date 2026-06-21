@@ -25,12 +25,24 @@ The Workspace used to integrate the other Workspaces for review, building, or te
 _Avoid_: Default workspace
 
 **Stacking**:
-Bringing selected non-main Workspaces together into the Main Workspace for review, building, or testing.
+Bringing selected Workspaces together for review, building, or testing. Main-targeted Stacking brings selected non-main Workspaces into the Main Workspace; Line Stacking brings ordered selected Workspaces onto one line without implying every Workspace should participate.
 _Avoid_: Integrating, collecting, composing
 
+**Line Stacking**:
+An ordered variant of Stacking that uses CLI argument order or TUI selection order to place selected Workspaces on one line while leaving omitted Workspaces untouched.
+_Avoid_: Rebasing all workspaces, merging everything
+
 **Stack Inputs**:
-The selected or explicitly named stack-relevant non-main Workspaces used for Stacking.
+The selected or explicitly named Workspaces used for Stacking. For Main-targeted Stacking, Stack Inputs are non-main stack-relevant Workspaces; for Line Stacking, Stack Inputs are ordered and may include follow-only Workspaces.
 _Avoid_: All workspaces
+
+**Follow-only Workspace**:
+A selected Line Stacking Workspace whose Workspace head should advance to the final Line Stacking tip without contributing payload commits.
+_Avoid_: Empty branch, dummy workspace
+
+**In-progress Workspace Head**:
+A non-empty Workspace head with no description, representing working-copy state that should stay with that Workspace. Line Stacking excludes it from payload commits and rebases it on top of the final line.
+_Avoid_: Uncommitted branch, payload commit
 
 **Creating**:
 Starting a new Workspace.
@@ -69,9 +81,12 @@ _Avoid_: Disposable workspace
 - A **Project** may identify one **Current Workspace** for a user action.
 - A **Project** may identify one **Main Workspace**.
 - A **Main Workspace** is also a **Workspace**.
-- **Stacking** targets the **Main Workspace**.
+- Main-targeted **Stacking** targets the **Main Workspace**.
+- **Line Stacking** targets an ordered line determined by **Stack Input** order, not necessarily the **Main Workspace**.
 - **Stacking** uses one or more **Stack Inputs**.
-- **Stack Inputs** are non-main **Workspaces**.
+- Main-targeted **Stack Inputs** are non-main **Workspaces**.
+- **Line Stacking** **Stack Inputs** are ordered **Workspaces** identified by **Workspace Handles**.
+- **Line Stacking** keeps an **In-progress Workspace Head** out of the payload line and rebases it onto the final Line Stacking tip.
 - **Creating** produces one **Workspace**.
 - **Opening** applies to an existing **Workspace**.
 - **Closing** applies only to a non-main **Workspace**.
@@ -93,7 +108,7 @@ _Avoid_: Disposable workspace
 - "app" was used for the folder grouping **Workspaces** for a repo; resolved: the user-facing concept is **Project**, and legacy app/worktree naming should be hard-renamed rather than kept as compatibility vocabulary.
 - "default workspace" was used both as a role and as a workspace name; resolved: the role is **Main Workspace**, while `default` is only the conventional name.
 - "stack" was considered overloaded with change-stack language; resolved: **Stacking** is the canonical name for bringing non-main **Workspaces** into the **Main Workspace**.
-- The code currently stacks every non-main **Workspace**; resolved SHOULD behavior: **Stacking** uses selected **Stack Inputs**, with unstacked/conflict-relevant Workspaces offered as the default immediate choice while already **Stacked Workspaces** remain visible.
+- The code currently stacks every non-main **Workspace**; resolved SHOULD behavior: Main-targeted **Stacking** uses selected **Stack Inputs**, with unstacked/conflict-relevant Workspaces offered as the default immediate choice while already **Stacked Workspaces** remain visible.
 - Workspace names could mean either task labels or reusable handles; resolved: the primary concept is **Workspace Handle**, a reusable short label, and config should prefer explicit `workspace_handles` vocabulary.
 - `stateful` described handle selection by implementation detail; resolved: the user-facing strategy is `next-unused`.
 - Explicit handles were previously only checked for emptiness; resolved: a **Workspace Handle** must be a safe single path segment.
@@ -109,3 +124,4 @@ _Avoid_: Disposable workspace
 - Workspaces with unresolved conflicts could be closed if graph-safe; resolved: unresolved conflicts require **Forced Closing**, including after a conflicted Stack result.
 - The phrase "force close" was ambiguous between bypassing safety and deleting work; resolved: **Forced Closing** abandons unique mutable changes, even though `--discard` was rejected as the flag name.
 - Stack selection should show raw status or domain states; resolved: status is communicated with domain-level states such as empty, unstacked, stacked, conflict, and missing.
+- Ordered arbitrary Workspace stacking could either replace Main-targeted **Stacking** or be a distinct mode; resolved by ADR 0008: **Line Stacking** is an ordered variant under `jjw stack --line`, while Main-targeted **Stacking** keeps its existing meaning.
