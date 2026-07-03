@@ -149,6 +149,8 @@ func run(args []string) error {
 		return runTidy(commandArgs)
 	case "stack":
 		return runStack(commandArgs)
+	case "move-to-main", "catch-up":
+		return runMoveToMain(commandArgs)
 	case "help", "-h", "--help":
 		printUsage(stdoutWriter)
 		return nil
@@ -205,7 +207,7 @@ func countRepoFlags(args []string) int {
 
 func commandAcceptsRepoFlag(command string) bool {
 	switch command {
-	case "init", "create", "open", "list", "main", "close", "tidy", "stack":
+	case "init", "create", "open", "list", "main", "close", "tidy", "stack", "move-to-main", "catch-up":
 		return true
 	default:
 		return false
@@ -232,6 +234,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, s.Section.Render("Stacking:"))
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "stack [handle...]", 18), "Stack selected Workspaces into the target Workspace; with no handles, use the selector")
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "stack --line [handle...]", 18), "Line Stack selected Workspaces in explicit order")
+	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "move-to-main [handle...]", 18), "Move selected tidy Workspace cursors up to the Main Workspace line")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, s.Section.Render("Inspect and housekeeping:"))
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "list", 18), "List Workspaces with status and markers")
@@ -1076,6 +1079,168 @@ func rejectTargetWorkspaceInput(handle string) error {
 
 func stackInputProtectedByTarget(info workspaceInfo, target stackTargetResolution) bool {
 	return target.FromCurrent && target.ConfiguredMain != "" && target.ConfiguredMain != target.Handle && info.Ref.Handle == target.ConfiguredMain
+}
+
+func runMoveToMain(args []string) error {
+	var err error
+	args, err = normalizePositionalsLast(args, map[string]struct{}{"--repo": {}, "--project": {}, "--workspaces-root": {}})
+	if err != nil {
+		return err
+	}
+	fs := flag.NewFlagSet("move-to-main", flag.ContinueOnError)
+	var repoRootOverride, projectOverride, rootOverride string
+	var all, yes bool
+	fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
+	fs.StringVar(&projectOverride, "project", "", "Project override")
+	fs.StringVar(&rootOverride, "workspaces-root", "", "Workspaces root override")
+	fs.BoolVar(&all, "all", false, "move all movable Workspaces")
+	fs.BoolVar(&yes, "yes", false, "skip confirmation prompts")
+	if handled, err := parseCommandFlags(fs, args, "jjw move-to-main [handle...] [options]", "Move selected tidy Workspace cursors to the current Main Workspace line. If the Main Workspace head is empty, selected Workspaces are moved to main@- so they become siblings of the Main Workspace cursor."); handled || err != nil {
+		return err
+	}
+	positionals := fs.Args()
+	if all && len(positionals) > 0 {
+		return errors.New("provide either --all or Workspace Handles, not both")
+	}
+	repoRoot, cfg, project, err := commandContext(repoRootOverride, projectOverride, rootOverride)
+	if err != nil {
+		return err
+	}
+	infos, _, err := loadWorkspaceInfos(repoRoot, cfg, project)
+	if err != nil {
+		return err
+	}
+	byHandle := mapInfosByHandle(infos)
+	mainInfo, ok := byHandle[cfg.MainWorkspace]
+	if !ok {
+		return fmt.Errorf("Main Workspace %q not found", cfg.MainWorkspace)
+	}
+	if mainInfo.Missing {
+		return fmt.Errorf("Main Workspace path missing: %s", mainInfo.Path)
+	}
+	if mainInfo.Conflict {
+		return fmt.Errorf("Main Workspace %q has conflicts; resolve them before moving other Workspaces to it", cfg.MainWorkspace)
+	}
+	targets := []workspaceInfo{}
+	if all {
+		for _, info := range infos {
+			if isMovableToMain(info) {
+				targets = append(targets, info)
+			}
+		}
+	} else if len(positionals) > 0 {
+		for _, h := range positionals {
+			h = strings.TrimSpace(h)
+			if err := validateWorkspaceHandle(h); err != nil {
+				return err
+			}
+			info, ok := byHandle[h]
+			if !ok {
+				return fmt.Errorf("Workspace %q not found", h)
+			}
+			if err := validateMoveToMainTarget(info); err != nil {
+				return err
+			}
+			targets = append(targets, info)
+		}
+	} else {
+		if !canUseTUI() {
+			return errors.New("move-to-main requires Workspace Handles or --all when not running in a terminal")
+		}
+		items := selectorItemsForMoveToMain(infos)
+		selected, _, err := runSelector(selectorOptions{Title: "Move Workspaces to Main", Mode: selectorMulti, Items: items, MoveToMain: true})
+		if err != nil {
+			return err
+		}
+		for _, item := range selected {
+			if info, ok := byHandle[item.Handle]; ok {
+				targets = append(targets, info)
+			}
+		}
+	}
+	targets = uniqueWorkspaceInfos(targets)
+	if len(targets) == 0 {
+		fmt.Fprintln(stderrWriter, cliStylesForWriter(stderrWriter).Muted.Render("No Workspaces to move to Main."))
+		return nil
+	}
+	destination := moveToMainDestinationRevset(mainInfo)
+	if !yes && canUseTUI() {
+		ok, err := confirm(moveToMainPrompt(targets, destination))
+		if err != nil || !ok {
+			fmt.Fprintln(stderrWriter, cliStylesForWriter(stderrWriter).Muted.Render("Move to Main cancelled."))
+			return err
+		}
+	}
+	undoOpID, err := currentOperationID(mainInfo.Path)
+	if err != nil {
+		return fmt.Errorf("record pre-Move operation id: %w", err)
+	}
+	fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Move Workspaces to %s", destination))
+	for _, info := range targets {
+		if err := commandToStderrFn("jj", "-R", info.Path, "workspace", "update-stale"); err != nil {
+			return fmt.Errorf("update stale Workspace %q before move: %w", info.Ref.Handle, err)
+		}
+		if err := commandToStderrFn("jj", "-R", info.Path, "new", destination); err != nil {
+			return fmt.Errorf("move Workspace %q to Main: %w", info.Ref.Handle, err)
+		}
+	}
+	if err := commandToStderrFn("jj", "-R", mainInfo.Path, "workspace", "update-stale"); err != nil {
+		return err
+	}
+	printStackUndoHint(undoOpID)
+	return nil
+}
+
+func isMovableToMain(info workspaceInfo) bool {
+	return !info.Main && !info.Missing && !info.Conflict && info.Ahead == 0 && info.Behind > 0
+}
+
+func validateMoveToMainTarget(info workspaceInfo) error {
+	if info.Main {
+		return fmt.Errorf("Workspace %q is the Main Workspace", info.Ref.Handle)
+	}
+	if info.Missing {
+		return fmt.Errorf("Workspace %q path missing: %s", info.Ref.Handle, info.Path)
+	}
+	if info.Conflict {
+		return fmt.Errorf("Workspace %q has conflicts; resolve or Stack it before moving to Main", info.Ref.Handle)
+	}
+	if info.Ahead > 0 {
+		return fmt.Errorf("Workspace %q has unique non-empty commits; Stack or Line Stack it before moving to Main", info.Ref.Handle)
+	}
+	if info.Behind == 0 {
+		return fmt.Errorf("Workspace %q is already on the Main Workspace line", info.Ref.Handle)
+	}
+	return nil
+}
+
+func moveToMainDestinationRevset(mainInfo workspaceInfo) string {
+	if mainInfo.Empty {
+		return mainInfo.Ref.Handle + "@-"
+	}
+	return mainInfo.Ref.Handle + "@"
+}
+
+func moveToMainPrompt(targets []workspaceInfo, destination string) string {
+	handles := make([]string, 0, len(targets))
+	for _, info := range targets {
+		handles = append(handles, info.Ref.Handle)
+	}
+	return fmt.Sprintf("Move %d Workspace(s) to %s: %s. Continue? [y/N]: ", len(targets), destination, strings.Join(handles, ", "))
+}
+
+func uniqueWorkspaceInfos(infos []workspaceInfo) []workspaceInfo {
+	seen := map[string]bool{}
+	out := make([]workspaceInfo, 0, len(infos))
+	for _, info := range infos {
+		handle := strings.TrimSpace(info.Ref.Handle)
+		if handle == "" || seen[handle] {
+			continue
+		}
+		seen[handle] = true
+		out = append(out, info)
+	}
+	return out
 }
 
 func runStack(args []string) error {
@@ -3617,6 +3782,7 @@ type selectorItem struct {
 	Role     string
 	Disabled bool
 	All      bool
+	Selected bool
 }
 
 type selectorOptions struct {
@@ -3628,6 +3794,7 @@ type selectorOptions struct {
 	AllowForceToggle bool
 	OrderedSelection bool
 	AllowRoleToggle  bool
+	MoveToMain       bool
 	StackOptions     stackConfig
 }
 
@@ -3651,6 +3818,14 @@ type selectorModel struct {
 
 func runSelector(opts selectorOptions) ([]selectorItem, selectorOptions, error) {
 	model := selectorModel{opts: opts, selected: map[int]bool{}, selectedRoles: map[int]string{}, width: 100}
+	for i, item := range opts.Items {
+		if item.Selected && !item.Disabled && !item.All {
+			model.selected[i] = true
+			if opts.OrderedSelection {
+				model.selectedOrder = append(model.selectedOrder, i)
+			}
+		}
+	}
 	program := tea.NewProgram(model, tea.WithInput(stdinReader), tea.WithOutput(stderrWriter))
 	out, err := program.Run()
 	if err != nil {
@@ -4000,6 +4175,9 @@ func selectorLegend(opts selectorOptions) string {
 	if opts.OrderedSelection {
 		return "status: selection order defines the line; P = payload, F = follow-only; missing rows are disabled"
 	}
+	if opts.MoveToMain {
+		return "status: only Workspaces with no unique commits and behind Main are selected by default; uncheck any to leave alone"
+	}
 	if opts.AllDefault {
 		return "status: unstacked/conflict = stack-relevant; stacked/empty/missing = shown for context"
 	}
@@ -4015,6 +4193,9 @@ func selectorHint(opts selectorOptions) string {
 	}
 	if opts.OrderedSelection {
 		return "Choose Line Stacking order. Space selects in order; press a on a selected row to toggle payload/follow-only."
+	}
+	if opts.MoveToMain {
+		return "Choose Workspaces to move to the Main Workspace line. Movable rows start checked; press space to leave one alone."
 	}
 	if opts.AllDefault {
 		return "Choose Stack Inputs. The All row submits every stack-relevant Workspace only when no boxes are checked. Disabled rows are shown for context."
@@ -4070,6 +4251,28 @@ func selectorItemsForStackWithTarget(infos []workspaceInfo, target stackTargetRe
 		items = append(items, selectorItem{Handle: info.Ref.Handle, Path: info.Path, Status: statusLabel(info), Markers: strings.Join(markers(info), ","), Disabled: disabled})
 	}
 	return items
+}
+
+func selectorItemsForMoveToMain(infos []workspaceInfo) []selectorItem {
+	items := make([]selectorItem, 0, len(infos))
+	for _, info := range infos {
+		if info.Main {
+			continue
+		}
+		movable := isMovableToMain(info)
+		items = append(items, selectorItem{Handle: info.Ref.Handle, Path: info.Path, Status: moveToMainStatusLabel(info), Markers: strings.Join(markers(info), ","), Disabled: !movable, Selected: movable})
+	}
+	return items
+}
+
+func moveToMainStatusLabel(info workspaceInfo) string {
+	if isMovableToMain(info) {
+		return "move-to-main"
+	}
+	if !info.Main && !info.Missing && !info.Conflict && info.Ahead == 0 && info.Behind == 0 {
+		return "up-to-main"
+	}
+	return statusLabel(info)
 }
 
 func selectorItemsForLineStack(infos []workspaceInfo) []selectorItem {

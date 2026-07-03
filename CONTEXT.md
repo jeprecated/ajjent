@@ -40,6 +40,10 @@ _Avoid_: All workspaces
 A selected Line Stacking Workspace whose Workspace head should advance to the final Line Stacking tip without contributing payload commits.
 _Avoid_: Empty branch, dummy workspace
 
+**Moving to Main**:
+Advancing selected tidy Workspace heads with no unique non-empty commits to the current Main Workspace line, leaving Workspaces with payload commits untouched.
+_Avoid_: Restacking, rebasing all branches
+
 **In-progress Workspace Head**:
 A non-empty Workspace head with no description, representing working-copy state that should stay with that Workspace. Line Stacking excludes it from payload commits and rebases it on top of the final line.
 _Avoid_: Uncommitted branch, payload commit
@@ -87,6 +91,7 @@ _Avoid_: Disposable workspace
 - Main-targeted **Stack Inputs** are non-main **Workspaces**.
 - **Line Stacking** **Stack Inputs** are ordered **Workspaces** identified by **Workspace Handles**.
 - **Line Stacking** keeps an **In-progress Workspace Head** out of the payload line and rebases it onto the final Line Stacking tip.
+- **Moving to Main** applies to non-main **Workspaces** with no unique non-empty commits and advances their Workspace heads to the Main Workspace line.
 - **Creating** produces one **Workspace**.
 - **Opening** applies to an existing **Workspace**.
 - **Closing** applies only to a non-main **Workspace**.

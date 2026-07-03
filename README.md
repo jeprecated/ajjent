@@ -33,6 +33,8 @@ Repo-aware commands can target another checkout with either the global form `jjw
 - `jjw stack --workspace HANDLE [handle...]` — explicitly choose the target Workspace.
 - `jjw stack --all` — non-interactive equivalent of the selector's All row.
 - `jjw stack --line [handle...]` — Line Stack selected Workspaces onto one ordered line while leaving omitted Workspaces untouched.
+- `jjw move-to-main [handle...]` — move selected tidy Workspace cursors up to the Main Workspace line.
+- `jjw move-to-main --all` — non-interactively move every movable Workspace; with no handles, use the TUI.
 
 The stack target resolves in this order: explicit `--workspace`, then the current Workspace from `--repo`/cwd, then configured `main_workspace` for compatibility. This means `jjw stack child --repo /path/to/speed --yes` advances `speed@` by default; use `--workspace default` when you intentionally want to advance `default@`. When the current non-default Workspace becomes the target, `--all` does not silently include the configured `main_workspace`. JJW refuses to stack the target Workspace into itself and asks for `--workspace` when the target should be something else.
 
@@ -43,6 +45,8 @@ Stack's All row includes Workspaces with commits ahead of the target or conflict
 - `--conflict-strategy off|prefer-clean`
 
 When `prefer-clean` is used with `--stack-shape auto`, `jjw` tries the auto-selected shape, undoes on conflict, and tries the alternative shape. If every fallback conflicts, it keeps the merge-shaped conflicted Main Workspace so the conflict can be resolved there.
+
+`move-to-main` is for Workspaces that have no unique non-empty commits and are only behind the Main Workspace. The TUI starts movable rows checked so you can quickly uncheck Workspaces to leave alone. If the Main Workspace head is empty, `jjw` advances each selected Workspace with `jj new main@-`, making the Workspace cursors siblings of the Main Workspace cursor; otherwise it uses `jj new main@`.
 
 Line Stacking is an ordered variant for the common "make these selected Workspaces one line, but leave the others alone" workflow described in ADR 0008. Positional handles define the line order: the first payload Workspace is the bottom and the last payload Workspace becomes the final tip. With no handles, the TUI preserves selection order; selected rows show payload (`P`) or follow-only (`F`), and `a` toggles that role. Empty or already represented Workspaces default to follow-only so their Workspace heads move to the final tip without contributing payload commits. A non-empty Workspace head with no description is treated as in-progress working-copy state: it is excluded from the payload line and rebased on top of the final Line Stack tip. `jjw` always prints a preview to stderr with the projected log, ordered inputs, payload rebases, follow-only advances, in-progress rebases, excluded Workspaces, and the undo command; interactive runs ask for confirmation unless `--yes` is passed. If a Line Stack operation conflicts, `jjw` stops and leaves the conflicted state for manual resolution.
 
@@ -134,7 +138,7 @@ See `docs/assimilated-folders.md` for an agent-friendly setup guide.
 
 ## Interactive UX
 
-When stdin/stderr are terminals, `jjw` prefers in-place TUI interactions: selectors for `open`, `close`, and `stack`; yes/no confirmations; and prompts for missing setup values such as `init`'s Workspaces root. If you open a missing Workspace by handle, `jjw` can offer to create it immediately. TUI footers show available keys and status legends so you can toggle options (for example close force mode or advanced stack options) without re-running with extra flags.
+When stdin/stderr are terminals, `jjw` prefers in-place TUI interactions: selectors for `open`, `close`, `stack`, and `move-to-main`; yes/no confirmations; and prompts for missing setup values such as `init`'s Workspaces root. If you open a missing Workspace by handle, `jjw` can offer to create it immediately. TUI footers show available keys and status legends so you can toggle options (for example close force mode or advanced stack options) without re-running with extra flags.
 
 Human-facing output uses color on terminals and respects `NO_COLOR`. Stdout remains reserved for path/data protocols, so prompts and progress go to stderr and piped output stays plain.
 

@@ -361,8 +361,10 @@ func TestHelpMentionsLineStacking(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(topOut, "stack --line [handle...]") {
-		t.Fatalf("expected top-level help to mention Line Stacking, got %q", topOut)
+	for _, want := range []string{"stack --line [handle...]", "move-to-main [handle...]"} {
+		if !strings.Contains(topOut, want) {
+			t.Fatalf("expected top-level help to mention %q, got %q", want, topOut)
+		}
 	}
 }
 
@@ -400,6 +402,40 @@ func TestHumanFacingStylesUseOutputRendererEvenWhenStdoutIsPlain(t *testing.T) {
 	}
 	if got := selectorStylesForRenderer(renderer, false).Empty.Render("empty"); !strings.Contains(got, "\x1b[") {
 		t.Fatalf("expected selector style to use output renderer color, got %q", got)
+	}
+}
+
+func TestMoveToMainSelectorPreselectsOnlyMovableWorkspaces(t *testing.T) {
+	items := selectorItemsForMoveToMain([]workspaceInfo{
+		{Ref: workspaceRef{Handle: "default"}, Main: true},
+		{Ref: workspaceRef{Handle: "alpha"}, Empty: true, Behind: 2},
+		{Ref: workspaceRef{Handle: "bravo"}, Empty: true},
+		{Ref: workspaceRef{Handle: "meme-ledger"}, Ahead: 1, Behind: 2},
+		{Ref: workspaceRef{Handle: "missing"}, Missing: true},
+	})
+	byHandle := mapSelectorItemsByHandle(items)
+	if !byHandle["alpha"].Selected || byHandle["alpha"].Disabled || byHandle["alpha"].Status != "move-to-main" {
+		t.Fatalf("expected alpha selected as movable, got %+v", byHandle["alpha"])
+	}
+	for _, handle := range []string{"bravo", "meme-ledger", "missing"} {
+		if byHandle[handle].Selected || !byHandle[handle].Disabled {
+			t.Fatalf("expected %s disabled and not preselected, got %+v", handle, byHandle[handle])
+		}
+	}
+}
+
+func TestPreselectedMultiSelectorSubmitsDefaultCheckedRows(t *testing.T) {
+	model := selectorModel{
+		opts: selectorOptions{Mode: selectorMulti, MoveToMain: true, Items: []selectorItem{
+			{Handle: "alpha", Selected: true},
+			{Handle: "bravo", Selected: true},
+			{Handle: "meme-ledger", Disabled: true},
+		}},
+		selected: map[int]bool{0: true, 1: true},
+	}
+	model = model.submit()
+	if got := selectorHandles(model.result.Items); strings.Join(got, ",") != "alpha,bravo" {
+		t.Fatalf("expected preselected handles, got %v", got)
 	}
 }
 
@@ -856,6 +892,70 @@ func TestListIncludesCurrentAndMainMarkers(t *testing.T) {
 	}
 	if !strings.Contains(out, "default\tmain") || !strings.Contains(out, "alpha\tcurrent") {
 		t.Fatalf("expected main and current markers, got %q", out)
+	}
+}
+
+func TestRunMoveToMainAllMovesOnlyBehindTidyWorkspaces(t *testing.T) {
+	workspacesRoot := filepath.Join(t.TempDir(), "workspaces")
+	mainPath := filepath.Join(workspacesRoot, "proj", "default")
+	alphaPath := filepath.Join(workspacesRoot, "proj", "alpha")
+	memePath := filepath.Join(workspacesRoot, "proj", "meme-ledger")
+	for _, path := range []string{mainPath, alphaPath, memePath} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeConfig(t, mainPath, "workspaces_root: "+workspacesRoot+"\nproject: proj\nmain_workspace: default\n")
+	withCommandCapture(t, func(name string, args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "workspace list") {
+			return "default\tmain111\t" + mainPath + "\nalpha\talpha111\t" + alphaPath + "\nmeme-ledger\tmeme111\t" + memePath + "\n", nil
+		}
+		if strings.Contains(joined, "op log") {
+			return "op123\n", nil
+		}
+		if strings.Contains(joined, "log -r @") {
+			return "main111\n", nil
+		}
+		if strings.Contains(joined, workspaceAheadRevset("alpha", "default")) {
+			return "", nil
+		}
+		if strings.Contains(joined, workspaceBehindRevset("alpha", "default")) {
+			return "main-commit\n", nil
+		}
+		if strings.Contains(joined, "empty() & alpha@") {
+			return "alpha-empty\n", nil
+		}
+		if strings.Contains(joined, workspaceAheadRevset("meme-ledger", "default")) {
+			return "unique-meme\n", nil
+		}
+		if strings.Contains(joined, "empty() & default@") {
+			return "main-empty\n", nil
+		}
+		return "", nil
+	})
+	commands := []string{}
+	withCommandToStderr(t, func(name string, args ...string) error {
+		commands = append(commands, name+" "+strings.Join(args, " "))
+		return nil
+	})
+	_, _, err := captureOutput(func() error { return runMoveToMain([]string{"--repo", mainPath, "--all", "--yes"}) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	joinedCommands := strings.Join(commands, "\n")
+	if !strings.Contains(joinedCommands, "-R "+alphaPath+" new default@-") {
+		t.Fatalf("expected alpha to move to default@-, got commands:\n%s", joinedCommands)
+	}
+	if strings.Contains(joinedCommands, memePath+" new") {
+		t.Fatalf("meme-ledger has unique commits and should not move, got commands:\n%s", joinedCommands)
+	}
+}
+
+func TestValidateMoveToMainRejectsWorkspaceWithUniqueCommits(t *testing.T) {
+	err := validateMoveToMainTarget(workspaceInfo{Ref: workspaceRef{Handle: "meme-ledger"}, Ahead: 1, Behind: 1})
+	if err == nil || !strings.Contains(err.Error(), "unique non-empty commits") {
+		t.Fatalf("expected unique-commits rejection, got %v", err)
 	}
 }
 
