@@ -46,7 +46,7 @@ Stack's All row includes Workspaces with commits ahead of the target or conflict
 
 When `prefer-clean` is used with `--stack-shape auto`, `jjw` tries the auto-selected shape, undoes on conflict, and tries the alternative shape. If every fallback conflicts, it keeps the merge-shaped conflicted Main Workspace so the conflict can be resolved there.
 
-`move-to-main` is for Workspaces that have no unique non-empty commits and are only behind the Main Workspace. The TUI starts movable rows checked so you can quickly uncheck Workspaces to leave alone. If the Main Workspace head is empty, `jjw` advances each selected Workspace with `jj new main@-`, making the Workspace cursors siblings of the Main Workspace cursor; otherwise it uses `jj new main@`.
+`move-to-main` is for Workspaces that have no unique content or described commits and are only behind the Main Workspace. The TUI starts movable rows checked so you can quickly uncheck Workspaces to leave alone. Empty undescribed changes are ignored, but empty described merges still count as `ahead`/`behind`. If the Main Workspace head is empty, `jjw` advances each selected Workspace with `jj new main@-`, making the Workspace cursors siblings of the Main Workspace cursor; otherwise it uses `jj new main@`.
 
 Line Stacking is an ordered variant for the common "make these selected Workspaces one line, but leave the others alone" workflow described in ADR 0008. Positional handles define the line order: the first payload Workspace is the bottom and the last payload Workspace becomes the final tip. With no handles, the TUI preserves selection order; selected rows show payload (`P`) or follow-only (`F`), and `a` toggles that role. Empty or already represented Workspaces default to follow-only so their Workspace heads move to the final tip without contributing payload commits. A non-empty Workspace head with no description is treated as in-progress working-copy state: it is excluded from the payload line and rebased on top of the final Line Stack tip. `jjw` always prints a preview to stderr with the projected log, ordered inputs, payload rebases, follow-only advances, in-progress rebases, excluded Workspaces, and the undo command; interactive runs ask for confirmation unless `--yes` is passed. If a Line Stack operation conflicts, `jjw` stops and leaves the conflicted state for manual resolution.
 
@@ -60,9 +60,9 @@ This stacks `agentleman`, `manual-ingestion`, and `switchyard-tracer-mono` in th
 
 ### Inspect and housekeeping
 
-- `jjw list` — print Workspaces as handle, markers, ahead, behind, action, path. Terminal output is aligned for reading; redirected output is tab-separated for parsing. Includes Current and Main markers. `ahead` counts non-empty Workspace commits not in Main; `behind` counts non-empty Main commits not in that Workspace.
+- `jjw list` — print Workspaces as handle, markers, ahead, behind, action, path. Terminal output is aligned for reading; redirected output is tab-separated for parsing. Includes Current and Main markers. `ahead` counts Workspace commits not in Main except empty undescribed changes; `behind` counts Main commits not in that Workspace except empty undescribed changes.
 - `jjw list --paths` — print paths only.
-- `jjw tidy` — list and offer to close active Workspaces with no unique non-empty commits, then remove empty leftover directories under the Project layout and report non-empty leftovers. Use `--yes` to skip confirmation.
+- `jjw tidy` — list and offer to close active Workspaces with no unique content or described commits, then remove empty leftover directories under the Project layout and report non-empty leftovers. Use `--yes` to skip confirmation.
 - `jjw shell-init [bash|zsh]` — print shell integration so `create`, `open`, `close`, and `main` can change the current shell's directory.
 
 ## Config
@@ -251,4 +251,4 @@ devbox run test
 devbox run install-local
 ```
 
-`install-local` writes `~/.local/bin/jjw` and prints the installed binary's help. If your shell still runs an older `jjw`, put `~/.local/bin` earlier in `PATH` and clear the shell command cache with `hash -r` in bash or `rehash` in zsh.
+`install-local` writes the latest checkout to `./bin/jjw` and prints the installed binary's help. If your shell still runs an older `jjw`, put this repo's `bin` directory earlier in `PATH` and clear the shell command cache with `hash -r` in bash or `rehash` in zsh.

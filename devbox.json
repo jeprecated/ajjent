@@ -19,16 +19,15 @@
       ],
       "install-local": [
         "set -euo pipefail",
-        "install_dir=\"$HOME/.local/bin\"",
+        "install_dir=\"$(pwd)/bin\"",
         "install_path=\"$install_dir/jjw\"",
         "mkdir -p \"$install_dir\"",
+        "rm -f \"$install_path\"",
         "go build -o \"$install_path\" ./",
-        "echo \"Installed jjw to $install_path\"",
-        "echo \"Installed binary help:\"",
+        "echo \"Installed latest checkout to $install_path\"",
         "\"$install_path\" --help | head -20",
         "resolved=\"$(command -v jjw || true)\"",
-        "if [ \"$resolved\" != \"$install_path\" ]; then echo \"WARNING: your shell currently resolves jjw as: ${resolved:-not found}\"; echo \"Add $install_dir before other entries in PATH, then run 'hash -r' in bash or 'rehash' in zsh.\"; fi",
-        "echo \"For cd-on-open/create/close/main, add 'eval \\\"$(jjw shell-init zsh)\\\"' to ~/.zshrc or 'eval \\\"$(jjw shell-init bash)\\\"' to ~/.bashrc.\""
+        "if [ \"$resolved\" != \"$install_path\" ]; then echo \"WARNING: your shell currently resolves jjw as: ${resolved:-not found}\"; echo \"Add $install_dir before other entries in PATH, then run 'hash -r' in bash or 'rehash' in zsh.\"; fi"
       ]
     }
   }

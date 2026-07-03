@@ -424,6 +424,34 @@ func TestMoveToMainSelectorPreselectsOnlyMovableWorkspaces(t *testing.T) {
 	}
 }
 
+func TestMoveToMainSelectorPreselectsWorkspaceBehindDescribedEmptyMerge(t *testing.T) {
+	items := selectorItemsForMoveToMain([]workspaceInfo{
+		{Ref: workspaceRef{Handle: "default"}, Main: true, Empty: true},
+		{Ref: workspaceRef{Handle: "agentleman"}, Empty: true, Behind: 1},
+		{Ref: workspaceRef{Handle: "research"}, Empty: true},
+	})
+	byHandle := mapSelectorItemsByHandle(items)
+	if !byHandle["agentleman"].Selected || byHandle["agentleman"].Disabled || byHandle["agentleman"].Status != "move-to-main" {
+		t.Fatalf("expected cursor behind a described empty merge to be selected, got %+v", byHandle["agentleman"])
+	}
+	if byHandle["research"].Selected || !byHandle["research"].Disabled || byHandle["research"].Status != "up-to-main" {
+		t.Fatalf("expected cursor with no relevant changes behind to stay disabled, got %+v", byHandle["research"])
+	}
+}
+
+func TestWorkspaceAheadBehindRevsetsIgnoreOnlyEmptyUndescribedChanges(t *testing.T) {
+	wantRelevant := `~(empty() & description(""))`
+	if got := workspaceRelevantRevset(); got != wantRelevant {
+		t.Fatalf("expected relevant revset %q, got %q", wantRelevant, got)
+	}
+	if got := workspaceAheadRevset("alpha", "default"); !strings.Contains(got, wantRelevant) || strings.Contains(got, "~empty()") {
+		t.Fatalf("expected ahead revset to ignore only empty undescribed changes, got %q", got)
+	}
+	if got := workspaceBehindRevset("alpha", "default"); !strings.Contains(got, wantRelevant) || strings.Contains(got, "~empty()") {
+		t.Fatalf("expected behind revset to ignore only empty undescribed changes, got %q", got)
+	}
+}
+
 func TestPreselectedMultiSelectorSubmitsDefaultCheckedRows(t *testing.T) {
 	model := selectorModel{
 		opts: selectorOptions{Mode: selectorMulti, MoveToMain: true, Items: []selectorItem{
@@ -560,7 +588,7 @@ func TestLineStackSelectorItemsDisableMissingAndAllowEmptyStackedAsFollowOnly(t 
 		{Ref: workspaceRef{Handle: "charlie"}, Conflict: true},
 		{Ref: workspaceRef{Handle: "delta"}},
 		{Ref: workspaceRef{Handle: "missing"}, Missing: true},
-	})
+	}, stackTargetResolution{})
 	byHandle := mapSelectorItemsByHandle(items)
 	if byHandle["default"].Disabled || byHandle["default"].Role != selectorRolePayload {
 		t.Fatalf("expected Main Workspace to default to payload even with an empty cursor, got disabled=%v role=%q", byHandle["default"].Disabled, byHandle["default"].Role)
@@ -580,6 +608,23 @@ func TestLineStackSelectorItemsDisableMissingAndAllowEmptyStackedAsFollowOnly(t 
 	}
 	if !byHandle["missing"].Disabled {
 		t.Fatal("expected missing Workspace to be disabled")
+	}
+}
+
+func TestLineStackSelectorItemsDisableTargetWorkspace(t *testing.T) {
+	items := selectorItemsForLineStack([]workspaceInfo{
+		{Ref: workspaceRef{Handle: "default"}, Current: true, Empty: true},
+		{Ref: workspaceRef{Handle: "alpha"}},
+	}, stackTargetResolution{Handle: "default"})
+	byHandle := mapSelectorItemsByHandle(items)
+	if !byHandle["default"].Disabled {
+		t.Fatal("expected target Workspace to be disabled")
+	}
+	if byHandle["default"].Markers != "current,target" {
+		t.Fatalf("expected target marker on disabled target Workspace, got %q", byHandle["default"].Markers)
+	}
+	if byHandle["alpha"].Disabled {
+		t.Fatal("expected non-target Workspace to remain selectable")
 	}
 }
 
@@ -838,6 +883,43 @@ func TestLoadWorkspaceInfosUsesMainRepoForStatusWhenWorkspacePathIsStale(t *test
 	}
 }
 
+func TestLoadWorkspaceInfosFallsBackWhenJjReportsNoRecordedPath(t *testing.T) {
+	workspacesRoot := filepath.Join(t.TempDir(), "workspaces")
+	repoRoot := filepath.Join(workspacesRoot, "proj", "alpha")
+	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config{WorkspacesRoot: workspacesRoot, Project: "proj", MainWorkspace: "default"}
+	badRoot := "<Error: Workspace has no recorded path: default>"
+	withCommandCapture(t, func(name string, args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, badRoot) {
+			t.Fatalf("jj template error should not be used as a repo path: %s %v", name, args)
+		}
+		if strings.Contains(joined, "workspace list") {
+			return "default\tmain111\t" + badRoot + "\nalpha\talpha111\t" + repoRoot + "\n", nil
+		}
+		if strings.Contains(joined, "log -r @") {
+			return "alpha111\n", nil
+		}
+		if len(args) >= 2 && args[0] == "-R" && args[1] != repoRoot {
+			t.Fatalf("expected graph probe to fall back to current repo path %q, got args %v", repoRoot, args)
+		}
+		return "", nil
+	})
+	infos, current, err := loadWorkspaceInfos(repoRoot, cfg, "proj")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current != "alpha" {
+		t.Fatalf("expected current Workspace alpha, got %q", current)
+	}
+	byHandle := mapInfosByHandle(infos)
+	if strings.Contains(byHandle["default"].Path, "<Error:") || !byHandle["default"].Missing {
+		t.Fatalf("expected default path to fall back to a missing canonical path, got %+v", byHandle["default"])
+	}
+}
+
 func TestLoadWorkspaceInfosSurfacesStatusProbeErrors(t *testing.T) {
 	workspacesRoot := filepath.Join(t.TempDir(), "workspaces")
 	mainPath := filepath.Join(workspacesRoot, "proj", "default")
@@ -954,7 +1036,7 @@ func TestRunMoveToMainAllMovesOnlyBehindTidyWorkspaces(t *testing.T) {
 
 func TestValidateMoveToMainRejectsWorkspaceWithUniqueCommits(t *testing.T) {
 	err := validateMoveToMainTarget(workspaceInfo{Ref: workspaceRef{Handle: "meme-ledger"}, Ahead: 1, Behind: 1})
-	if err == nil || !strings.Contains(err.Error(), "unique non-empty commits") {
+	if err == nil || !strings.Contains(err.Error(), "unique content or described commits") {
 		t.Fatalf("expected unique-commits rejection, got %v", err)
 	}
 }

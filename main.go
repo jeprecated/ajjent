@@ -785,7 +785,7 @@ func runTidy(args []string) error {
 	fs.StringVar(&projectOverride, "project", "", "Project override")
 	fs.StringVar(&rootOverride, "workspaces-root", "", "Workspaces root override")
 	fs.BoolVar(&yes, "yes", false, "skip confirmation")
-	if handled, err := parseCommandFlags(fs, args, "jjw tidy [options]", "Close Workspaces with no unique non-empty commits, then remove empty leftover Workspace directories."); handled || err != nil {
+	if handled, err := parseCommandFlags(fs, args, "jjw tidy [options]", "Close Workspaces with no unique content or described commits, then remove empty leftover Workspace directories."); handled || err != nil {
 		return err
 	}
 	repoRoot, cfg, project, err := commandContext(repoRootOverride, projectOverride, rootOverride)
@@ -850,10 +850,10 @@ func tidyClosableWorkspaces(repoRoot string, cfg config, project string, infos [
 		}
 	}
 	if len(targets) == 0 {
-		fmt.Fprintln(stderrWriter, cliStylesForWriter(stderrWriter).Muted.Render("No Workspaces with no unique non-empty commits to tidy."))
+		fmt.Fprintln(stderrWriter, cliStylesForWriter(stderrWriter).Muted.Render("No Workspaces with no unique content or described commits to tidy."))
 		return nil
 	}
-	fmt.Fprintf(stderrWriter, "%s\n", cliStylesForWriter(stderrWriter).Info.Render("Workspaces with no unique non-empty commits: "+workspaceSummary(targets)))
+	fmt.Fprintf(stderrWriter, "%s\n", cliStylesForWriter(stderrWriter).Info.Render("Workspaces with no unique content or described commits: "+workspaceSummary(targets)))
 	if !yes {
 		ok, err := confirm(fmt.Sprintf("Close %d tidy Workspace(s)? [y/N]: ", len(targets)))
 		if err != nil || !ok {
@@ -1206,7 +1206,7 @@ func validateMoveToMainTarget(info workspaceInfo) error {
 		return fmt.Errorf("Workspace %q has conflicts; resolve or Stack it before moving to Main", info.Ref.Handle)
 	}
 	if info.Ahead > 0 {
-		return fmt.Errorf("Workspace %q has unique non-empty commits; Stack or Line Stack it before moving to Main", info.Ref.Handle)
+		return fmt.Errorf("Workspace %q has unique content or described commits; Stack or Line Stack it before moving to Main", info.Ref.Handle)
 	}
 	if info.Behind == 0 {
 		return fmt.Errorf("Workspace %q is already on the Main Workspace line", info.Ref.Handle)
@@ -1444,7 +1444,7 @@ func runLineStack(cfg config, infos []workspaceInfo, byHandle map[string]workspa
 		if !canUseTUI() {
 			return errors.New("stack --line requires ordered Workspace Handles when not running in a terminal")
 		}
-		items := selectorItemsForLineStack(infos)
+		items := selectorItemsForLineStack(infos, target)
 		var opts selectorOptions
 		var err error
 		selected, opts, err := runSelector(selectorOptions{Title: "Line Stack Workspaces", Mode: selectorMulti, Items: items, OrderedSelection: true, AllowRoleToggle: true})
@@ -2386,7 +2386,7 @@ func workspaceGraphRepoPath(repoRoot string, refs []workspaceRef, cfg config, pr
 		for _, ref := range refs {
 			if ref.Handle == cfg.MainWorkspace {
 				path := workspacePathForRef(repoRoot, cfg.WorkspacesRoot, project, ref, currentHandle)
-				if strings.TrimSpace(path) != "" {
+				if workspacePathExists(path) {
 					return path
 				}
 			}
@@ -2412,11 +2412,15 @@ func workspaceBehindCount(repoPath, handle, mainHandle string) (int, error) {
 }
 
 func workspaceAheadRevset(handle, mainHandle string) string {
-	return "::" + handle + "@ & ~::" + mainHandle + "@ & ~empty()"
+	return "::" + handle + "@ & ~::" + mainHandle + "@ & " + workspaceRelevantRevset()
 }
 
 func workspaceBehindRevset(handle, mainHandle string) string {
-	return "::" + mainHandle + "@ & ~::" + handle + "@ & ~empty()"
+	return "::" + mainHandle + "@ & ~::" + handle + "@ & " + workspaceRelevantRevset()
+}
+
+func workspaceRelevantRevset() string {
+	return "~(empty() & description(\"\"))"
 }
 
 func mapInfosByHandle(infos []workspaceInfo) map[string]workspaceInfo {
@@ -2548,6 +2552,9 @@ func workspaceAction(info workspaceInfo) string {
 	}
 	if info.Main {
 		return "main"
+	}
+	if isMovableToMain(info) {
+		return "move-to-main"
 	}
 	if info.Ahead == 0 && info.Behind == 0 {
 		return "ok"
@@ -3443,7 +3450,7 @@ func listWorkspaceRefs(repoRoot string) ([]workspaceRef, error) {
 			ref.TargetChange = strings.TrimSpace(parts[1])
 		}
 		if len(parts) > 2 {
-			ref.Root = strings.TrimSpace(parts[2])
+			ref.Root = cleanWorkspaceRoot(parts[2])
 		}
 		refs = append(refs, ref)
 	}
@@ -3486,10 +3493,30 @@ func currentWorkspaceHandle(repoRoot string, refs []workspaceRef) (string, error
 }
 
 func workspacePathForRef(repoRoot string, workspacesRoot string, project string, ref workspaceRef, currentHandle string) string {
-	if strings.TrimSpace(ref.Root) != "" {
-		return filepath.Clean(ref.Root)
+	if root := cleanWorkspaceRoot(ref.Root); root != "" {
+		return filepath.Clean(root)
 	}
 	return workspacePathForHandle(repoRoot, workspacesRoot, project, ref.Handle, currentHandle)
+}
+
+func cleanWorkspaceRoot(root string) string {
+	root = strings.TrimSpace(root)
+	if root == "" || isJjTemplateError(root) {
+		return ""
+	}
+	return root
+}
+
+func isJjTemplateError(value string) bool {
+	return strings.HasPrefix(value, "<Error:") && strings.HasSuffix(value, ">")
+}
+
+func workspacePathExists(path string) bool {
+	if strings.TrimSpace(path) == "" || isJjTemplateError(strings.TrimSpace(path)) {
+		return false
+	}
+	st, err := os.Stat(path)
+	return err == nil && st.IsDir()
 }
 
 func workspacePathForHandle(repoRoot string, workspacesRoot string, project string, handle string, currentHandle string) string {
@@ -4192,7 +4219,7 @@ func selectorHint(opts selectorOptions) string {
 		return "Choose the Workspace to open. Type to filter by handle, status, marker, or path."
 	}
 	if opts.OrderedSelection {
-		return "Choose Line Stacking order. Space selects in order; press a on a selected row to toggle payload/follow-only."
+		return "Choose Line Stacking order. Space selects in order; press a on a selected row to toggle payload/follow-only. The target Workspace is disabled."
 	}
 	if opts.MoveToMain {
 		return "Choose Workspaces to move to the Main Workspace line. Movable rows start checked; press space to leave one alone."
@@ -4275,12 +4302,30 @@ func moveToMainStatusLabel(info workspaceInfo) string {
 	return statusLabel(info)
 }
 
-func selectorItemsForLineStack(infos []workspaceInfo) []selectorItem {
+func selectorItemsForLineStack(infos []workspaceInfo, target stackTargetResolution) []selectorItem {
 	items := make([]selectorItem, 0, len(infos))
 	for _, info := range infos {
-		items = append(items, selectorItem{Handle: info.Ref.Handle, Path: info.Path, Status: statusLabel(info), Markers: strings.Join(markers(info), ","), Role: lineStackRoleForInfo(info), Disabled: info.Missing})
+		itemMarkers := markers(info)
+		isTarget := target.Handle != "" && info.Ref.Handle == target.Handle
+		if isTarget && !markerPresent(itemMarkers, "target") {
+			if len(itemMarkers) == 1 && itemMarkers[0] == "-" {
+				itemMarkers = []string{"target"}
+			} else {
+				itemMarkers = append(itemMarkers, "target")
+			}
+		}
+		items = append(items, selectorItem{Handle: info.Ref.Handle, Path: info.Path, Status: statusLabel(info), Markers: strings.Join(itemMarkers, ","), Role: lineStackRoleForInfo(info), Disabled: info.Missing || isTarget})
 	}
 	return items
+}
+
+func markerPresent(markers []string, needle string) bool {
+	for _, marker := range markers {
+		if marker == needle {
+			return true
+		}
+	}
+	return false
 }
 
 type styles struct{ Title, Selected, Disabled, Help, Conflict, Stacked, Empty, Missing, Unstacked, Marker, Main lipgloss.Style }
