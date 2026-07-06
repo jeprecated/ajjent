@@ -10,18 +10,18 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
-        jjw = pkgs.callPackage ./nix/package.nix { };
-        jjwApp = {
+        ajjent = pkgs.callPackage ./nix/package.nix { };
+        ajjApp = {
           type = "app";
-          program = "${jjw}/bin/jjw";
-          meta.description = "Run jjw";
+          program = "${ajjent}/bin/ajj";
+          meta.description = "Run ajj";
         };
       in {
-        packages.default = jjw;
-        packages.jjw = jjw;
+        packages.default = ajjent;
+        packages.ajjent = ajjent;
 
-        apps.default = jjwApp;
-        apps.jjw = jjwApp;
+        apps.default = ajjApp;
+        apps.ajj = ajjApp;
 
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [ go_1_24 gopls gotools ];

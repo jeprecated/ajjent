@@ -1,7 +1,7 @@
-# Source this file from ~/.bashrc after jjw is on PATH.
+# Source this file from ~/.zshrc after ajj is on PATH.
 # It wraps navigation commands so they can cd the current shell.
 
-jjw() {
+ajj() {
   local out rc cmd
   case "$1" in
     --repo)
@@ -16,7 +16,7 @@ jjw() {
   esac
   case "$cmd" in
     create|open|close|main)
-      out="$(JJW_SHELL_WRAPPED=1 command jjw "$@")"
+      out="$(AJJ_SHELL_WRAPPED=1 command ajj "$@")"
       rc=$?
       if [ $rc -ne 0 ]; then
         return $rc
@@ -26,7 +26,7 @@ jjw() {
       fi
       ;;
     *)
-      command jjw "$@"
+      command ajj "$@"
       ;;
   esac
 }

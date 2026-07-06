@@ -1,4 +1,4 @@
-# jj-workspace-helper
+# Ajjent
 
 This context describes the language of a command-line tool for creating, finding, organizing, and removing Jujutsu workspaces.
 
@@ -129,4 +129,4 @@ _Avoid_: Disposable workspace
 - Workspaces with unresolved conflicts could be closed if graph-safe; resolved: unresolved conflicts require **Forced Closing**, including after a conflicted Stack result.
 - The phrase "force close" was ambiguous between bypassing safety and deleting work; resolved: **Forced Closing** abandons unique mutable changes, even though `--discard` was rejected as the flag name.
 - Stack selection should show raw status or domain states; resolved: status is communicated with domain-level states such as empty, unstacked, stacked, conflict, and missing.
-- Ordered arbitrary Workspace stacking could either replace Main-targeted **Stacking** or be a distinct mode; resolved by ADR 0008: **Line Stacking** is an ordered variant under `jjw stack --line`, while Main-targeted **Stacking** keeps its existing meaning.
+- Ordered arbitrary Workspace stacking could either replace Main-targeted **Stacking** or be a distinct mode; resolved by ADR 0008: **Line Stacking** is an ordered variant under `ajj stack --line`, while Main-targeted **Stacking** keeps its existing meaning.

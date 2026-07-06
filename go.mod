@@ -1,4 +1,4 @@
-module jj-workspace-helper
+module github.com/jeprecated/ajjent
 
 go 1.24.0
 

@@ -16,11 +16,11 @@ import (
 func TestLoadConfigRejectsLegacyUnknownKeys(t *testing.T) {
 	repoRoot := t.TempDir()
 	xdg := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(xdg, "jjw"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(xdg, "ajj"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	legacy := []byte("worktrees_root: /tmp/worktrees\nname_list:\n  - alpha\n")
-	if err := os.WriteFile(filepath.Join(xdg, "jjw", "config.yaml"), legacy, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(xdg, "ajj", "config.yaml"), legacy, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("XDG_CONFIG_HOME", xdg)
@@ -33,7 +33,7 @@ func TestLoadConfigRejectsLegacyUnknownKeys(t *testing.T) {
 func TestLoadConfigUsesAssimilatedPathsVocabulary(t *testing.T) {
 	repoRoot := t.TempDir()
 	xdg := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(xdg, "jjw"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(xdg, "ajj"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	cfgText := []byte(strings.Join([]string{
@@ -58,7 +58,7 @@ func TestLoadConfigUsesAssimilatedPathsVocabulary(t *testing.T) {
 		"      - .local-notes",
 		"",
 	}, "\n"))
-	if err := os.WriteFile(filepath.Join(xdg, "jjw", "config.yaml"), cfgText, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(xdg, "ajj", "config.yaml"), cfgText, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("XDG_CONFIG_HOME", xdg)
@@ -84,7 +84,7 @@ func TestLoadConfigUsesAssimilatedPathsVocabulary(t *testing.T) {
 func TestLoadConfigAcceptsDeprecatedAssimilatedFoldersAlias(t *testing.T) {
 	repoRoot := t.TempDir()
 	xdg := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(xdg, "jjw"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(xdg, "ajj"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	cfgText := []byte(strings.Join([]string{
@@ -97,7 +97,7 @@ func TestLoadConfigAcceptsDeprecatedAssimilatedFoldersAlias(t *testing.T) {
 		"      - .local-tools",
 		"",
 	}, "\n"))
-	if err := os.WriteFile(filepath.Join(xdg, "jjw", "config.yaml"), cfgText, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(xdg, "ajj", "config.yaml"), cfgText, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("XDG_CONFIG_HOME", xdg)
@@ -114,7 +114,7 @@ func TestLoadConfigAcceptsDeprecatedAssimilatedFoldersAlias(t *testing.T) {
 func TestLoadConfigMergesGlobalAndProjectAssimilatedPaths(t *testing.T) {
 	repoRoot := t.TempDir()
 	xdg := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(xdg, "jjw"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(xdg, "ajj"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	cfgText := []byte(strings.Join([]string{
@@ -129,7 +129,7 @@ func TestLoadConfigMergesGlobalAndProjectAssimilatedPaths(t *testing.T) {
 		"      - .local-tools",
 		"",
 	}, "\n"))
-	if err := os.WriteFile(filepath.Join(xdg, "jjw", "config.yaml"), cfgText, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(xdg, "ajj", "config.yaml"), cfgText, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("XDG_CONFIG_HOME", xdg)
@@ -146,11 +146,11 @@ func TestLoadConfigMergesGlobalAndProjectAssimilatedPaths(t *testing.T) {
 func TestLoadConfigAcceptsAssimilatedPathGlobs(t *testing.T) {
 	repoRoot := t.TempDir()
 	xdg := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(xdg, "jjw"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(xdg, "ajj"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	cfgText := []byte("workspaces_root: /tmp/workspaces\nassimilated_paths:\n  - '**/.env*'\n")
-	if err := os.WriteFile(filepath.Join(xdg, "jjw", "config.yaml"), cfgText, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(xdg, "ajj", "config.yaml"), cfgText, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("XDG_CONFIG_HOME", xdg)
@@ -167,11 +167,11 @@ func TestLoadConfigAcceptsAssimilatedPathGlobs(t *testing.T) {
 func TestLoadConfigRejectsUnsafeAssimilatedPaths(t *testing.T) {
 	repoRoot := t.TempDir()
 	xdg := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(xdg, "jjw"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(xdg, "ajj"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	cfgText := []byte("workspaces_root: /tmp/workspaces\nassimilated_paths:\n  - ../scratch\n")
-	if err := os.WriteFile(filepath.Join(xdg, "jjw", "config.yaml"), cfgText, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(xdg, "ajj", "config.yaml"), cfgText, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("XDG_CONFIG_HOME", xdg)
@@ -234,7 +234,7 @@ func TestRunRejectsLegacyCommands(t *testing.T) {
 
 func TestRunUnknownCommandSuggestsHelp(t *testing.T) {
 	err := run([]string{"wat"})
-	if err == nil || !strings.Contains(err.Error(), "jjw help") {
+	if err == nil || !strings.Contains(err.Error(), "ajj help") {
 		t.Fatalf("expected help suggestion, got %v", err)
 	}
 }
@@ -298,7 +298,7 @@ func TestShellInitPrintsNavigationWrapperIncludingMain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"jjw()", "--repo=*)", "cmd=\"$3\"", "create|open|close|main", "JJW_SHELL_WRAPPED=1 command jjw", "cd \"$out\""} {
+	for _, want := range []string{"ajj()", "--repo=*)", "cmd=\"$3\"", "create|open|close|main", "AJJ_SHELL_WRAPPED=1 command ajj", "cd \"$out\""} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("shell init missing %q in:\n%s", want, out)
 		}
@@ -307,7 +307,7 @@ func TestShellInitPrintsNavigationWrapperIncludingMain(t *testing.T) {
 
 func TestNavigationHintMentionsShellInitForRawMain(t *testing.T) {
 	hint := navigationHint("main", "zsh")
-	for _, want := range []string{"jjw main", "cd automatically", "eval \"$(jjw shell-init zsh)\""} {
+	for _, want := range []string{"ajj main", "cd automatically", "eval \"$(ajj shell-init zsh)\""} {
 		if !strings.Contains(hint, want) {
 			t.Fatalf("navigation hint missing %q in %q", want, hint)
 		}
@@ -397,7 +397,7 @@ func TestHumanFacingStylesUseOutputRendererEvenWhenStdoutIsPlain(t *testing.T) {
 
 	renderer := lipgloss.NewRenderer(io.Discard)
 	renderer.SetColorProfile(termenv.ANSI256)
-	if got := cliStylesForRenderer(renderer).Danger.Render("jjw:"); !strings.Contains(got, "\x1b[") {
+	if got := cliStylesForRenderer(renderer).Danger.Render("ajj:"); !strings.Contains(got, "\x1b[") {
 		t.Fatalf("expected CLI stderr style to use output renderer color, got %q", got)
 	}
 	if got := selectorStylesForRenderer(renderer, false).Empty.Render("empty"); !strings.Contains(got, "\x1b[") {
@@ -683,10 +683,10 @@ func TestFormatAlignedListRowsKeepsPathColumnStable(t *testing.T) {
 
 func TestSelectorViewKeepsPathColumnStableWithLongHandlesAndMarkers(t *testing.T) {
 	paths := []string{
-		"/home/jmo/Development/mono-sd",
-		"/home/jmo/Development/workspaces/mono-sd/meme-ledger",
-		"/home/jmo/Development/workspaces/mono-sd/switchyard-tracer-mono",
-		"/home/jmo/Development/workspaces/mono-sd/phone-markdown",
+		"/work/mono-sd",
+		"/work/workspaces/mono-sd/meme-ledger",
+		"/work/workspaces/mono-sd/switchyard-tracer-mono",
+		"/work/workspaces/mono-sd/phone-markdown",
 	}
 	model := selectorModel{
 		opts: selectorOptions{Title: "Open Workspace", Mode: selectorSingle, Items: []selectorItem{
@@ -1137,7 +1137,7 @@ func TestRunInitWritesAssimilatedPathsVocabulary(t *testing.T) {
 
 func TestRunInitRefusesExistingConfigUnlessForce(t *testing.T) {
 	xdg := t.TempDir()
-	cfgDir := filepath.Join(xdg, "jjw")
+	cfgDir := filepath.Join(xdg, "ajj")
 	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -1156,7 +1156,7 @@ func TestRunInitRefusesExistingConfigUnlessForce(t *testing.T) {
 
 func writeConfig(t *testing.T, repoRoot string, content string) {
 	t.Helper()
-	dir := filepath.Join(repoRoot, ".jjw")
+	dir := filepath.Join(repoRoot, ".ajj")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -2847,5 +2847,154 @@ func TestCommandCaptureErrorsCanBeRestored(t *testing.T) {
 	_, err := resolveRepoRoot("")
 	if err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func withLookPath(t *testing.T, fn func(string) (string, error)) {
+	t.Helper()
+	orig := lookPathFn
+	lookPathFn = fn
+	t.Cleanup(func() { lookPathFn = orig })
+}
+
+func withJJVersion(t *testing.T, fn func() (string, error)) {
+	t.Helper()
+	orig := jjVersionFn
+	jjVersionFn = fn
+	t.Cleanup(func() { jjVersionFn = orig })
+}
+
+func TestVersionStringUsesInjectedVersion(t *testing.T) {
+	orig := version
+	version = "9.9.9-test"
+	t.Cleanup(func() { version = orig })
+	if got := versionString(); got != "ajj 9.9.9-test" {
+		t.Fatalf("versionString() = %q, want %q", got, "ajj 9.9.9-test")
+	}
+}
+
+func TestVersionStringFallsBackToDev(t *testing.T) {
+	orig := version
+	version = "dev"
+	t.Cleanup(func() { version = orig })
+	got := versionString()
+	// In test binaries build info may or may not carry a VCS revision, so we
+	// only assert the stable "ajj" prefix and that it is a single line.
+	if !strings.HasPrefix(got, "ajj ") {
+		t.Fatalf("versionString() = %q, want prefix %q", got, "ajj ")
+	}
+	if strings.Contains(got, "\n") {
+		t.Fatalf("versionString() must be a single line, got %q", got)
+	}
+}
+
+func TestRunVersionCommandPrintsToStdout(t *testing.T) {
+	origVer := version
+	version = "9.9.9-test"
+	t.Cleanup(func() { version = origVer })
+	for _, arg := range []string{"version", "--version"} {
+		out, stderr, err := captureOutput(func() error { return run([]string{arg}) })
+		if err != nil {
+			t.Fatalf("run(%q) error: %v", arg, err)
+		}
+		if strings.TrimSpace(out) != "ajj 9.9.9-test" {
+			t.Fatalf("run(%q) stdout = %q, want %q", arg, out, "ajj 9.9.9-test")
+		}
+		if stderr != "" {
+			t.Fatalf("run(%q) stderr = %q, want empty", arg, stderr)
+		}
+	}
+}
+
+func TestParseJJVersion(t *testing.T) {
+	cases := map[string]string{
+		"jj 0.42.0\n":                  "0.42.0",
+		"jj 0.20.0-abcdef (2024...)\n": "0.20.0",
+		"jj 0.9\n":                     "0.9",
+		"no version here":              "",
+	}
+	for in, want := range cases {
+		if got := parseJJVersion(in); got != want {
+			t.Fatalf("parseJJVersion(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestEnsureJJ(t *testing.T) {
+	tests := []struct {
+		name        string
+		lookPath    func(string) (string, error)
+		versionOut  string
+		versionErr  error
+		wantErr     bool
+		wantErrText string
+		wantWarn    bool
+	}{
+		{
+			name:        "jj-missing",
+			lookPath:    func(string) (string, error) { return "", errors.New("not found") },
+			wantErr:     true,
+			wantErrText: "Jujutsu (jj) is required",
+		},
+		{
+			name:       "jj-old",
+			lookPath:   func(string) (string, error) { return "/usr/bin/jj", nil },
+			versionOut: "jj 0.15.0\n",
+			wantWarn:   true,
+		},
+		{
+			name:       "jj-ok",
+			lookPath:   func(string) (string, error) { return "/usr/bin/jj", nil },
+			versionOut: "jj 0.42.0\n",
+			wantWarn:   false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			withLookPath(t, tc.lookPath)
+			withJJVersion(t, func() (string, error) { return tc.versionOut, tc.versionErr })
+			resetJJCheck()
+			t.Cleanup(resetJJCheck)
+
+			_, stderr, err := captureOutput(func() error { return ensureJJ() })
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("ensureJJ() expected error, got nil")
+				}
+				if !strings.Contains(err.Error(), tc.wantErrText) {
+					t.Fatalf("ensureJJ() error = %q, want contains %q", err.Error(), tc.wantErrText)
+				}
+				if !strings.Contains(err.Error(), "github.com/jj-vcs/jj") {
+					t.Fatalf("ensureJJ() error = %q, want install link", err.Error())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ensureJJ() unexpected error: %v", err)
+			}
+			hasWarn := strings.Contains(stderr, "warning:") && strings.Contains(stderr, jjMinVersion)
+			if hasWarn != tc.wantWarn {
+				t.Fatalf("ensureJJ() warning presence = %v (stderr=%q), want %v", hasWarn, stderr, tc.wantWarn)
+			}
+		})
+	}
+}
+
+func TestEnsureJJCachesResult(t *testing.T) {
+	calls := 0
+	withLookPath(t, func(string) (string, error) { return "/usr/bin/jj", nil })
+	withJJVersion(t, func() (string, error) {
+		calls++
+		return "jj 0.42.0\n", nil
+	})
+	resetJJCheck()
+	t.Cleanup(resetJJCheck)
+	for i := 0; i < 3; i++ {
+		if err := ensureJJ(); err != nil {
+			t.Fatalf("ensureJJ() error: %v", err)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("jjVersionFn called %d times, want 1 (cached)", calls)
 	}
 }

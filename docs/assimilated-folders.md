@@ -1,6 +1,6 @@
 # Assimilated paths
 
-Assimilated paths are repo-local, usually git-ignored files or directories that should be shared across all `jjw` Workspaces for a Project by symlink.
+Assimilated paths are repo-local, usually git-ignored files or directories that should be shared across all `ajj` Workspaces for a Project by symlink.
 
 Use this for directories such as `scratch/` that contain local notes, or files such as `.env.local` that contain local development settings. These artifacts survive ephemeral Workspace deletion because the Workspace only contains a symlink.
 
@@ -61,12 +61,12 @@ projects:
 
 ## Behavior
 
-On `jjw create` and `jjw open`, for each configured assimilated path:
+On `ajj create` and `ajj open`, for each configured assimilated path:
 
-1. `jjw` expands glob patterns against the Main Workspace, or looks for an explicit source file or directory at the same relative path.
-2. If the source exists and is a regular file or directory, `jjw` creates a symlink in the target Workspace.
-3. If the source does not exist, or a glob has no matches, `jjw` skips it.
-4. If the target path already contains real Workspace content, `jjw` refuses to overwrite it.
+1. `ajj` expands glob patterns against the Main Workspace, or looks for an explicit source file or directory at the same relative path.
+2. If the source exists and is a regular file or directory, `ajj` creates a symlink in the target Workspace.
+3. If the source does not exist, or a glob has no matches, `ajj` skips it.
+4. If the target path already contains real Workspace content, `ajj` refuses to overwrite it.
 
 Example result:
 
@@ -126,8 +126,8 @@ assimilated_paths:
 Then create or open a Workspace:
 
 ```bash
-jjw create alpha
-jjw open alpha
+ajj create alpha
+ajj open alpha
 ```
 
 The Workspace will contain `scratch`, `.pi-scratch.md`, and `.env.local` as symlinks to the Main Workspace's source paths.

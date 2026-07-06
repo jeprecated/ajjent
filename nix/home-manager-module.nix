@@ -1,6 +1,6 @@
 { config, lib, pkgs, ... }:
 let
-  cfg = config.programs.jjw;
+  cfg = config.programs.ajjent;
   yaml = pkgs.formats.yaml { };
   defaultWorkspaceHandles = [
     "alpha" "bravo" "charlie" "delta" "echo" "foxtrot" "golf" "hotel" "india"
@@ -9,7 +9,7 @@ let
     "zulu"
   ];
   shellWrapper = ''
-    jjw() {
+    ajj() {
       local out rc cmd
       case "$1" in
         --repo)
@@ -24,7 +24,7 @@ let
       esac
       case "$cmd" in
         create|open|close|main)
-          out="$(JJW_SHELL_WRAPPED=1 command jjw "$@")"
+          out="$(AJJ_SHELL_WRAPPED=1 command ajj "$@")"
           rc=$?
           if [ $rc -ne 0 ]; then
             return $rc
@@ -34,20 +34,20 @@ let
           fi
           ;;
         *)
-          command jjw "$@"
+          command ajj "$@"
           ;;
       esac
     }
   '';
 in {
-  options.programs.jjw = {
+  options.programs.ajjent = {
     enable = lib.mkEnableOption "jj workspace helper";
 
     package = lib.mkOption {
       type = lib.types.package;
       default = pkgs.callPackage ./package.nix { };
       defaultText = lib.literalExpression "pkgs.callPackage ./package.nix { }";
-      description = "jjw package to install.";
+      description = "ajj package to install.";
     };
 
     settings = lib.mkOption {
@@ -68,7 +68,7 @@ in {
           direnv_allow = false;
         };
       };
-      description = "Contents of ~/.config/jjw/config.yaml";
+      description = "Contents of ~/.config/ajj/config.yaml";
       example = {
         workspaces_root = "~/Development/workspaces";
         project = "nixfiles";
@@ -97,7 +97,7 @@ in {
       enable = lib.mkOption {
         type = lib.types.bool;
         default = true;
-        description = "Install interactive bash/zsh functions that shadow jjw for navigation commands.";
+        description = "Install interactive bash/zsh functions that shadow ajj for navigation commands.";
       };
     };
   };
@@ -106,12 +106,12 @@ in {
     assertions = [
       {
         assertion = cfg.settings ? workspaces_root && toString cfg.settings.workspaces_root != "";
-        message = "programs.jjw.settings.workspaces_root must be set explicitly.";
+        message = "programs.ajjent.settings.workspaces_root must be set explicitly.";
       }
     ];
 
     home.packages = [ cfg.package ];
-    xdg.configFile."jjw/config.yaml".source = yaml.generate "jjw-config.yaml" cfg.settings;
+    xdg.configFile."ajj/config.yaml".source = yaml.generate "ajj-config.yaml" cfg.settings;
 
     programs.bash.initExtra = lib.mkIf cfg.shellIntegration.enable shellWrapper;
     programs.zsh.initExtra = lib.mkIf cfg.shellIntegration.enable shellWrapper;

@@ -1,6 +1,6 @@
-# Redesign jjw around Projects, Workspace Handles, and built-in TUIs
+# Redesign ajj around Projects, Workspace Handles, and built-in TUIs
 
-`jjw` will move to a sharper Workspace lifecycle model: Projects contain Workspaces, Workspaces are identified by reusable Workspace Handles, and users Create, Open, Stack, Close, and Tidy them through a consistent built-in TUI and shell-wrapper flow. This is a breaking UX/config redesign: legacy app/worktree/name/select/cd vocabulary is removed in favor of Project/Workspace/Handle/Open/Close language, because the current notation obscures what the tool is for.
+`ajj` will move to a sharper Workspace lifecycle model: Projects contain Workspaces, Workspaces are identified by reusable Workspace Handles, and users Create, Open, Stack, Close, and Tidy them through a consistent built-in TUI and shell-wrapper flow. This is a breaking UX/config redesign: legacy app/worktree/name/select/cd vocabulary is removed in favor of Project/Workspace/Handle/Open/Close language, because the current notation obscures what the tool is for.
 
 ## Planned changes
 
@@ -34,6 +34,6 @@
 - Keep Stack graph mechanics as advanced settings, exposed through flags and compact TUI footer toggles.
 - Continue keeping merge-shaped conflicts in Main when all Stack fallback attempts conflict.
 - Offer post-Stack Closing for normally Closable inputs, including after conflicted Stack results.
-- Ship Home Manager zsh/bash shell integration enabled by default; the wrapper shadows `jjw` interactively so `create`, `open`, `close`, and `main` can change directory from the stdout path protocol.
-- Document `command jjw ...` as the raw binary escape hatch.
-- Ignore `.jjw/state.json` while allowing `.jjw/config.yaml` to be committed for shared Project settings.
+- Ship Home Manager zsh/bash shell integration enabled by default; the wrapper shadows `ajj` interactively so `create`, `open`, `close`, and `main` can change directory from the stdout path protocol.
+- Document `command ajj ...` as the raw binary escape hatch.
+- Ignore `.ajj/state.json` while allowing `.ajj/config.yaml` to be committed for shared Project settings.

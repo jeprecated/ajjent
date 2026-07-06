@@ -14,8 +14,11 @@ import (
 	pathpkg "path"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -24,10 +27,22 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// version is the build-time version string. It defaults to "dev" for plain
+// `go build`/`go install` without ldflags and is overridden via
+// `-ldflags "-X main.version=<v>"` at release/package build time.
+var version = "dev"
+
+// Jujutsu (jj) support floor and the version the tool is exercised against.
+const (
+	jjMinVersion    = "0.20.0"
+	jjTestedVersion = "0.42.x"
+)
+
 var (
 	commandCaptureFn            = runCommandCapture
 	commandToStderrFn           = runCommandToStderr
 	lookPathFn                  = exec.LookPath
+	jjVersionFn                 = defaultJJVersion
 	stdinReader       io.Reader = os.Stdin
 	stdoutWriter      io.Writer = os.Stdout
 	stderrWriter      io.Writer = os.Stderr
@@ -104,7 +119,7 @@ func main() {
 	}
 	if err := run(os.Args[1:]); err != nil {
 		s := cliStylesForWriter(stderrWriter)
-		fmt.Fprintf(stderrWriter, "%s %v\n", s.Danger.Render("jjw:"), err)
+		fmt.Fprintf(stderrWriter, "%s %v\n", s.Danger.Render("ajj:"), err)
 		os.Exit(1)
 	}
 }
@@ -115,7 +130,7 @@ func run(args []string) error {
 		return err
 	}
 	if len(args) == 0 {
-		return errors.New("missing command\n\nRun `jjw help` to see available commands.")
+		return errors.New("missing command\n\nRun `ajj help` to see available commands.")
 	}
 	commandArgs := args[1:]
 	if commandAcceptsRepoFlag(args[0]) {
@@ -128,6 +143,11 @@ func run(args []string) error {
 		}
 		if globalRepo != "" {
 			commandArgs = append([]string{"--repo", globalRepo}, commandArgs...)
+		}
+	}
+	if commandNeedsJJ(args[0]) {
+		if err := ensureJJ(); err != nil {
+			return err
 		}
 	}
 	switch args[0] {
@@ -151,11 +171,14 @@ func run(args []string) error {
 		return runStack(commandArgs)
 	case "move-to-main", "catch-up":
 		return runMoveToMain(commandArgs)
+	case "version", "--version":
+		fmt.Fprintln(stdoutWriter, versionString())
+		return nil
 	case "help", "-h", "--help":
 		printUsage(stdoutWriter)
 		return nil
 	default:
-		return fmt.Errorf("unknown command: %s\n\nRun `jjw help` to see available commands.", args[0])
+		return fmt.Errorf("unknown command: %s\n\nRun `ajj help` to see available commands.", args[0])
 	}
 }
 
@@ -216,15 +239,15 @@ func commandAcceptsRepoFlag(command string) bool {
 
 func printUsage(w io.Writer) {
 	s := cliStylesForWriter(w)
-	fmt.Fprintln(w, s.Title.Render("jjw — Jujutsu Workspace lifecycle helper"))
+	fmt.Fprintln(w, s.Title.Render("ajj — Jujutsu Workspace lifecycle helper"))
 	fmt.Fprintln(w)
-	fmt.Fprintf(w, "%s %s\n", s.Section.Render("Usage:"), s.Command.Render("jjw [--repo PATH] <command> [options]"))
+	fmt.Fprintf(w, "%s %s\n", s.Section.Render("Usage:"), s.Command.Render("ajj [--repo PATH] <command> [options]"))
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, s.Section.Render("Global options:"))
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Option, "--repo PATH", 18), "run a repo-aware command against this repository root")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, s.Section.Render("Setup:"))
-	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "init", 18), "Create jjw config")
+	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "init", 18), "Create ajj config")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, s.Section.Render("Workspace lifecycle:"))
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "create [handle]", 18), "Create a Workspace and print its path")
@@ -241,8 +264,9 @@ func printUsage(w io.Writer) {
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "main", 18), "Print the Main Workspace path")
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "tidy", 18), "Close tidy Workspaces and remove empty leftover directories")
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "shell-init", 18), "Print shell integration for cd-on-open/main")
+	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "version", 18), "Print the ajj version (also --version)")
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, s.Muted.Render("Run `jjw <command> --help` for command-specific options."))
+	fmt.Fprintln(w, s.Muted.Render("Run `ajj <command> --help` for command-specific options."))
 }
 
 type cliStyles struct{ Title, Section, Command, Option, Muted, Success, Warn, Danger, Info, Marker lipgloss.Style }
@@ -311,7 +335,7 @@ func commandNameFromUsage(usage string) string {
 	if len(fields) == 1 {
 		return fields[0]
 	}
-	return "jjw"
+	return "ajj"
 }
 
 func hasHelpFlag(args []string) bool {
@@ -382,12 +406,12 @@ func runInit(args []string) error {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	var local, force bool
 	var repoRootOverride, workspacesRoot, project string
-	fs.BoolVar(&local, "local", false, "write repo-local .jjw/config.yaml instead of global config")
+	fs.BoolVar(&local, "local", false, "write repo-local .ajj/config.yaml instead of global config")
 	fs.BoolVar(&force, "force", false, "overwrite existing config")
 	fs.StringVar(&repoRootOverride, "repo", "", "repo root override for --local")
 	fs.StringVar(&workspacesRoot, "workspaces-root", "", "directory containing Project Workspace folders")
 	fs.StringVar(&project, "project", "", "Project slug for local config")
-	if handled, err := parseCommandFlags(fs, args, "jjw init [options]", "Create jjw config."); handled || err != nil {
+	if handled, err := parseCommandFlags(fs, args, "ajj init [options]", "Create ajj config."); handled || err != nil {
 		return err
 	}
 	cfgPath := ""
@@ -396,7 +420,7 @@ func runInit(args []string) error {
 		if err != nil {
 			return err
 		}
-		cfgPath = filepath.Join(repoRoot, ".jjw", "config.yaml")
+		cfgPath = filepath.Join(repoRoot, ".ajj", "config.yaml")
 	} else {
 		path, ok := globalConfigPath()
 		if !ok {
@@ -459,7 +483,7 @@ func runCreate(args []string) error {
 	fs.StringVar(&rootOverride, "workspaces-root", "", "Workspaces root override")
 	fs.BoolVar(&envrc, "envrc", false, "create .envrc in the new Workspace")
 	fs.BoolVar(&direnvAllow, "direnv-allow", false, "run direnv allow for the new Workspace")
-	if handled, err := parseCommandFlags(fs, args, "jjw create [handle] [options]", "Create a new Workspace and print its path."); handled || err != nil {
+	if handled, err := parseCommandFlags(fs, args, "ajj create [handle] [options]", "Create a new Workspace and print its path."); handled || err != nil {
 		return err
 	}
 	positionals := fs.Args()
@@ -486,7 +510,7 @@ func runCreate(args []string) error {
 		}
 		if _, ok := inUse[handle]; ok {
 			if !canUseTUI() {
-				return fmt.Errorf("Workspace %q already exists; use `jjw open %s`", handle, handle)
+				return fmt.Errorf("Workspace %q already exists; use `ajj open %s`", handle, handle)
 			}
 			ok, err := confirm(fmt.Sprintf("Workspace %q already exists. Open it instead? [y/N]: ", handle))
 			if err != nil || !ok {
@@ -552,7 +576,7 @@ func openExistingWorkspace(repoRoot string, cfg config, project string, handle s
 }
 
 func workspaceNotFoundError(handle string) error {
-	return fmt.Errorf("Workspace %q not found; use `jjw create %s` to create it", handle, handle)
+	return fmt.Errorf("Workspace %q not found; use `ajj create %s` to create it", handle, handle)
 }
 
 func runOpen(args []string) error {
@@ -566,7 +590,7 @@ func runOpen(args []string) error {
 	fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
 	fs.StringVar(&projectOverride, "project", "", "Project override")
 	fs.StringVar(&rootOverride, "workspaces-root", "", "Workspaces root override")
-	if handled, err := parseCommandFlags(fs, args, "jjw open [handle] [options]", "Print an existing Workspace path."); handled || err != nil {
+	if handled, err := parseCommandFlags(fs, args, "ajj open [handle] [options]", "Print an existing Workspace path."); handled || err != nil {
 		return err
 	}
 	positionals := fs.Args()
@@ -627,7 +651,7 @@ func runOpen(args []string) error {
 
 func runShellInit(args []string) error {
 	fs := flag.NewFlagSet("shell-init", flag.ContinueOnError)
-	if handled, err := parseCommandFlags(fs, args, "jjw shell-init [bash|zsh]", "Print shell integration that makes navigation commands cd in the current shell."); handled || err != nil {
+	if handled, err := parseCommandFlags(fs, args, "ajj shell-init [bash|zsh]", "Print shell integration that makes navigation commands cd in the current shell."); handled || err != nil {
 		return err
 	}
 	positionals := fs.Args()
@@ -651,8 +675,8 @@ func runShellInit(args []string) error {
 func shellIntegrationSnippet(shellName string) (string, error) {
 	switch strings.TrimSpace(shellName) {
 	case "bash", "zsh":
-		return `# jjw shell integration: source this to make create/open/close/main change directory.
-jjw() {
+		return `# ajj shell integration: source this to make create/open/close/main change directory.
+ajj() {
   local out rc cmd
   case "$1" in
     --repo)
@@ -667,7 +691,7 @@ jjw() {
   esac
   case "$cmd" in
     create|open|close|main)
-      out="$(JJW_SHELL_WRAPPED=1 command jjw "$@")"
+      out="$(AJJ_SHELL_WRAPPED=1 command ajj "$@")"
       rc=$?
       if [ $rc -ne 0 ]; then
         return $rc
@@ -677,7 +701,7 @@ jjw() {
       fi
       ;;
     *)
-      command jjw "$@"
+      command ajj "$@"
       ;;
   esac
 }
@@ -693,7 +717,7 @@ func printNavigationPath(path string, command string) {
 }
 
 func maybePrintNavigationHint(command string) {
-	if os.Getenv("JJW_SHELL_WRAPPED") != "" || !canUseTUI() {
+	if os.Getenv("AJJ_SHELL_WRAPPED") != "" || !canUseTUI() {
 		return
 	}
 	s := cliStylesForWriter(stderrWriter)
@@ -704,7 +728,7 @@ func navigationHint(command string, shellName string) string {
 	if shellName != "bash" && shellName != "zsh" {
 		shellName = "zsh"
 	}
-	return fmt.Sprintf("to make `jjw %s` cd automatically, run `eval \"$(jjw shell-init %s)\"` once in your shell startup.", command, shellName)
+	return fmt.Sprintf("to make `ajj %s` cd automatically, run `eval \"$(ajj shell-init %s)\"` once in your shell startup.", command, shellName)
 }
 
 func runList(args []string) error {
@@ -715,7 +739,7 @@ func runList(args []string) error {
 	fs.StringVar(&projectOverride, "project", "", "Project override")
 	fs.StringVar(&rootOverride, "workspaces-root", "", "Workspaces root override")
 	fs.BoolVar(&pathsOnly, "paths", false, "print Workspace paths only")
-	if handled, err := parseCommandFlags(fs, args, "jjw list [options]", "List Workspaces."); handled || err != nil {
+	if handled, err := parseCommandFlags(fs, args, "ajj list [options]", "List Workspaces."); handled || err != nil {
 		return err
 	}
 	repoRoot, cfg, project, err := commandContext(repoRootOverride, projectOverride, rootOverride)
@@ -754,7 +778,7 @@ func runMain(args []string) error {
 	fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
 	fs.StringVar(&projectOverride, "project", "", "Project override")
 	fs.StringVar(&rootOverride, "workspaces-root", "", "Workspaces root override")
-	if handled, err := parseCommandFlags(fs, args, "jjw main [options]", "Print the Main Workspace path."); handled || err != nil {
+	if handled, err := parseCommandFlags(fs, args, "ajj main [options]", "Print the Main Workspace path."); handled || err != nil {
 		return err
 	}
 	repoRoot, cfg, project, err := commandContext(repoRootOverride, projectOverride, rootOverride)
@@ -785,7 +809,7 @@ func runTidy(args []string) error {
 	fs.StringVar(&projectOverride, "project", "", "Project override")
 	fs.StringVar(&rootOverride, "workspaces-root", "", "Workspaces root override")
 	fs.BoolVar(&yes, "yes", false, "skip confirmation")
-	if handled, err := parseCommandFlags(fs, args, "jjw tidy [options]", "Close Workspaces with no unique content or described commits, then remove empty leftover Workspace directories."); handled || err != nil {
+	if handled, err := parseCommandFlags(fs, args, "ajj tidy [options]", "Close Workspaces with no unique content or described commits, then remove empty leftover Workspace directories."); handled || err != nil {
 		return err
 	}
 	repoRoot, cfg, project, err := commandContext(repoRootOverride, projectOverride, rootOverride)
@@ -898,7 +922,7 @@ func runClose(args []string) error {
 	fs.BoolVar(&all, "all", false, "close all Closable Workspaces")
 	fs.BoolVar(&force, "force", false, "forced close: abandon unique mutable changes before closing")
 	fs.BoolVar(&yes, "yes", false, "skip confirmation")
-	if handled, err := parseCommandFlags(fs, args, "jjw close [handle...] [options]", "Close Workspace(s)."); handled || err != nil {
+	if handled, err := parseCommandFlags(fs, args, "ajj close [handle...] [options]", "Close Workspace(s)."); handled || err != nil {
 		return err
 	}
 	positionals := fs.Args()
@@ -1095,7 +1119,7 @@ func runMoveToMain(args []string) error {
 	fs.StringVar(&rootOverride, "workspaces-root", "", "Workspaces root override")
 	fs.BoolVar(&all, "all", false, "move all movable Workspaces")
 	fs.BoolVar(&yes, "yes", false, "skip confirmation prompts")
-	if handled, err := parseCommandFlags(fs, args, "jjw move-to-main [handle...] [options]", "Move selected tidy Workspace cursors to the current Main Workspace line. If the Main Workspace head is empty, selected Workspaces are moved to main@- so they become siblings of the Main Workspace cursor."); handled || err != nil {
+	if handled, err := parseCommandFlags(fs, args, "ajj move-to-main [handle...] [options]", "Move selected tidy Workspace cursors to the current Main Workspace line. If the Main Workspace head is empty, selected Workspaces are moved to main@- so they become siblings of the Main Workspace cursor."); handled || err != nil {
 		return err
 	}
 	positionals := fs.Args()
@@ -1263,7 +1287,7 @@ func runStack(args []string) error {
 	fs.BoolVar(&all, "all", false, "stack all stack-relevant Workspaces")
 	fs.BoolVar(&lineStack, "line", false, "Line Stack selected Workspaces onto one ordered line")
 	fs.BoolVar(&yes, "yes", false, "skip confirmation prompts")
-	if handled, err := parseCommandFlags(fs, args, "jjw stack [handle...] [options]", "Stack selected Workspaces into the target Workspace. The target defaults to --workspace, then the current --repo/cwd Workspace, then configured main_workspace; use --line for ordered Line Stacking."); handled || err != nil {
+	if handled, err := parseCommandFlags(fs, args, "ajj stack [handle...] [options]", "Stack selected Workspaces into the target Workspace. The target defaults to --workspace, then the current --repo/cwd Workspace, then configured main_workspace; use --line for ordered Line Stacking."); handled || err != nil {
 		return err
 	}
 	positionals := fs.Args()
@@ -2083,7 +2107,7 @@ func loadConfig(repoRoot string) (config, error) {
 		localRoots = []string{defaultRoot, repoRoot}
 	}
 	for _, root := range localRoots {
-		localPath := filepath.Join(root, ".jjw", "config.yaml")
+		localPath := filepath.Join(root, ".ajj", "config.yaml")
 		if err := mergeConfigFile(&merged, localPath); err != nil {
 			return config{}, err
 		}
@@ -2229,20 +2253,20 @@ func applyStackOverrides(cfg *config, rebaseMode, shape, conflictStrategy string
 
 func requireWorkspacesRoot(root string) error {
 	if strings.TrimSpace(root) == "" {
-		return errors.New("workspaces_root is required; set it in ~/.config/jjw/config.yaml or .jjw/config.yaml, pass --workspaces-root, or run `jjw init`")
+		return errors.New("workspaces_root is required; set it in ~/.config/ajj/config.yaml or .ajj/config.yaml, pass --workspaces-root, or run `ajj init`")
 	}
 	return nil
 }
 
 func globalConfigPath() (string, bool) {
 	if xdg := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); xdg != "" {
-		return filepath.Join(expandPath(xdg), "jjw", "config.yaml"), true
+		return filepath.Join(expandPath(xdg), "ajj", "config.yaml"), true
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", false
 	}
-	return filepath.Join(home, ".config", "jjw", "config.yaml"), true
+	return filepath.Join(home, ".config", "ajj", "config.yaml"), true
 }
 
 func validateWorkspaceHandle(handle string) error { return validateSlug("Workspace Handle", handle) }
@@ -2263,7 +2287,7 @@ func validateSlug(label, value string) error {
 
 func chooseAutoHandle(cfg config, repoRoot string, inUse map[string]struct{}) (string, error) {
 	if len(cfg.WorkspaceHandles) == 0 {
-		return "", errors.New("workspace_handles is empty; configure handles in ~/.config/jjw/config.yaml or .jjw/config.yaml")
+		return "", errors.New("workspace_handles is empty; configure handles in ~/.config/ajj/config.yaml or .ajj/config.yaml")
 	}
 	handles := make([]string, 0, len(cfg.WorkspaceHandles))
 	for _, candidate := range cfg.WorkspaceHandles {
@@ -3557,7 +3581,7 @@ func resolveDefaultWorkspaceRoot(repoRoot string) (string, bool) {
 }
 
 func loadState(repoRoot string) (state, error) {
-	path := filepath.Join(repoRoot, ".jjw", "state.json")
+	path := filepath.Join(repoRoot, ".ajj", "state.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -3576,7 +3600,7 @@ func loadState(repoRoot string) (state, error) {
 }
 
 func saveState(repoRoot string, st state) error {
-	dir := filepath.Join(repoRoot, ".jjw")
+	dir := filepath.Join(repoRoot, ".ajj")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create state dir: %w", err)
 	}
@@ -4399,6 +4423,146 @@ func emptyDefault(value, def string) string {
 		return def
 	}
 	return value
+}
+
+// versionString returns a stable, parseable single-line version identifier.
+// When built with `-ldflags "-X main.version=<v>"` it reports that value.
+// Otherwise (e.g. `go install ...@v0.1.0`) it falls back to build metadata
+// from runtime/debug so installed binaries surface something better than
+// bare "dev".
+func versionString() string {
+	if version != "" && version != "dev" {
+		return "ajj " + version
+	}
+	if info, ok := debug.ReadBuildInfo(); ok {
+		if v := info.Main.Version; v != "" && v != "(devel)" {
+			return "ajj " + strings.TrimPrefix(v, "v")
+		}
+		var rev string
+		var dirty bool
+		for _, setting := range info.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				rev = setting.Value
+			case "vcs.modified":
+				dirty = setting.Value == "true"
+			}
+		}
+		if rev != "" {
+			if len(rev) > 12 {
+				rev = rev[:12]
+			}
+			if dirty {
+				rev += "-dirty"
+			}
+			return "ajj dev (" + rev + ")"
+		}
+	}
+	return "ajj dev"
+}
+
+// commandNeedsJJ reports whether a command shells out to jj and therefore
+// requires the presence/minimum-version check. Commands like version, help,
+// shell-init and init do not touch jj and must not trigger the check.
+func commandNeedsJJ(command string) bool {
+	switch command {
+	case "create", "open", "list", "main", "close", "tidy", "stack", "move-to-main", "catch-up":
+		return true
+	default:
+		return false
+	}
+}
+
+var (
+	jjCheckMu   sync.Mutex
+	jjCheckDone bool
+	jjCheckErr  error
+)
+
+// ensureJJ verifies jj is installed and warns when it is older than the
+// documented minimum. It parses `jj --version` at most once and caches the
+// result, so repeated calls incur no additional subprocess cost.
+func ensureJJ() error {
+	jjCheckMu.Lock()
+	defer jjCheckMu.Unlock()
+	if jjCheckDone {
+		return jjCheckErr
+	}
+	jjCheckDone = true
+	jjCheckErr = checkJJ()
+	return jjCheckErr
+}
+
+// resetJJCheck clears the cached jj check result. Intended for tests.
+func resetJJCheck() {
+	jjCheckMu.Lock()
+	defer jjCheckMu.Unlock()
+	jjCheckDone = false
+	jjCheckErr = nil
+}
+
+func checkJJ() error {
+	if _, err := lookPathFn("jj"); err != nil {
+		return fmt.Errorf("Jujutsu (jj) is required but was not found on your PATH.\n"+
+			"ajj drives jj to manage Workspaces; install it (>= %s), then re-run.\n"+
+			"Install instructions: https://github.com/jj-vcs/jj", jjMinVersion)
+	}
+	out, err := jjVersionFn()
+	if err != nil {
+		// jj is present but we could not determine its version; proceed
+		// rather than blocking on an unexpected --version failure.
+		return nil
+	}
+	got := parseJJVersion(out)
+	if got == "" {
+		return nil
+	}
+	if compareVersions(got, jjMinVersion) < 0 {
+		s := cliStylesForWriter(stderrWriter)
+		fmt.Fprintf(stderrWriter, "%s jj %s is older than the minimum supported version %s "+
+			"(tested against jj %s). Some commands may misbehave; please upgrade: "+
+			"https://github.com/jj-vcs/jj\n",
+			s.Warn.Render("warning:"), got, jjMinVersion, jjTestedVersion)
+	}
+	return nil
+}
+
+// defaultJJVersion runs `jj --version` and returns its raw output.
+func defaultJJVersion() (string, error) {
+	return runCommandCapture("jj", "--version")
+}
+
+var jjVersionRe = regexp.MustCompile(`([0-9]+(?:\.[0-9]+){1,2})`)
+
+// parseJJVersion extracts a dotted numeric version (e.g. "0.42.0") from
+// `jj --version` output like "jj 0.42.0". Returns "" if none is found.
+func parseJJVersion(out string) string {
+	return jjVersionRe.FindString(out)
+}
+
+// compareVersions compares two dotted numeric version strings. It returns a
+// negative number when a < b, zero when equal, and a positive number when
+// a > b. Non-numeric or missing components are treated as 0.
+func compareVersions(a, b string) int {
+	as := strings.Split(a, ".")
+	bs := strings.Split(b, ".")
+	n := len(as)
+	if len(bs) > n {
+		n = len(bs)
+	}
+	for i := 0; i < n; i++ {
+		ai, bi := 0, 0
+		if i < len(as) {
+			ai, _ = strconv.Atoi(as[i])
+		}
+		if i < len(bs) {
+			bi, _ = strconv.Atoi(bs[i])
+		}
+		if ai != bi {
+			return ai - bi
+		}
+	}
+	return 0
 }
 
 func runCommandCapture(name string, args ...string) (string, error) {

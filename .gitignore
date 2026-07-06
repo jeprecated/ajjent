@@ -1,4 +1,6 @@
 bin/
+/ajj
+/ajjent
 
 # Devenv
 .devenv*
@@ -9,5 +11,5 @@ devenv.local.yaml
 # Legacy Devbox
 .devbox/
 
-.jjw/state.json
+.ajj/state.json
 .hunk/change-context/
