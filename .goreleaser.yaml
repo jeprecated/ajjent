@@ -1,0 +1,27 @@
+version: 2
+
+project_name: ajjent
+
+builds:
+  - id: ajj
+    main: .
+    binary: ajj
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - id: ajj
+    ids:
+      - ajj
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt

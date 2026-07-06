@@ -6,7 +6,7 @@
 }:
 
 let
-  version = "0.1.0";
+  version = "1.0.0";
 in
 buildGoModule {
   pname = "ajjent";
@@ -21,6 +21,7 @@ buildGoModule {
     "-X"
     "main.version=${version}"
   ];
+  # Tests shell out to `jj`; keep disabled unless jujutsu is added to checkInputs.
   doCheck = false;
 
   nativeBuildInputs = [ makeWrapper ];

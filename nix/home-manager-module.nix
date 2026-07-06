@@ -70,14 +70,14 @@ in {
       };
       description = "Contents of ~/.config/ajj/config.yaml";
       example = {
-        workspaces_root = "~/Development/workspaces";
-        project = "nixfiles";
+        workspaces_root = "~/workspaces";
+        project = "myrepo";
         handle_strategy = "first-unused";
         workspace_handles = [ "kilo" "lima" "mike" ];
         main_workspace = "default";
         assimilated_paths = [ "scratch" ];
         projects = {
-          nixfiles = {
+          myrepo = {
             assimilated_paths = [ ".local-notes" ];
           };
         };

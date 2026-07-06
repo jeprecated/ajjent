@@ -410,14 +410,14 @@ func TestMoveToMainSelectorPreselectsOnlyMovableWorkspaces(t *testing.T) {
 		{Ref: workspaceRef{Handle: "default"}, Main: true},
 		{Ref: workspaceRef{Handle: "alpha"}, Empty: true, Behind: 2},
 		{Ref: workspaceRef{Handle: "bravo"}, Empty: true},
-		{Ref: workspaceRef{Handle: "meme-ledger"}, Ahead: 1, Behind: 2},
+		{Ref: workspaceRef{Handle: "billing"}, Ahead: 1, Behind: 2},
 		{Ref: workspaceRef{Handle: "missing"}, Missing: true},
 	})
 	byHandle := mapSelectorItemsByHandle(items)
 	if !byHandle["alpha"].Selected || byHandle["alpha"].Disabled || byHandle["alpha"].Status != "move-to-main" {
 		t.Fatalf("expected alpha selected as movable, got %+v", byHandle["alpha"])
 	}
-	for _, handle := range []string{"bravo", "meme-ledger", "missing"} {
+	for _, handle := range []string{"bravo", "billing", "missing"} {
 		if byHandle[handle].Selected || !byHandle[handle].Disabled {
 			t.Fatalf("expected %s disabled and not preselected, got %+v", handle, byHandle[handle])
 		}
@@ -427,12 +427,12 @@ func TestMoveToMainSelectorPreselectsOnlyMovableWorkspaces(t *testing.T) {
 func TestMoveToMainSelectorPreselectsWorkspaceBehindDescribedEmptyMerge(t *testing.T) {
 	items := selectorItemsForMoveToMain([]workspaceInfo{
 		{Ref: workspaceRef{Handle: "default"}, Main: true, Empty: true},
-		{Ref: workspaceRef{Handle: "agentleman"}, Empty: true, Behind: 1},
+		{Ref: workspaceRef{Handle: "helper"}, Empty: true, Behind: 1},
 		{Ref: workspaceRef{Handle: "research"}, Empty: true},
 	})
 	byHandle := mapSelectorItemsByHandle(items)
-	if !byHandle["agentleman"].Selected || byHandle["agentleman"].Disabled || byHandle["agentleman"].Status != "move-to-main" {
-		t.Fatalf("expected cursor behind a described empty merge to be selected, got %+v", byHandle["agentleman"])
+	if !byHandle["helper"].Selected || byHandle["helper"].Disabled || byHandle["helper"].Status != "move-to-main" {
+		t.Fatalf("expected cursor behind a described empty merge to be selected, got %+v", byHandle["helper"])
 	}
 	if byHandle["research"].Selected || !byHandle["research"].Disabled || byHandle["research"].Status != "up-to-main" {
 		t.Fatalf("expected cursor with no relevant changes behind to stay disabled, got %+v", byHandle["research"])
@@ -457,7 +457,7 @@ func TestPreselectedMultiSelectorSubmitsDefaultCheckedRows(t *testing.T) {
 		opts: selectorOptions{Mode: selectorMulti, MoveToMain: true, Items: []selectorItem{
 			{Handle: "alpha", Selected: true},
 			{Handle: "bravo", Selected: true},
-			{Handle: "meme-ledger", Disabled: true},
+			{Handle: "billing", Disabled: true},
 		}},
 		selected: map[int]bool{0: true, 1: true},
 	}
@@ -683,17 +683,17 @@ func TestFormatAlignedListRowsKeepsPathColumnStable(t *testing.T) {
 
 func TestSelectorViewKeepsPathColumnStableWithLongHandlesAndMarkers(t *testing.T) {
 	paths := []string{
-		"/work/mono-sd",
-		"/work/workspaces/mono-sd/meme-ledger",
-		"/work/workspaces/mono-sd/switchyard-tracer-mono",
-		"/work/workspaces/mono-sd/phone-markdown",
+		"/work/acme-api",
+		"/work/workspaces/acme-api/billing",
+		"/work/workspaces/acme-api/worker",
+		"/work/workspaces/acme-api/mobile",
 	}
 	model := selectorModel{
 		opts: selectorOptions{Title: "Open Workspace", Mode: selectorSingle, Items: []selectorItem{
 			{Handle: "default", Status: "empty", Markers: "main,current", Path: paths[0]},
-			{Handle: "meme-ledger", Status: "unstacked", Markers: "-", Path: paths[1]},
-			{Handle: "switchyard-tracer-mono", Status: "unstacked", Markers: "-", Path: paths[2]},
-			{Handle: "phone-markdown", Status: "unstacked", Markers: "outside-layout,current", Path: paths[3]},
+			{Handle: "billing", Status: "unstacked", Markers: "-", Path: paths[1]},
+			{Handle: "worker", Status: "unstacked", Markers: "-", Path: paths[2]},
+			{Handle: "mobile", Status: "unstacked", Markers: "outside-layout,current", Path: paths[3]},
 		}},
 		cursor:   2,
 		selected: map[int]bool{},
@@ -981,7 +981,7 @@ func TestRunMoveToMainAllMovesOnlyBehindTidyWorkspaces(t *testing.T) {
 	workspacesRoot := filepath.Join(t.TempDir(), "workspaces")
 	mainPath := filepath.Join(workspacesRoot, "proj", "default")
 	alphaPath := filepath.Join(workspacesRoot, "proj", "alpha")
-	memePath := filepath.Join(workspacesRoot, "proj", "meme-ledger")
+	memePath := filepath.Join(workspacesRoot, "proj", "billing")
 	for _, path := range []string{mainPath, alphaPath, memePath} {
 		if err := os.MkdirAll(path, 0o755); err != nil {
 			t.Fatal(err)
@@ -991,7 +991,7 @@ func TestRunMoveToMainAllMovesOnlyBehindTidyWorkspaces(t *testing.T) {
 	withCommandCapture(t, func(name string, args ...string) (string, error) {
 		joined := strings.Join(args, " ")
 		if strings.Contains(joined, "workspace list") {
-			return "default\tmain111\t" + mainPath + "\nalpha\talpha111\t" + alphaPath + "\nmeme-ledger\tmeme111\t" + memePath + "\n", nil
+			return "default\tmain111\t" + mainPath + "\nalpha\talpha111\t" + alphaPath + "\nbilling\tmeme111\t" + memePath + "\n", nil
 		}
 		if strings.Contains(joined, "op log") {
 			return "op123\n", nil
@@ -1008,7 +1008,7 @@ func TestRunMoveToMainAllMovesOnlyBehindTidyWorkspaces(t *testing.T) {
 		if strings.Contains(joined, "empty() & alpha@") {
 			return "alpha-empty\n", nil
 		}
-		if strings.Contains(joined, workspaceAheadRevset("meme-ledger", "default")) {
+		if strings.Contains(joined, workspaceAheadRevset("billing", "default")) {
 			return "unique-meme\n", nil
 		}
 		if strings.Contains(joined, "empty() & default@") {
@@ -1030,12 +1030,12 @@ func TestRunMoveToMainAllMovesOnlyBehindTidyWorkspaces(t *testing.T) {
 		t.Fatalf("expected alpha to move to default@-, got commands:\n%s", joinedCommands)
 	}
 	if strings.Contains(joinedCommands, memePath+" new") {
-		t.Fatalf("meme-ledger has unique commits and should not move, got commands:\n%s", joinedCommands)
+		t.Fatalf("billing has unique commits and should not move, got commands:\n%s", joinedCommands)
 	}
 }
 
 func TestValidateMoveToMainRejectsWorkspaceWithUniqueCommits(t *testing.T) {
-	err := validateMoveToMainTarget(workspaceInfo{Ref: workspaceRef{Handle: "meme-ledger"}, Ahead: 1, Behind: 1})
+	err := validateMoveToMainTarget(workspaceInfo{Ref: workspaceRef{Handle: "billing"}, Ahead: 1, Behind: 1})
 	if err == nil || !strings.Contains(err.Error(), "unique content or described commits") {
 		t.Fatalf("expected unique-commits rejection, got %v", err)
 	}
@@ -1970,42 +1970,42 @@ func TestBuildLineStackPlanTreatsMainEmptyCursorAsPayload(t *testing.T) {
 func TestBuildLineStackPlanPreservesOrderRolesAndExcludedWorkspaces(t *testing.T) {
 	infos := []workspaceInfo{
 		{Ref: workspaceRef{Handle: "default"}, Main: true},
-		{Ref: workspaceRef{Handle: "agentleman"}},
-		{Ref: workspaceRef{Handle: "manual-ingestion"}},
+		{Ref: workspaceRef{Handle: "helper"}},
+		{Ref: workspaceRef{Handle: "ingest"}},
 		{Ref: workspaceRef{Handle: "loop"}, Empty: true},
-		{Ref: workspaceRef{Handle: "frontloop-mobile-markdown"}},
+		{Ref: workspaceRef{Handle: "mobile-docs"}},
 	}
 	plan, err := buildLineStackPlan(infos, []lineStackInput{
 		{Handle: "loop", Role: selectorRoleFollow},
-		{Handle: "agentleman", Role: selectorRolePayload},
-		{Handle: "manual-ingestion", Role: selectorRolePayload},
+		{Handle: "helper", Role: selectorRolePayload},
+		{Handle: "ingest", Role: selectorRolePayload},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := lineStackInputHandles(plan.Inputs); strings.Join(got, ",") != "loop,agentleman,manual-ingestion" {
+	if got := lineStackInputHandles(plan.Inputs); strings.Join(got, ",") != "loop,helper,ingest" {
 		t.Fatalf("expected input order preserved, got %v", got)
 	}
-	if got := lineStackInputHandles(plan.Payloads); strings.Join(got, ",") != "agentleman,manual-ingestion" {
+	if got := lineStackInputHandles(plan.Payloads); strings.Join(got, ",") != "helper,ingest" {
 		t.Fatalf("expected first payload as bottom and second as top, got %v", got)
 	}
 	if got := lineStackInputHandles(plan.FollowOnly); strings.Join(got, ",") != "loop" {
 		t.Fatalf("expected follow-only loop, got %v", got)
 	}
-	if got := strings.Join(plan.Excluded, ","); got != "default,frontloop-mobile-markdown" {
+	if got := strings.Join(plan.Excluded, ","); got != "default,mobile-docs" {
 		t.Fatalf("expected excluded context to include omitted Workspaces, got %v", plan.Excluded)
 	}
-	if len(plan.PayloadRebases) != 1 || plan.PayloadRebases[0].SourceRevset != lineStackPayloadSourceRevset("manual-ingestion", "agentleman") || plan.PayloadRebases[0].DestinationRevset != lineStackPayloadDestinationRevset("agentleman") {
+	if len(plan.PayloadRebases) != 1 || plan.PayloadRebases[0].SourceRevset != lineStackPayloadSourceRevset("ingest", "helper") || plan.PayloadRebases[0].DestinationRevset != lineStackPayloadDestinationRevset("helper") {
 		t.Fatalf("unexpected payload rebase plan: %+v", plan.PayloadRebases)
 	}
-	if plan.FinalTip != lineStackPayloadDestinationRevset("manual-ingestion") {
+	if plan.FinalTip != lineStackPayloadDestinationRevset("ingest") {
 		t.Fatalf("expected final tip to be last payload frontier, got %q", plan.FinalTip)
 	}
 }
 
 func TestLineStackPayloadRevsetsUseUniqueNonEmptyFrontiers(t *testing.T) {
-	source := lineStackPayloadSourceRevset("manual-ingestion", "agentleman")
-	for _, want := range []string{"::manual-ingestion@", "~::agentleman@", "~empty()"} {
+	source := lineStackPayloadSourceRevset("ingest", "helper")
+	for _, want := range []string{"::ingest@", "~::helper@", "~empty()"} {
 		if !strings.Contains(source, want) {
 			t.Fatalf("expected source revset %q to contain %q", source, want)
 		}
@@ -2015,8 +2015,8 @@ func TestLineStackPayloadRevsetsUseUniqueNonEmptyFrontiers(t *testing.T) {
 			t.Fatalf("source revset should not contain %q, got %q", notWant, source)
 		}
 	}
-	destination := lineStackPayloadDestinationRevset("agentleman")
-	for _, want := range []string{"heads(", "::agentleman@", "~empty()"} {
+	destination := lineStackPayloadDestinationRevset("helper")
+	for _, want := range []string{"heads(", "::helper@", "~empty()"} {
 		if !strings.Contains(destination, want) {
 			t.Fatalf("expected destination revset %q to contain %q", destination, want)
 		}
@@ -2150,21 +2150,21 @@ func TestResolveLineStackPlanExcludesInProgressHeadFromPayloadAndRebasesIt(t *te
 	}
 }
 
-func TestLineStackMonoSDExampleRebasesLoopInProgressHeadOnTop(t *testing.T) {
+func TestLineStackNeutralExampleRebasesLoopInProgressHeadOnTop(t *testing.T) {
 	infos := []workspaceInfo{
-		{Ref: workspaceRef{Handle: "default"}, Path: "/mono-sd/default", Main: true},
-		{Ref: workspaceRef{Handle: "loop"}, Path: "/mono-sd/loop"},
-		{Ref: workspaceRef{Handle: "session-history"}, Path: "/mono-sd/session-history"},
-		{Ref: workspaceRef{Handle: "agm-run-20260625084133-1ljpys"}, Path: "/mono-sd/agm-run-20260625084133-1ljpys", Empty: true},
-		{Ref: workspaceRef{Handle: "frontloop-mobile-markdown"}, Path: "/mono-sd/frontloop-mobile-markdown", Empty: true},
-		{Ref: workspaceRef{Handle: "agentleman"}, Path: "/mono-sd/agentleman"},
+		{Ref: workspaceRef{Handle: "default"}, Path: "/acme-api/default", Main: true},
+		{Ref: workspaceRef{Handle: "loop"}, Path: "/acme-api/loop"},
+		{Ref: workspaceRef{Handle: "audit-log"}, Path: "/acme-api/audit-log"},
+		{Ref: workspaceRef{Handle: "task-20260625084133-1ljpys"}, Path: "/acme-api/task-20260625084133-1ljpys", Empty: true},
+		{Ref: workspaceRef{Handle: "mobile-docs"}, Path: "/acme-api/mobile-docs", Empty: true},
+		{Ref: workspaceRef{Handle: "helper"}, Path: "/acme-api/helper"},
 	}
 	plan, err := buildLineStackPlan(infos, []lineStackInput{
 		{Handle: "default"},
 		{Handle: "loop"},
-		{Handle: "session-history"},
-		{Handle: "agm-run-20260625084133-1ljpys"},
-		{Handle: "frontloop-mobile-markdown"},
+		{Handle: "audit-log"},
+		{Handle: "task-20260625084133-1ljpys"},
+		{Handle: "mobile-docs"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2180,37 +2180,37 @@ func TestLineStackMonoSDExampleRebasesLoopInProgressHeadOnTop(t *testing.T) {
 			return "uxn-default-tip\n", nil
 		case strings.Contains(joined, lineStackPayloadDestinationRevsetExcluding("loop", []string{"nr-loop-wip"})):
 			return "uxo-loop-payload\n", nil
-		case strings.Contains(joined, lineStackPayloadDestinationRevset("session-history")):
+		case strings.Contains(joined, lineStackPayloadDestinationRevset("audit-log")):
 			return "ys-session-tip\n", nil
 		case strings.Contains(joined, lineStackPayloadSourceRevset("loop", "default")) && strings.Contains(joined, "~(nr-loop-wip)") && !strings.Contains(joined, "immutable()") && !strings.Contains(joined, "descendants"):
 			return "uxo-loop-payload\n", nil
-		case strings.Contains(joined, lineStackPayloadSourceRevset("session-history", "loop")) && !strings.Contains(joined, "immutable()") && !strings.Contains(joined, "descendants"):
+		case strings.Contains(joined, lineStackPayloadSourceRevset("audit-log", "loop")) && !strings.Contains(joined, "immutable()") && !strings.Contains(joined, "descendants"):
 			return "vv-session-base\nys-session-tip\n", nil
 		}
 		return "", nil
 	})
-	resolved, err := resolveLineStackPlan("/mono-sd/default", plan)
+	resolved, err := resolveLineStackPlan("/acme-api/default", plan)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := lineStackInputHandles(resolved.Payloads); strings.Join(got, ",") != "default,loop,session-history" {
-		t.Fatalf("expected agm/frontloop empty rows to be follow-only and not payloads, got %v", got)
+	if got := lineStackInputHandles(resolved.Payloads); strings.Join(got, ",") != "default,loop,audit-log" {
+		t.Fatalf("expected task/mobile empty rows to be follow-only and not payloads, got %v", got)
 	}
 	loopAdvance := lineStackAdvanceByHandle(resolved.Advances, "loop")
 	if !loopAdvance.InProgress || loopAdvance.InProgressRevset != "nr-loop-wip" {
 		t.Fatalf("expected loop@ nr/no-description head to be tracked as in-progress, got %+v", loopAdvance)
 	}
 	if len(resolved.PayloadRebases) != 2 {
-		t.Fatalf("expected loop and session-history payload rebases, got %+v", resolved.PayloadRebases)
+		t.Fatalf("expected loop and audit-log payload rebases, got %+v", resolved.PayloadRebases)
 	}
 	if resolved.PayloadRebases[0].Handle != "loop" || resolved.PayloadRebases[0].SourceRevset != "uxo-loop-payload" || strings.Contains(resolved.PayloadRebases[0].SourceRevset, "nr-loop-wip") {
 		t.Fatalf("expected loop payload rebase to use uxo below nr, got %+v", resolved.PayloadRebases[0])
 	}
 	if resolved.FinalTip != "ys-session-tip" {
-		t.Fatalf("expected final line tip to be session-history payload frontier, got %q", resolved.FinalTip)
+		t.Fatalf("expected final line tip to be audit-log payload frontier, got %q", resolved.FinalTip)
 	}
 	preview := lineStackPlanText(resolved, "op-before-example", "")
-	for _, want := range []string{"In-progress Workspace rebases:", "loop@ -> ys-session-tip", "Follow-only advances:", "agm-run-20260625084133-1ljpys@ -> ys-session-tip", "frontloop-mobile-markdown@ -> ys-session-tip"} {
+	for _, want := range []string{"In-progress Workspace rebases:", "loop@ -> ys-session-tip", "Follow-only advances:", "task-20260625084133-1ljpys@ -> ys-session-tip", "mobile-docs@ -> ys-session-tip"} {
 		if !strings.Contains(preview, want) {
 			t.Fatalf("expected preview to contain %q, got %q", want, preview)
 		}
@@ -2227,7 +2227,7 @@ func TestLineStackMonoSDExampleRebasesLoopInProgressHeadOnTop(t *testing.T) {
 		}
 		return nil
 	})
-	if err := executeLineStackPlan("/mono-sd/default", resolved); err != nil {
+	if err := executeLineStackPlan("/acme-api/default", resolved); err != nil {
 		t.Fatal(err)
 	}
 	if len(rebaseCommands) != 3 {
@@ -2236,11 +2236,11 @@ func TestLineStackMonoSDExampleRebasesLoopInProgressHeadOnTop(t *testing.T) {
 	if !strings.Contains(strings.Join(rebaseCommands[0], " "), "-r uxo-loop-payload") || strings.Contains(strings.Join(rebaseCommands[0], " "), "nr-loop-wip") {
 		t.Fatalf("expected loop payload command to exclude nr WIP head, got %v", rebaseCommands[0])
 	}
-	if !strings.Contains(strings.Join(rebaseCommands[2], " "), "-R /mono-sd/loop rebase -r loop@ -d ys-session-tip") {
+	if !strings.Contains(strings.Join(rebaseCommands[2], " "), "-R /acme-api/loop rebase -r loop@ -d ys-session-tip") {
 		t.Fatalf("expected loop WIP head to be rebased on top of final line, got %v", rebaseCommands[2])
 	}
 	for _, cmd := range newCommands {
-		if strings.Contains(strings.Join(cmd, " "), "/mono-sd/loop") {
+		if strings.Contains(strings.Join(cmd, " "), "/acme-api/loop") {
 			t.Fatalf("loop WIP Workspace should not be replaced with jj new cursor, got new commands %v", newCommands)
 		}
 	}
@@ -2575,7 +2575,7 @@ func lineStackAdvanceByHandle(advances []lineStackAdvance, handle string) lineSt
 func TestRunStackLineUsesOrderedPayloadRebasesAndAdvancesSelectedHeadsOnly(t *testing.T) {
 	workspacesRoot := filepath.Join(t.TempDir(), "workspaces")
 	mainPath := filepath.Join(workspacesRoot, "proj", "default")
-	handles := []string{"default", "agentleman", "manual-ingestion", "switchyard-tracer-mono", "loop", "frontloop-mobile-markdown"}
+	handles := []string{"default", "helper", "ingest", "worker", "loop", "mobile-docs"}
 	for _, handle := range handles {
 		path := filepath.Join(workspacesRoot, "proj", handle)
 		if err := os.MkdirAll(path, 0o755); err != nil {
@@ -2595,22 +2595,22 @@ func TestRunStackLineUsesOrderedPayloadRebasesAndAdvancesSelectedHeadsOnly(t *te
 		if strings.Contains(joined, " op log ") {
 			return "op-before-line\n", nil
 		}
-		if strings.Contains(joined, workspaceAheadRevset("agentleman", "default")) || strings.Contains(joined, workspaceAheadRevset("manual-ingestion", "default")) || strings.Contains(joined, workspaceAheadRevset("switchyard-tracer-mono", "default")) || strings.Contains(joined, workspaceAheadRevset("frontloop-mobile-markdown", "default")) {
+		if strings.Contains(joined, workspaceAheadRevset("helper", "default")) || strings.Contains(joined, workspaceAheadRevset("ingest", "default")) || strings.Contains(joined, workspaceAheadRevset("worker", "default")) || strings.Contains(joined, workspaceAheadRevset("mobile-docs", "default")) {
 			return "ahead\n", nil
 		}
 		if strings.Contains(joined, "empty() & loop@") && !strings.Contains(joined, "description(\"\")") {
 			return "empty\n", nil
 		}
 		switch {
-		case strings.Contains(joined, lineStackPayloadDestinationRevset("agentleman")):
+		case strings.Contains(joined, lineStackPayloadDestinationRevset("helper")):
 			return "agent-tip\n", nil
-		case strings.Contains(joined, lineStackPayloadDestinationRevset("manual-ingestion")):
+		case strings.Contains(joined, lineStackPayloadDestinationRevset("ingest")):
 			return "manual-tip\n", nil
-		case strings.Contains(joined, lineStackPayloadDestinationRevset("switchyard-tracer-mono")):
+		case strings.Contains(joined, lineStackPayloadDestinationRevset("worker")):
 			return "switch-tip\n", nil
-		case strings.Contains(joined, lineStackPayloadSourceRevset("manual-ingestion", "agentleman")) && !strings.Contains(joined, "immutable()") && !strings.Contains(joined, "descendants"):
+		case strings.Contains(joined, lineStackPayloadSourceRevset("ingest", "helper")) && !strings.Contains(joined, "immutable()") && !strings.Contains(joined, "descendants"):
 			return "manual-root\nmanual-tip\n", nil
-		case strings.Contains(joined, lineStackPayloadSourceRevset("switchyard-tracer-mono", "manual-ingestion")) && !strings.Contains(joined, "immutable()") && !strings.Contains(joined, "descendants"):
+		case strings.Contains(joined, lineStackPayloadSourceRevset("worker", "ingest")) && !strings.Contains(joined, "immutable()") && !strings.Contains(joined, "descendants"):
 			return "switch-tip\n", nil
 		}
 		return "", nil
@@ -2632,7 +2632,7 @@ func TestRunStackLineUsesOrderedPayloadRebasesAndAdvancesSelectedHeadsOnly(t *te
 		return nil
 	})
 	out, errOut, err := captureOutput(func() error {
-		return runStack([]string{"--line", "agentleman", "manual-ingestion", "switchyard-tracer-mono", "loop", "--repo", mainPath, "--yes"})
+		return runStack([]string{"--line", "helper", "ingest", "worker", "loop", "--repo", mainPath, "--yes"})
 	})
 	if err != nil {
 		t.Fatalf("expected ordered line stack to run, got %v\nstderr:%s", err, errOut)
@@ -2647,26 +2647,26 @@ func TestRunStackLineUsesOrderedPayloadRebasesAndAdvancesSelectedHeadsOnly(t *te
 		t.Fatalf("expected four selected Workspace `jj new` advances, got %d: %v", len(newCommands), newCommands)
 	}
 	if !strings.Contains(strings.Join(rebaseCommands[0], " "), "-r (manual-root | manual-tip)") || strings.Join(rebaseDestinations(rebaseCommands[0]), ",") != "agent-tip" {
-		t.Fatalf("expected materialized manual-ingestion payload rebase onto agentleman frontier, got %v", rebaseCommands[0])
+		t.Fatalf("expected materialized ingest payload rebase onto helper frontier, got %v", rebaseCommands[0])
 	}
 	if !strings.Contains(strings.Join(rebaseCommands[1], " "), "-r switch-tip") || strings.Join(rebaseDestinations(rebaseCommands[1]), ",") != "manual-tip" {
-		t.Fatalf("expected materialized switchyard payload rebase onto manual-ingestion frontier, got %v", rebaseCommands[1])
+		t.Fatalf("expected materialized worker payload rebase onto ingest frontier, got %v", rebaseCommands[1])
 	}
-	for i, handle := range []string{"agentleman", "manual-ingestion", "switchyard-tracer-mono", "loop"} {
+	for i, handle := range []string{"helper", "ingest", "worker", "loop"} {
 		cmd := strings.Join(newCommands[i], " ")
 		if !strings.Contains(cmd, "-R "+filepath.Join(workspacesRoot, "proj", handle)) || !strings.Contains(cmd, " new switch-tip") {
 			t.Fatalf("expected selected Workspace %s to get a new cursor at final tip, got %v", handle, newCommands[i])
 		}
 	}
 	for _, cmd := range append(rebaseCommands, newCommands...) {
-		if strings.Contains(strings.Join(cmd, " "), "frontloop-mobile-markdown@") || strings.Contains(strings.Join(cmd, " "), filepath.Join(workspacesRoot, "proj", "frontloop-mobile-markdown")) {
+		if strings.Contains(strings.Join(cmd, " "), "mobile-docs@") || strings.Contains(strings.Join(cmd, " "), filepath.Join(workspacesRoot, "proj", "mobile-docs")) {
 			t.Fatalf("unselected Workspace was unexpectedly rebased or advanced: rebase=%v new=%v", rebaseCommands, newCommands)
 		}
 	}
 	if !updateStale {
 		t.Fatal("expected workspace update-stale after line stack")
 	}
-	for _, want := range []string{"Line Stack preview", "agentleman", "manual-ingestion", "switchyard-tracer-mono", "loop", "frontloop-mobile-markdown", "To undo this run: jj op restore op-before-line"} {
+	for _, want := range []string{"Line Stack preview", "helper", "ingest", "worker", "loop", "mobile-docs", "To undo this run: jj op restore op-before-line"} {
 		if !strings.Contains(errOut, want) {
 			t.Fatalf("expected stderr preview/undo to contain %q, got %q", want, errOut)
 		}

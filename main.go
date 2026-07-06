@@ -442,7 +442,7 @@ func runInit(args []string) error {
 		if !canUseTUI() {
 			return errors.New("init requires --workspaces-root")
 		}
-		value, err := promptText("Workspaces root", "~/Development/workspaces")
+		value, err := promptText("Workspaces root", "~/workspaces")
 		if err != nil || strings.TrimSpace(value) == "" {
 			return err
 		}

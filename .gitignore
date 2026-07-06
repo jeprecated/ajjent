@@ -12,4 +12,7 @@ devenv.local.yaml
 .devbox/
 
 .ajj/state.json
+
+# Local Hunk review session artifacts
+.hunk
 .hunk/change-context/

@@ -40,7 +40,7 @@ The old `assimilated_folders` key is still accepted as a deprecated alias for ex
 ## Full example
 
 ```yaml
-workspaces_root: "~/Development/workspaces"
+workspaces_root: "~/workspaces"
 project: "my-project"
 workspace_handles:
   - alpha

@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Go (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+          cache: true
+
+      - name: Install jj (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          jj_version=0.42.0
+          case "$(uname -m)" in
+            x86_64) target=x86_64-unknown-linux-musl ;;
+            aarch64|arm64) target=aarch64-unknown-linux-musl ;;
+            *) echo "unsupported runner architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          curl -L --fail -o jj.tar.gz "https://github.com/jj-vcs/jj/releases/download/v${jj_version}/jj-v${jj_version}-${target}.tar.gz"
+          mkdir -p jj-dist
+          tar -xzf jj.tar.gz -C jj-dist
+          jj_bin="$(find jj-dist -type f -name jj -perm -u+x | head -n 1)"
+          test -n "$jj_bin"
+          sudo install -m 0755 "$jj_bin" /usr/local/bin/jj
+          jj --version
+
+      - name: Install jj (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install jj
+          jj --version
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Check formatting
+        shell: bash
+        run: |
+          set -euo pipefail
+          gofmt -l *.go | tee /tmp/gofmt.out
+          test ! -s /tmp/gofmt.out
+
+      - name: Test
+        run: go test ./...

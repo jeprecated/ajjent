@@ -1,4 +1,4 @@
-workspaces_root: "~/Development/workspaces"
+workspaces_root: "~/workspaces"
 project: "example-project"
 handle_strategy: first-unused
 workspace_handles:

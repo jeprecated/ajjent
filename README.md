@@ -1,27 +1,127 @@
 # Ajjent
 
-`ajj` is a Jujutsu Workspace lifecycle tool. It keeps Workspaces under a predictable Project layout and optimizes for quick create/open/stack/close loops.
+Ajjent (`ajj`) is a Jujutsu companion for cross-workspace **Stacking**: run a fleet of **Workspaces** and restack their work, instead of using another worktree manager.
 
-Canonical layout for Workspaces created by `ajj`:
+<!-- demo: asciinema/GIF to be added -->
 
-```text
-<workspaces_root>/<project>/<workspace_handle>
+A **Workspace** is a named working directory attached to one `jj` repo. A **Project** is the safe folder group for that repo's Workspaces, and a **Workspace Handle** is the reusable slug such as `web`, `api`, or `alpha` used to create and reopen one.
+
+For the authoritative vocabulary, see [`CONTEXT.md`](CONTEXT.md).
+
+## Why not just `jj workspace`?
+
+Native Jujutsu Workspaces are the foundation, but `ajj` fills daily workflow gaps around them:
+
+- a predictable layout convention: `<workspaces_root>/<project>/<workspace_handle>`;
+- parent-shell `cd` support through bash/zsh wrappers;
+- selection UI/TUI flows for opening, closing, Stacking, and moving Workspaces;
+- cleanup through `ajj tidy`; and
+- cross-workspace **Stacking** with no native `jj` equivalent, including ordered **Line Stacking** for turning selected Workspaces into one explicit line while leaving others alone.
+
+## Install
+
+Choose whichever install path fits your environment. Nix is supported, but it is only one option.
+
+### Go
+
+```bash
+go install github.com/jeprecated/ajjent@latest
 ```
 
-`workspaces_root` is required. `project` defaults to the repo/default-workspace basename unless configured or overridden with `--project`. A Workspace Handle is a reusable safe slug such as `alpha`, `kilo`, or `feature-2`.
+Make sure your Go bin directory is on `PATH`.
 
-Repo-aware commands can target another checkout with either the global form `ajj --repo PATH <command> ...` or the command-local form `ajj <command> --repo PATH ...`; using both in one invocation is rejected.
+### Release binary
+
+Download the `ajj` archive for your OS/architecture from GitHub Releases. Release binaries are produced by GoReleaser for Linux and macOS on amd64 and arm64.
+
+### Nix flake
+
+```bash
+nix profile install github:jeprecated/ajjent#ajjent
+```
+
+Or run without installing:
+
+```bash
+nix run github:jeprecated/ajjent -- --help
+```
+
+### Home Manager
+
+```nix
+{
+  inputs.ajjent.url = "github:jeprecated/ajjent";
+
+  outputs = { self, nixpkgs, home-manager, ajjent, ... }: {
+    homeConfigurations.me = home-manager.lib.homeManagerConfiguration {
+      pkgs = import nixpkgs { system = "x86_64-linux"; };
+      modules = [
+        ajjent.homeManagerModules.default
+        ({ ... }: {
+          programs.ajjent = {
+            enable = true;
+            settings = {
+              workspaces_root = "~/workspaces";
+              project = "myrepo";
+              workspace_handles = [ "web" "api" "docs" ];
+              handle_strategy = "first-unused";
+              main_workspace = "default";
+              assimilated_paths = [ "scratch" ];
+              projects = {
+                myrepo = {
+                  assimilated_paths = [ ".local-notes" ];
+                };
+              };
+              stack = {
+                rebase_mode = "auto";
+                shape = "auto";
+                conflict_strategy = "prefer-clean";
+              };
+              create = {
+                envrc = false;
+                direnv_allow = false;
+              };
+            };
+          };
+        })
+      ];
+    };
+  };
+}
+```
+
+## Prerequisites
+
+`ajj` shells out to `jj` (Jujutsu), which must be on `PATH`.
+
+- Minimum supported `jj`: 0.20.0
+- Tested against: 0.42.x
+
+Commands that only print help or version information do not require `jj`; repo-aware commands do.
+
+## Quick Start
+
+```bash
+jj git init myrepo && cd myrepo && echo hello > README.md && jj commit -m "initial"
+ajj init --workspaces-root ../workspaces --local --project myrepo
+ajj create web
+cd "$(ajj open web)" && echo web >> README.md && jj commit -m "web change"
+ajj stack web --workspace default --yes
+```
 
 ## Commands
 
 ### Setup
 
 - `ajj init --workspaces-root PATH [--local] [--force] [--project PROJECT]` — create config. Global by default; `--local` writes `<repo>/.ajj/config.yaml`.
+- `ajj version` / `ajj --version` — print a single machine-consumable version line on stdout.
+
+Repo-aware commands can target another checkout with either the global form `ajj --repo PATH <command> ...` or the command-local form `ajj <command> --repo PATH ...`; using both in one invocation is rejected.
 
 ### Workspace lifecycle
 
-- `ajj create [handle]` — create a Workspace and print its path. Without a handle, picks one from `workspace_handles`. Materializes configured assimilated path symlinks.
-- `ajj open [handle]` — print an existing Workspace path. With no handle, opens the built-in selector. Opening never creates. It also repairs configured assimilated path symlinks.
+- `ajj create [handle]` — create a Workspace and print its path. Without a Handle, picks one from `workspace_handles`. Materializes configured **Assimilated paths**: repo-relative local files, directories, or globs shared into Workspaces by symlink.
+- `ajj open [handle]` — print an existing Workspace path. With no Handle, opens the built-in selector. Opening never creates. It also repairs configured Assimilated path symlinks.
 - `ajj close [handle...]` — close Workspaces and print the Main Workspace path for shell wrappers.
 - `ajj close --all` — close all Closable Workspaces.
 - `ajj close --force [--yes] ...` — Forced Closing: abandon unique mutable changes not reachable from Main or any other Workspace, then close.
@@ -29,16 +129,18 @@ Repo-aware commands can target another checkout with either the global form `ajj
 
 ### Stacking
 
+**Stacking** means bringing selected Workspaces together for review, building, or testing.
+
 - `ajj stack [handle...]` — Stack selected Workspaces into the target Workspace.
 - `ajj stack --workspace HANDLE [handle...]` — explicitly choose the target Workspace.
 - `ajj stack --all` — non-interactive equivalent of the selector's All row.
 - `ajj stack --line [handle...]` — Line Stack selected Workspaces onto one ordered line while leaving omitted Workspaces untouched.
 - `ajj move-to-main [handle...]` — move selected tidy Workspace cursors up to the Main Workspace line.
-- `ajj move-to-main --all` — non-interactively move every movable Workspace; with no handles, use the TUI.
+- `ajj move-to-main --all` — non-interactively move every movable Workspace; with no Handles, use the TUI.
 
-The stack target resolves in this order: explicit `--workspace`, then the current Workspace from `--repo`/cwd, then configured `main_workspace` for compatibility. This means `ajj stack child --repo /path/to/speed --yes` advances `speed@` by default; use `--workspace default` when you intentionally want to advance `default@`. When the current non-default Workspace becomes the target, `--all` does not silently include the configured `main_workspace`. `ajj` refuses to stack the target Workspace into itself and asks for `--workspace` when the target should be something else.
+The stack target resolves in this order: explicit `--workspace`, then the current Workspace from `--repo`/cwd, then configured `main_workspace` for compatibility. This means `ajj stack child --repo /path/to/myrepo-workspaces/speed --yes` advances `speed@` by default; use `--workspace default` when you intentionally want to advance `default@`. When the current non-default Workspace becomes the target, `--all` does not silently include the configured `main_workspace`. `ajj` refuses to stack the target Workspace into itself and asks for `--workspace` when the target should be something else.
 
-Stack's All row includes Workspaces with commits ahead of the target or conflicts and excludes empty, missing, and already-stacked Workspaces. If you check specific boxes, Enter submits exactly those checked Workspaces; the All row only expands to every stack-relevant Workspace when nothing is checked. Before rebasing from the selector, `ajj` confirms the exact Stack Inputs and option values. Positional handles skip the TUI. Stack uses each Workspace's payload parent (`handle@-`) as the target input, then advances each selected Workspace head (`handle@`) onto the new target so empty cursors and in-progress changes move forward. Advanced graph controls remain available as flags and TUI footer toggles:
+Stack's All row includes Workspaces with commits ahead of the target or conflicts and excludes empty, missing, and already-stacked Workspaces. If you check specific boxes, Enter submits exactly those checked Workspaces; the All row only expands to every stack-relevant Workspace when nothing is checked. Before rebasing from the selector, `ajj` confirms the exact Stack Inputs and option values. Positional Handles skip the TUI. Stack uses each Workspace's payload parent (`handle@-`) as the target input, then advances each selected Workspace head (`handle@`) onto the new target so empty cursors and in-progress changes move forward. Advanced graph controls remain available as flags and TUI footer toggles:
 
 - `--rebase-mode auto|branch|revision`
 - `--stack-shape auto|linear|merge`
@@ -48,19 +150,19 @@ When `prefer-clean` is used with `--stack-shape auto`, `ajj` tries the auto-sele
 
 `move-to-main` is for Workspaces that have no unique content or described commits and are only behind the Main Workspace. The TUI starts movable rows checked so you can quickly uncheck Workspaces to leave alone. Empty undescribed changes are ignored, but empty described merges still count as `ahead`/`behind`. If the Main Workspace head is empty, `ajj` advances each selected Workspace with `jj new main@-`, making the Workspace cursors siblings of the Main Workspace cursor; otherwise it uses `jj new main@`.
 
-Line Stacking is an ordered variant for the common "make these selected Workspaces one line, but leave the others alone" workflow described in ADR 0008. Positional handles define the line order: the first payload Workspace is the bottom and the last payload Workspace becomes the final tip. With no handles, the TUI preserves selection order; selected rows show payload (`P`) or follow-only (`F`), and `a` toggles that role. Empty or already represented Workspaces default to follow-only so their Workspace heads move to the final tip without contributing payload commits. A non-empty Workspace head with no description is treated as in-progress working-copy state: it is excluded from the payload line and rebased on top of the final Line Stack tip. `ajj` always prints a preview to stderr with the projected log, ordered inputs, payload rebases, follow-only advances, in-progress rebases, excluded Workspaces, and the undo command; interactive runs ask for confirmation unless `--yes` is passed. If a Line Stack operation conflicts, `ajj` stops and leaves the conflicted state for manual resolution.
+Line Stacking is an ordered variant for the common "make these selected Workspaces one line, but leave the others alone" workflow described in ADR 0008. Positional Handles define the line order: the first payload Workspace is the bottom and the last payload Workspace becomes the final tip. With no Handles, the TUI preserves selection order; selected rows show payload (`P`) or **Follow-only** (`F`). A Follow-only Workspace is advanced to the final Line Stacking tip without contributing payload commits, and `a` toggles that role. Empty or already represented Workspaces default to Follow-only. A non-empty Workspace head with no description is treated as in-progress working-copy state: it is excluded from the payload line and rebased on top of the final Line Stack tip. `ajj` always prints a preview to stderr with the projected log, ordered inputs, payload rebases, follow-only advances, in-progress rebases, excluded Workspaces, and the undo command; interactive runs ask for confirmation unless `--yes` is passed. If a Line Stack operation conflicts, `ajj` stops and leaves the conflicted state for manual resolution.
 
 Example:
 
 ```sh
-ajj stack --line agentleman manual-ingestion switchyard-tracer-mono loop
+ajj stack --line web api docs
 ```
 
-This stacks `agentleman`, `manual-ingestion`, and `switchyard-tracer-mono` in that order, advances `loop` if it is follow-only, and intentionally leaves unlisted Workspaces such as `frontloop-mobile-markdown` untouched. Human-facing preview and progress stay on stderr; stdout remains reserved for path/data protocols.
+This stacks `web`, `api`, and `docs` in that order and intentionally leaves unlisted Workspaces such as `release-notes` untouched. Human-facing preview and progress stay on stderr; stdout remains reserved for path/data protocols.
 
 ### Inspect and housekeeping
 
-- `ajj list` — print Workspaces as handle, markers, ahead, behind, action, path. Terminal output is aligned for reading; redirected output is tab-separated for parsing. Includes Current and Main markers. `ahead` counts Workspace commits not in Main except empty undescribed changes; `behind` counts Main commits not in that Workspace except empty undescribed changes.
+- `ajj list` — print Workspaces as Handle, markers, ahead, behind, action, path. Terminal output is aligned for reading; redirected output is tab-separated for parsing. Includes Current and Main markers. `ahead` counts Workspace commits not in Main except empty undescribed changes; `behind` counts Main commits not in that Workspace except empty undescribed changes.
 - `ajj list --paths` — print paths only.
 - `ajj tidy` — list and offer to close active Workspaces with no unique content or described commits, then remove empty leftover directories under the Project layout and report non-empty leftovers. Use `--yes` to skip confirmation.
 - `ajj shell-init [bash|zsh]` — print shell integration so `create`, `open`, `close`, and `main` can change the current shell's directory.
@@ -75,7 +177,7 @@ Local repo override:
 
 - `<repo-root>/.ajj/config.yaml`
 
-Local state file for `next-unused` handle selection:
+Local state file for `next-unused` Handle selection:
 
 - `<repo-root>/.ajj/state.json`
 
@@ -84,18 +186,18 @@ Local state file for `next-unused` handle selection:
 Example:
 
 ```yaml
-workspaces_root: "~/Development/workspaces"
-project: "nixfiles"
+workspaces_root: "~/workspaces"
+project: "myrepo"
 workspace_handles:
-  - alpha
-  - bravo
-  - charlie
+  - web
+  - api
+  - docs
 handle_strategy: first-unused
 main_workspace: default
 assimilated_paths:
   - scratch
 projects:
-  nixfiles:
+  myrepo:
     assimilated_paths:
       - .local-notes
 stack:
@@ -109,8 +211,8 @@ create:
 
 Supported handle strategies:
 
-- `first-unused` — reuse the first available configured handle.
-- `next-unused` — advance through handles per Project/repo using `.ajj/state.json`.
+- `first-unused` — reuse the first available configured Handle.
+- `next-unused` — advance through Handles per Project/repo using `.ajj/state.json`.
 
 Config parsing rejects unknown keys. Legacy keys such as `worktrees_root`, `name_list`, `name_strategy`, `dev_root`, and `main_stack` are not accepted.
 
@@ -125,7 +227,7 @@ assimilated_paths:
   - .env.local
   - "**/.env*"
 projects:
-  nixfiles:
+  myrepo:
     assimilated_paths:
       - .local-notes
 ```
@@ -134,13 +236,23 @@ Use `**` as a whole path segment to match zero or more directories. For example,
 
 Global entries apply to every Project. `projects.<project>.assimilated_paths` adds Project-specific entries. Entries must be relative paths or glob patterns without `..` traversal. When the source file or directory exists in the Main Workspace, `ajj create` and `ajj open` create a symlink at the same relative path in the target Workspace. Missing sources and globs with no matches are skipped. Existing Workspace content is never overwritten. The old `assimilated_folders` key is still accepted as a deprecated alias.
 
-See `docs/assimilated-folders.md` for an agent-friendly setup guide.
+See [`docs/assimilated-folders.md`](docs/assimilated-folders.md) for an agent-friendly setup guide.
 
 ## Interactive UX
 
-When stdin/stderr are terminals, `ajj` prefers in-place TUI interactions: selectors for `open`, `close`, `stack`, and `move-to-main`; yes/no confirmations; and prompts for missing setup values such as `init`'s Workspaces root. If you open a missing Workspace by handle, `ajj` can offer to create it immediately. TUI footers show available keys and status legends so you can toggle options (for example close force mode or advanced stack options) without re-running with extra flags.
+When stdin/stderr are terminals, `ajj` prefers in-place TUI interactions: selectors for `open`, `close`, `stack`, and `move-to-main`; yes/no confirmations; and prompts for missing setup values such as `init`'s Workspaces root. If you open a missing Workspace by Handle, `ajj` can offer to create it immediately. TUI footers show available keys and status legends so you can toggle options, for example close force mode or advanced stack options, without re-running with extra flags.
 
-Human-facing output uses color on terminals and respects `NO_COLOR`. Stdout remains reserved for path/data protocols, so prompts and progress go to stderr and piped output stays plain.
+Human-facing output uses color on terminals and respects `NO_COLOR`.
+
+## Stdout/stderr protocol
+
+Stdout is reserved for machine-consumable values:
+
+- navigation paths from `create`, `open`, `close`, and `main`;
+- structured list output when redirected; and
+- version output from `version` / `--version`.
+
+Prompts, previews, progress, warnings, and other human chatter go to stderr. This keeps shell wrappers and scripts reliable.
 
 ## Shell integration
 
@@ -166,7 +278,7 @@ source /path/to/ajjent/shell/ajj.zsh
 source /path/to/ajjent/shell/ajj.bash
 ```
 
-The Nix package also installs these snippets under `$out/share/ajjent/shell/`, so a Nix profile install can source the store path for the installed package.
+The Nix package installs these snippets under `$out/share/ajjent/shell/`, so a Nix profile install can source the store path for the installed package.
 
 The wrapper makes these commands change the caller's directory:
 
@@ -177,7 +289,7 @@ The wrapper makes these commands change the caller's directory:
 
 Use `command ajj ...` to bypass the shell function and call the raw binary.
 
-## Nix / Flake
+## Nix / Flake reference
 
 This repo provides:
 
@@ -197,58 +309,21 @@ Run without installing:
 nix run .# -- <command>
 ```
 
-Home Manager example:
-
-```nix
-{
-  inputs.ajjent.url = "github:jeprecated/ajjent";
-
-  outputs = { self, nixpkgs, home-manager, ajjent, ... }: {
-    homeConfigurations.me = home-manager.lib.homeManagerConfiguration {
-      pkgs = import nixpkgs { system = "x86_64-linux"; };
-      modules = [
-        ajjent.homeManagerModules.default
-        ({ ... }: {
-          programs.ajjent = {
-            enable = true;
-            settings = {
-              workspaces_root = "~/Development/workspaces";
-              project = "nixfiles";
-              workspace_handles = [ "kilo" "lima" "mike" ];
-              handle_strategy = "first-unused";
-              main_workspace = "default";
-              assimilated_paths = [ "scratch" ];
-              projects = {
-                nixfiles = {
-                  assimilated_paths = [ ".local-notes" ];
-                };
-              };
-              stack = {
-                rebase_mode = "auto";
-                shape = "auto";
-                conflict_strategy = "prefer-clean";
-              };
-              create = {
-                envrc = false;
-                direnv_allow = false;
-              };
-            };
-          };
-        })
-      ];
-    };
-  };
-}
-```
-
 ## Development
 
 This project uses `devenv` for development dependencies.
 
 ```bash
-devenv shell build
-devenv shell test
-devenv shell install-local
+devenv shell
+build
+test
+install-local
 ```
 
 `install-local` writes the latest checkout to `./bin/ajj` and prints the installed binary's help. If your shell still runs an older `ajj`, put this repo's `bin` directory earlier in `PATH` and clear the shell command cache with `hash -r` in bash or `rehash` in zsh.
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) before sending patches.
+
+## License
+
+MIT. See [`LICENSE`](LICENSE).
