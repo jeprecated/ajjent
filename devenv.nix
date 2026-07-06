@@ -12,7 +12,7 @@
   scripts.test.exec = "go test ./...";
   scripts.build.exec = ''
     mkdir -p ./bin
-    go build -o ./bin/ajj ./
+    go build -o ./bin/ajj ./cmd/ajj
   '';
   scripts.install-local.exec = ''
     set -euo pipefail
@@ -20,7 +20,7 @@
     install_path="$install_dir/ajj"
     mkdir -p "$install_dir"
     rm -f "$install_path"
-    go build -o "$install_path" ./
+    go build -o "$install_path" ./cmd/ajj
     echo "Installed latest checkout to $install_path"
     "$install_path" --help | head -20
     resolved="$(command -v ajj || true)"

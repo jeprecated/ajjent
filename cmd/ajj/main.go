@@ -4427,7 +4427,7 @@ func emptyDefault(value, def string) string {
 
 // versionString returns a stable, parseable single-line version identifier.
 // When built with `-ldflags "-X main.version=<v>"` it reports that value.
-// Otherwise (e.g. `go install ...@v0.1.0`) it falls back to build metadata
+// Otherwise (e.g. `go install ...@v1.0.0`) it falls back to build metadata
 // from runtime/debug so installed binaries surface something better than
 // bare "dev".
 func versionString() string {

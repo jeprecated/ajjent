@@ -63,7 +63,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          gofmt -l *.go | tee /tmp/gofmt.out
+          gofmt -l cmd/ajj | tee /tmp/gofmt.out
           test ! -s /tmp/gofmt.out
 
       - name: Test

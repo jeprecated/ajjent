@@ -25,14 +25,14 @@ Choose whichever install path fits your environment. Nix is supported, but it is
 ### Go
 
 ```bash
-go install github.com/jeprecated/ajjent@latest
+go install github.com/jeprecated/ajjent/cmd/ajj@latest
 ```
 
-Make sure your Go bin directory is on `PATH`.
+This installs a binary named `ajj`. Make sure your Go bin directory is on `PATH`.
 
 ### Release binary
 
-Download the `ajj` archive for your OS/architecture from GitHub Releases. Release binaries are produced by GoReleaser for Linux and macOS on amd64 and arm64.
+Download the `ajjent` archive for your platform from GitHub Releases; it contains the `ajj` binary. Release binaries are produced by GoReleaser for Linux and macOS on amd64 and arm64.
 
 ### Nix flake
 

@@ -4,7 +4,7 @@ project_name: ajjent
 
 builds:
   - id: ajj
-    main: .
+    main: ./cmd/ajj
     binary: ajj
     env:
       - CGO_ENABLED=0

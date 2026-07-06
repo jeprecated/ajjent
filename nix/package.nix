@@ -14,7 +14,7 @@ buildGoModule {
 
   src = lib.cleanSource ../.;
   vendorHash = "sha256-EHNNPQznd9xVHx4M2PqXAQlya7NErWImyBfgnP8T+nc=";
-  subPackages = [ "." ];
+  subPackages = [ "./cmd/ajj" ];
   ldflags = [
     "-s"
     "-w"
@@ -27,10 +27,6 @@ buildGoModule {
   nativeBuildInputs = [ makeWrapper ];
 
   postInstall = ''
-    if [ -x "$out/bin/ajjent" ]; then
-      mv "$out/bin/ajjent" "$out/bin/ajj"
-    fi
-
     install -Dm0644 shell/ajj.bash "$out/share/ajjent/shell/ajj.bash"
     install -Dm0644 shell/ajj.zsh "$out/share/ajjent/shell/ajj.zsh"
   '';

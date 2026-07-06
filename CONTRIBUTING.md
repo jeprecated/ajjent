@@ -16,10 +16,10 @@ Common local flow:
 go build ./...
 go vet ./...
 go test ./...
-gofmt -l *.go
+gofmt -l cmd/ajj
 ```
 
-`gofmt -l *.go` should print nothing before you send a change.
+`gofmt -l cmd/ajj` should print nothing before you send a change.
 
 With the devenv/Nix shell:
 
@@ -36,9 +36,9 @@ You can also run `install-local` in the devenv shell to build `./bin/ajj` from t
 
 The CLI is intentionally compact rather than split into many packages:
 
-- `main.go` is the main implementation file, currently around 4500 lines.
-- `main_test.go` holds most unit and command tests.
-- `main_stack_integration_test.go` covers shell-out stacking behavior against real `jj` repositories.
+- `cmd/ajj/main.go` is the main implementation file, currently around 4500 lines.
+- `cmd/ajj/main_test.go` holds most unit and command tests.
+- `cmd/ajj/main_stack_integration_test.go` covers shell-out stacking behavior against real `jj` repositories.
 
 Prefer small, well-named helpers inside the existing layout unless a change clearly creates a new boundary.
 
