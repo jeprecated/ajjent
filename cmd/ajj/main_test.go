@@ -1448,6 +1448,54 @@ func TestCreateWorkspaceHelperCreatesPrintsAndMaterializes(t *testing.T) {
 	}
 }
 
+func TestCreateWorkspaceHonorsDirenvAllowWhenAssimilationFails(t *testing.T) {
+	mainPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(mainPath, "scratch"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	workspacesRoot := filepath.Join(t.TempDir(), "workspaces")
+	cfg := config{WorkspacesRoot: workspacesRoot, Project: "proj", MainWorkspace: "default", AssimilatedPaths: []string{"scratch"}}
+	workspacePath := filepath.Join(workspacesRoot, "proj", "alpha")
+
+	var direnvAllowTargets []string
+	withCommandCapture(t, func(name string, args ...string) (string, error) {
+		if strings.Contains(strings.Join(args, " "), "workspace list") {
+			return "default\tmain111\t" + mainPath + "\n", nil
+		}
+		return "", nil
+	})
+	withCommandToStderr(t, func(name string, args ...string) error {
+		if name == "jj" && strings.Contains(strings.Join(args, " "), "workspace add") {
+			target := args[len(args)-1]
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return err
+			}
+			// Pre-seed a real file at the assimilated dest so the explicit-path
+			// conflict is fatal (the existing intended behavior), exercising the
+			// deferred direnv-allow path.
+			return os.WriteFile(filepath.Join(target, "scratch"), []byte("local"), 0o644)
+		}
+		if name == "direnv" && len(args) >= 2 && args[0] == "allow" {
+			direnvAllowTargets = append(direnvAllowTargets, args[1])
+		}
+		return nil
+	})
+	withLookPath(t, func(file string) (string, error) {
+		if file == "direnv" {
+			return "/usr/bin/direnv", nil
+		}
+		return "", os.ErrNotExist
+	})
+
+	err := createWorkspace(mainPath, cfg, "proj", "alpha", false, true)
+	if err == nil || !strings.Contains(err.Error(), "refusing to replace") {
+		t.Fatalf("expected assimilation refusal error, got %v", err)
+	}
+	if len(direnvAllowTargets) != 1 || direnvAllowTargets[0] != workspacePath {
+		t.Fatalf("expected direnv allow for %s on partial-failure path, got %v", workspacePath, direnvAllowTargets)
+	}
+}
+
 func TestRunCreateMaterializesAssimilatedFolders(t *testing.T) {
 	mainPath := t.TempDir()
 	workspacesRoot := filepath.Join(t.TempDir(), "workspaces")

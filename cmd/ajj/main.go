@@ -527,7 +527,7 @@ func runCreate(args []string) error {
 	return createWorkspace(repoRoot, cfg, project, handle, envrc, direnvAllow)
 }
 
-func createWorkspace(repoRoot string, cfg config, project string, handle string, envrc bool, direnvAllow bool) error {
+func createWorkspace(repoRoot string, cfg config, project string, handle string, envrc bool, direnvAllow bool) (err error) {
 	target := filepath.Join(cfg.WorkspacesRoot, project, handle)
 	if exists(target) {
 		return fmt.Errorf("Workspace path already exists: %s", target)
@@ -538,6 +538,18 @@ func createWorkspace(repoRoot string, cfg config, project string, handle string,
 	if err := commandToStderrFn("jj", "-R", repoRoot, "workspace", "add", "--name", handle, target); err != nil {
 		return err
 	}
+	// Honor a requested `direnv allow` for the new Workspace even when a later
+	// step (e.g. an assimilated-path conflict) returns an error. Without this,
+	// a partial create failure leaves the Workspace's .envrc unapproved, so a
+	// session launched into it reports "direnv: error .envrc is blocked". The
+	// deferral only runs on the error path; the success path allows direnv
+	// below, after assimilation has materialized the final .envrc.
+	allowDirenv := direnvAllow || cfg.Create.DirenvAllow
+	defer func() {
+		if err != nil && allowDirenv {
+			maybeDirenvAllow(target)
+		}
+	}()
 	if envrc || cfg.Create.Envrc {
 		if err := ensureEnvrc(target); err != nil {
 			return err
@@ -546,13 +558,20 @@ func createWorkspace(repoRoot string, cfg config, project string, handle string,
 	if err := materializeAndReportAssimilatedFolders(mainWorkspaceRoot(repoRoot), target, cfg, project); err != nil {
 		return err
 	}
-	if direnvAllow || cfg.Create.DirenvAllow {
-		if _, err := lookPathFn("direnv"); err == nil {
-			_ = commandToStderrFn("direnv", "allow", target)
-		}
+	if allowDirenv {
+		maybeDirenvAllow(target)
 	}
 	printNavigationPath(target, "create")
 	return nil
+}
+
+// maybeDirenvAllow runs `direnv allow` for target when direnv is installed.
+// Errors are ignored (matching the historical best-effort behavior) since a
+// missing or failing direnv is informational, not a Workspace creation failure.
+func maybeDirenvAllow(target string) {
+	if _, err := lookPathFn("direnv"); err == nil {
+		_ = commandToStderrFn("direnv", "allow", target)
+	}
 }
 
 func openExistingWorkspace(repoRoot string, cfg config, project string, handle string) error {
