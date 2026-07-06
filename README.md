@@ -243,12 +243,12 @@ Home Manager example:
 
 ## Development
 
-This project uses `devbox` for development dependencies.
+This project uses `devenv` for development dependencies.
 
 ```bash
-devbox run build
-devbox run test
-devbox run install-local
+devenv shell build
+devenv shell test
+devenv shell install-local
 ```
 
 `install-local` writes the latest checkout to `./bin/jjw` and prints the installed binary's help. If your shell still runs an older `jjw`, put this repo's `bin` directory earlier in `PATH` and clear the shell command cache with `hash -r` in bash or `rehash` in zsh.

@@ -1,3 +1,13 @@
 bin/
+
+# Devenv
+.devenv*
+devenv.local.nix
+devenv.local.yaml
+.direnv/
+
+# Legacy Devbox
+.devbox/
+
 .jjw/state.json
 .hunk/change-context/

@@ -24,7 +24,7 @@
         apps.jjw = jjwApp;
 
         devShells.default = pkgs.mkShell {
-          packages = with pkgs; [ go gopls gotools ];
+          packages = with pkgs; [ go_1_24 gopls gotools ];
         };
       })
     // {
