@@ -68,6 +68,8 @@ On `ajj create` and `ajj open`, for each configured assimilated path:
 3. If the source does not exist, or a glob has no matches, `ajj` skips it.
 4. If the target path already contains real Workspace content, `ajj` refuses to overwrite it.
 
+Glob patterns are intended to pick up ignored local files, so when a glob match is already tracked in the repo (for example `.env.example` matched by `"**/.env*"`), `ajj` skips it silently rather than symlinking over a checked-in file. Explicit, non-glob entries keep their source path verbatim and are not affected.
+
 Example result:
 
 ```text

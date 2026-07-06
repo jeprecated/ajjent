@@ -3298,11 +3298,50 @@ func isWithinAssimilatedDir(candidate string, dirs []string) bool {
 	return false
 }
 
+// trackedFileSet returns the set of files tracked by jj in the Main Workspace
+// repo, as ToSlash-normalized paths relative to the repo root (which is the
+// Main Workspace root). These match the `rel` values produced by the glob
+// walker, so glob matches can be filtered against them. If mainPath is not a
+// jj repo (or jj is unavailable) the lookup errors and callers should treat
+// the result as an empty set rather than failing.
+func trackedFileSet(mainPath string) (map[string]struct{}, error) {
+	out, err := commandCaptureFn("jj", "-R", mainPath, "file", "list")
+	if err != nil {
+		return nil, err
+	}
+	tracked := map[string]struct{}{}
+	scanner := bufio.NewScanner(strings.NewReader(out))
+	for scanner.Scan() {
+		path := strings.TrimSpace(scanner.Text())
+		if path == "" {
+			continue
+		}
+		tracked[filepath.ToSlash(path)] = struct{}{}
+	}
+	return tracked, nil
+}
+
 func expandAssimilatedPaths(mainPath string, configured []string) ([]string, error) {
+	// Glob matches are intended to pick up ignored local files. Skip any glob
+	// match that is already tracked in the Main Workspace's repo so broad globs
+	// such as "**/.env*" do not try to symlink over checked-in files. The
+	// tracked set is resolved at most once, and only when at least one entry is
+	// a glob, so configs without globs never invoke jj. A lookup failure (not a
+	// jj repo, jj missing, ...) falls back to an empty set and glob expansion
+	// proceeds with its current behavior.
+	tracked := map[string]struct{}{}
+	for _, configuredPath := range configured {
+		if hasGlobMeta(configuredPath) {
+			if ts, err := trackedFileSet(mainPath); err == nil {
+				tracked = ts
+			}
+			break
+		}
+	}
 	out := []string{}
 	seen := map[string]struct{}{}
 	for _, configuredPath := range configured {
-		matches, err := expandAssimilatedPath(mainPath, configuredPath)
+		matches, err := expandAssimilatedPath(mainPath, configuredPath, tracked)
 		if err != nil {
 			return nil, err
 		}
@@ -3317,7 +3356,7 @@ func expandAssimilatedPaths(mainPath string, configured []string) ([]string, err
 	return out, nil
 }
 
-func expandAssimilatedPath(mainPath string, configuredPath string) ([]string, error) {
+func expandAssimilatedPath(mainPath string, configuredPath string, tracked map[string]struct{}) ([]string, error) {
 	if !hasGlobMeta(configuredPath) {
 		return []string{configuredPath}, nil
 	}
@@ -3338,9 +3377,16 @@ func expandAssimilatedPath(mainPath string, configuredPath string) ([]string, er
 		if err != nil {
 			return fmt.Errorf("invalid assimilated_paths glob %q: %w", configuredPath, err)
 		}
-		if ok {
-			matches = append(matches, filepath.FromSlash(rel))
+		if !ok {
+			return nil
 		}
+		// Leave repo-tracked files alone: glob entries target ignored local
+		// files, so a tracked match is skipped silently rather than symlinked
+		// over a checked-in file.
+		if _, isTracked := tracked[rel]; isTracked {
+			return nil
+		}
+		matches = append(matches, filepath.FromSlash(rel))
 		return nil
 	}); err != nil {
 		return nil, fmt.Errorf("expand assimilated_paths glob %q: %w", configuredPath, err)

@@ -1338,6 +1338,70 @@ func TestMaterializeAssimilatedFoldersRefusesToReplaceWorkspaceContent(t *testin
 	}
 }
 
+func TestMaterializeAssimilatedFoldersGlobSkipsRepoTrackedFiles(t *testing.T) {
+	mainPath := t.TempDir()
+	workspacePath := filepath.Join(t.TempDir(), "workspace")
+	// `.env` is treated as an ignored local file (want symlinked); `.env.example`
+	// and `.envrc` are treated as checked-in tracked files that the glob must
+	// skip silently rather than symlink over.
+	for _, rel := range []string{".env", ".env.example", ".envrc"} {
+		if err := os.WriteFile(filepath.Join(mainPath, rel), []byte(rel), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	withCommandCapture(t, func(name string, args ...string) (string, error) {
+		if name == "jj" && strings.Contains(strings.Join(args, " "), "file list") {
+			return ".env.example\n.envrc\n", nil
+		}
+		return "", nil
+	})
+	cfg := config{AssimilatedPaths: []string{"**/.env*"}}
+	if err := materializeAssimilatedFolders(mainPath, workspacePath, cfg, "proj"); err != nil {
+		t.Fatalf("expected no error materializing with tracked files skipped, got %v", err)
+	}
+	// Ignored local file is symlinked into the target Workspace.
+	if target, err := os.Readlink(filepath.Join(workspacePath, ".env")); err != nil {
+		t.Fatalf("expected .env symlink: %v", err)
+	} else if target != filepath.Join(mainPath, ".env") {
+		t.Fatalf("expected .env symlink to main path, got %q", target)
+	}
+	// Tracked files are skipped: no symlink is created for them.
+	for _, rel := range []string{".env.example", ".envrc"} {
+		if exists(filepath.Join(workspacePath, rel)) {
+			t.Fatalf("expected tracked file %s to be skipped (no symlink created)", rel)
+		}
+	}
+}
+
+func TestMaterializeAssimilatedFoldersGlobFallsBackWhenNotARepo(t *testing.T) {
+	mainPath := t.TempDir()
+	workspacePath := filepath.Join(t.TempDir(), "workspace")
+	for _, rel := range []string{".env", ".envrc"} {
+		if err := os.WriteFile(filepath.Join(mainPath, rel), []byte(rel), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The tracked-set lookup fails (not a jj repo); glob expansion must fall
+	// back to an empty tracked set and materialize every glob match.
+	withCommandCapture(t, func(name string, args ...string) (string, error) {
+		if name == "jj" && strings.Contains(strings.Join(args, " "), "file list") {
+			return "", errors.New("jj: not a jj repo")
+		}
+		return "", nil
+	})
+	cfg := config{AssimilatedPaths: []string{"**/.env*"}}
+	if err := materializeAssimilatedFolders(mainPath, workspacePath, cfg, "proj"); err != nil {
+		t.Fatalf("expected no error on fallback to empty tracked set, got %v", err)
+	}
+	for _, rel := range []string{".env", ".envrc"} {
+		if target, err := os.Readlink(filepath.Join(workspacePath, rel)); err != nil {
+			t.Fatalf("expected %s symlink on fallback: %v", rel, err)
+		} else if target != filepath.Join(mainPath, rel) {
+			t.Fatalf("expected %s symlink to main path, got %q", rel, target)
+		}
+	}
+}
+
 func TestCreateWorkspaceHelperCreatesPrintsAndMaterializes(t *testing.T) {
 	mainPath := t.TempDir()
 	workspacesRoot := filepath.Join(t.TempDir(), "workspaces")
