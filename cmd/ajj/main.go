@@ -1403,6 +1403,9 @@ func runStack(args []string) error {
 		if err := abandonTopEmptyMutableAncestors(mainInfo.Path); err != nil {
 			return err
 		}
+		if err := advanceMainToStackPayload(mainInfo.Path, cfg.MainWorkspace, inputs); err != nil {
+			return err
+		}
 	}
 	if err := advanceStackInputWorkspaces(mainInfo.Path, inputs); err != nil {
 		return err
@@ -2732,6 +2735,15 @@ func externalDeletePrompt(targets []workspaceInfo) string {
 }
 
 func abandonUniqueMutableChanges(repoRoot, handle string) error {
+	// Abandon only mutable changes reachable from the closing Workspace's working copy
+	// that are NOT reachable from any other Workspace's working copy. This protects
+	// commits already integrated into another Workspace (e.g. Main) while still dropping
+	// genuinely Workspace-only unstacked changes on force close.
+	//
+	// Invariant relied upon here: a successfully stacked payload is an ANCESTOR of Main@
+	// (runStack + advanceMainToStackPayload advance Main@ onto the payload tip), so it is
+	// excluded by `~::mainHandle@`. Do not weaken this to also spare descendants of Main@,
+	// because unstacked Workspace changes are descendants of Main@ and must be abandoned.
 	refs, err := listWorkspaceRefs(repoRoot)
 	if err != nil {
 		return err
@@ -2931,6 +2943,56 @@ func advanceStackInputWorkspaces(mainPath string, inputs []string) error {
 		}
 	}
 	return nil
+}
+
+// advanceMainToStackPayload ensures the target (Main) working copy advances onto the
+// stacked payload tip when the payload is a descendant of Main@.
+//
+// runStackRebase rebases Main@ onto the payload when the payload is a sibling of Main@
+// (the from-root / divergent Workspace case), which makes the payload an ancestor of
+// Main@. But when a Workspace was created from Main's current working copy, its payload
+// is already a descendant of Main@, so `jj rebase -b @ -d payload` is a no-op and Main@
+// never advances onto the payload. Without this advance, the payload remains a
+// descendant of Main@ (or gets orphaned by advanceStackInputWorkspaces), and a later
+// `ajj close --force` abandons it via abandonUniqueMutableChanges because it is not
+// reachable from Main@ — silent data loss (see CHANGELOG regression note).
+//
+// Advancing Main@ to the payload tip makes the payload an ancestor of Main@, which the
+// existing `~::mainHandle@` exclusion in abandonUniqueMutableChanges then protects. This
+// preserves the distinction the close logic relies on: stacked payloads become ancestors
+// of Main@ (protected), while genuinely Workspace-only unstacked changes remain
+// descendants of Main@ (abandoned on force close).
+func advanceMainToStackPayload(mainPath, mainHandle string, inputs []string) error {
+	inputs = uniqueNonEmptyStrings(inputs)
+	if len(inputs) == 0 {
+		return nil
+	}
+	tips, err := frontierHeads(mainPath, stackInputPayloadRevsets(inputs))
+	if err != nil {
+		return err
+	}
+	if len(tips) == 0 {
+		return nil
+	}
+	unintegrated := make([]string, 0, len(tips))
+	for _, tip := range tips {
+		integrated, err := revisionIsAncestor(mainPath, tip, mainHandle+"@")
+		if err != nil {
+			return err
+		}
+		if !integrated {
+			unintegrated = append(unintegrated, tip)
+		}
+	}
+	if len(unintegrated) == 0 {
+		return nil
+	}
+	fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Advance Main to Stack payload tip"))
+	newArgs := []string{"-R", mainPath, "new"}
+	for _, tip := range unintegrated {
+		newArgs = append(newArgs, tip)
+	}
+	return commandToStderrFn("jj", newArgs...)
 }
 
 func resolveStackConflictStrategy(requested string) (string, error) {

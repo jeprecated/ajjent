@@ -278,3 +278,122 @@ func jjLog(t *testing.T, repoPath string, revset string) string {
 	}
 	return string(out)
 }
+
+// setupRealStackDescendantRepo creates a Main (default) Workspace and a feat-fix
+// Workspace created with `--revision @`, so it inherits Main's current working copy and
+// its payload lands as a descendant of Main@ — the layout that triggers the close/stack
+// data-loss bug. The feat-fix Workspace holds two committed changes: "feat: add app"
+// and "fix: patch app".
+func setupRealStackDescendantRepo(t *testing.T) (defaultPath, featfixPath string) {
+	t.Helper()
+	if _, err := exec.LookPath("jj"); err != nil {
+		t.Skip("jj binary not available for integration test")
+	}
+	workspacesRoot := filepath.Join(t.TempDir(), "workspaces")
+	defaultPath = filepath.Join(workspacesRoot, "proj", "default")
+	featfixPath = filepath.Join(workspacesRoot, "proj", "featfix")
+	if err := os.MkdirAll(filepath.Dir(defaultPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runJJ(t, "git", "init", "--colocate", defaultPath)
+	writeConfig(t, defaultPath, strings.Join([]string{
+		"workspaces_root: " + workspacesRoot,
+		"project: proj",
+		"main_workspace: default",
+		"stack:",
+		"  rebase_mode: branch",
+		"  shape: auto",
+		"  conflict_strategy: off",
+		"",
+	}, "\n"))
+	// --revision @ is required in jj 0.42 for a from-scratch Workspace to inherit Main's
+	// working copy; a bare `jj workspace add` bases the Workspace at the root instead.
+	runJJ(t, "-R", defaultPath, "workspace", "add", "--revision", "@", "--name", "featfix", featfixPath)
+	if err := os.WriteFile(filepath.Join(featfixPath, "app.py"), []byte("feature content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = exec.Command("jj", "-R", featfixPath, "file", "track", "app.py").Run()
+	runJJ(t, "-R", featfixPath, "commit", "-m", "feat: add app")
+	if err := os.WriteFile(filepath.Join(featfixPath, "app.py"), []byte("feature content + fix\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runJJ(t, "-R", featfixPath, "commit", "-m", "fix: patch app")
+	return defaultPath, featfixPath
+}
+
+// TestStackThenForceCloseKeepsDescendantPayload reproduces the data-loss bug where
+// `ajj stack` followed by `ajj close --force` silently orphaned (or abandoned) a stacked
+// child commit that was a descendant of Main@. After the fix, both the feat and fix
+// commits must survive as ancestors of Main@ (default@).
+func TestStackThenForceCloseKeepsDescendantPayload(t *testing.T) {
+	defaultPath, _ := setupRealStackDescendantRepo(t)
+	featChange := jjRev(t, defaultPath, "featfix@--") // feat: add app
+	fixChange := jjRev(t, defaultPath, "featfix@-")   // fix: patch app
+	if featChange == "" || fixChange == "" {
+		t.Fatalf("expected feat/fix commits before stack, got feat=%q fix=%q", featChange, fixChange)
+	}
+
+	if _, _, err := captureOutput(func() error {
+		return runStack([]string{"featfix", "--repo", defaultPath, "--yes", "--rebase-mode", "branch", "--conflict-strategy", "off"})
+	}); err != nil {
+		t.Fatalf("expected stack to succeed, got %v", err)
+	}
+
+	if _, _, err := captureOutput(func() error {
+		return runClose([]string{"featfix", "--repo", defaultPath, "--force", "--yes"})
+	}); err != nil {
+		t.Fatalf("expected force close to succeed, got %v", err)
+	}
+
+	if got := strings.TrimSpace(jjLog(t, defaultPath, featChange+" & ::default@")); got == "" {
+		t.Fatalf("feat commit %s was lost during stack+force-close; expected it to survive as an ancestor of default@", featChange)
+	}
+	if got := strings.TrimSpace(jjLog(t, defaultPath, fixChange+" & ::default@")); got == "" {
+		t.Fatalf("fix commit %s was lost during stack+force-close; expected it to survive as an ancestor of default@", fixChange)
+	}
+}
+
+// TestForceCloseUnstackedDescendantWorkspaceAbandonsItsChanges verifies that a
+// descendant Workspace which was NOT stacked still force-closes correctly: its unique
+// mutable changes are abandoned. This is the regression guard proving the stack-advance
+// fix does not over-protect unstacked work (unstacked changes remain descendants of
+// Main@ and must still be dropped on force close).
+func TestForceCloseUnstackedDescendantWorkspaceAbandonsItsChanges(t *testing.T) {
+	defaultPath, _ := setupRealStackDescendantRepo(t)
+	featChange := jjRev(t, defaultPath, "featfix@--")
+	fixChange := jjRev(t, defaultPath, "featfix@-")
+	if featChange == "" || fixChange == "" {
+		t.Fatalf("expected feat/fix commits, got feat=%q fix=%q", featChange, fixChange)
+	}
+
+	if _, _, err := captureOutput(func() error {
+		return runClose([]string{"featfix", "--repo", defaultPath, "--force", "--yes"})
+	}); err != nil {
+		t.Fatalf("expected force close to succeed, got %v", err)
+	}
+
+	// Abandoned commits no longer exist in the default view (jj reports them as absent),
+	// so query tolerantly: an absent commit counts as "not in Main's line".
+	if got := jjLogOrEmpty(defaultPath, featChange+" & ::default@"); strings.TrimSpace(got) != "" {
+		t.Fatalf("feat commit %s unexpectedly survived in Main's line; unstacked force-close should abandon it", featChange)
+	}
+	if got := jjLogOrEmpty(defaultPath, fixChange+" & ::default@"); strings.TrimSpace(got) != "" {
+		t.Fatalf("fix commit %s unexpectedly survived in Main's line", fixChange)
+	}
+	// Abandoned commits must be gone from the default view entirely, not merely dangling.
+	if got := jjLogOrEmpty(defaultPath, featChange+" | "+fixChange); strings.TrimSpace(got) != "" {
+		t.Fatalf("expected feat/fix commits to be abandoned (absent), still present: %q", got)
+	}
+}
+
+// jjLogOrEmpty runs `jj log -r revset` and returns its output, or "" if the revset does
+// not resolve (e.g. the commits were abandoned). It is used by the unstacked-force-close
+// test, where abandoned change ids legitimately no longer exist in the default view.
+func jjLogOrEmpty(repoPath string, revset string) string {
+	cmd := exec.Command("jj", "-R", repoPath, "log", "-r", revset, "--no-graph", "-T", "change_id.short() ++ \"\\n\"")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return ""
+	}
+	return string(out)
+}

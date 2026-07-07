@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project uses semantic versioning for public release tags.
 
+## [Unreleased]
+
+### Fixed
+
+- **Data loss on `ajj stack` + `ajj close --force` for a Workspace based at Main's working copy.** When a Workspace was created from Main's current working copy (its payload a descendant of `Main@`), `runStackRebase`'s `jj rebase -b @ -d payload` was a no-op, so `Main@` never advanced onto the payload. `advanceStackInputWorkspaces` then orphaned the payload (or left it as a non-ancestor of `Main@`), and `ajj close --force` abandoned it via `abandonUniqueMutableChanges` because it was not reachable from `Main@` — silently dropping a stacked child commit (recoverable only via `jj op log`). `runStack` now advances `Main@` onto the stacked payload tip when the payload is a descendant of `Main@` (`advanceMainToStackPayload`), making the payload an ancestor of `Main@` that the existing `~::mainHandle@` exclusion protects. Unstacked Workspace changes remain descendants of `Main@` and are still abandoned on force close.
+
 ## [1.0.0] - 2026-07-06
 
 ### Added
