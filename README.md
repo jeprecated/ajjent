@@ -164,7 +164,7 @@ This stacks `web`, `api`, and `docs` in that order and intentionally leaves unli
 
 - `ajj list` — print Workspaces as Handle, markers, ahead, behind, action, path. Terminal output is aligned for reading; redirected output is tab-separated for parsing. Includes Current and Main markers. `ahead` counts Workspace commits not in Main except empty undescribed changes; `behind` counts Main commits not in that Workspace except empty undescribed changes.
 - `ajj list --paths` — print paths only.
-- `ajj tidy` — list and offer to close active Workspaces with no unique content or described commits, then remove empty leftover directories under the Project layout and report non-empty leftovers. Use `--yes` to skip confirmation.
+- `ajj tidy` — offer to close active Workspaces with no unique content or described commits, then remove empty leftover directories under the Project layout and report non-empty leftovers. Interactive runs let you uncheck Workspaces to leave alone; use `--yes` to close all tidy Workspaces without confirmation.
 - `ajj shell-init [bash|zsh]` — print shell integration so `create`, `open`, `close`, and `main` can change the current shell's directory.
 
 ## Config
@@ -320,7 +320,7 @@ test
 install-local
 ```
 
-`install-local` writes the latest checkout to `./bin/ajj` and prints the installed binary's help. If your shell still runs an older `ajj`, put this repo's `bin` directory earlier in `PATH` and clear the shell command cache with `hash -r` in bash or `rehash` in zsh.
+`install-local` writes the latest checkout to `${XDG_BIN_HOME:-$HOME/.local/bin}/ajj` and prints the installed binary's help. If your shell still runs an older `ajj`, put that bin directory earlier in `PATH` and clear the shell command cache with `hash -r` in bash or `rehash` in zsh.
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) before sending patches.
 

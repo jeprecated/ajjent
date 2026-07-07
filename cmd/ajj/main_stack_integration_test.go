@@ -216,10 +216,53 @@ func TestRunStackRealRepoSelfTargetGuard(t *testing.T) {
 	}
 }
 
+func TestRunStackRealRepoCleanMergeDescribesMergeAndAdvancesMainAboveIt(t *testing.T) {
+	paths := setupRealStackMergeRepo(t, false)
+	_, errOut, err := captureOutput(func() error {
+		return runStack([]string{"alpha", "bravo", "--repo", paths.defaultPath, "--workspace", "default", "--yes", "--rebase-mode", "branch", "--stack-shape", "merge", "--conflict-strategy", "off"})
+	})
+	if err != nil {
+		t.Fatalf("expected clean merge stack to succeed, got %v\nstderr:%s", err, errOut)
+	}
+	if got := jjDescription(t, paths.defaultPath, "default@-"); got != "chore: merge" {
+		t.Fatalf("expected described merge at default@-, got %q\nstderr:%s", got, errOut)
+	}
+	if got := jjDescription(t, paths.defaultPath, "default@"); got != "" {
+		t.Fatalf("expected default@ to be a fresh empty cursor above the merge, got description %q", got)
+	}
+	if got := jjRevsetCount(t, paths.defaultPath, "default@--"); got != 2 {
+		t.Fatalf("expected default@- to be the two-parent merge, got %d parents", got)
+	}
+	if got := jjRevsetCount(t, paths.defaultPath, "conflicts() & default@"); got != 0 {
+		t.Fatalf("expected clean default@ above merge, got %d conflict revisions", got)
+	}
+}
+
+func TestRunStackRealRepoConflictedMergeDescribesMainHeadWithoutAdvancingAboveIt(t *testing.T) {
+	paths := setupRealStackMergeRepo(t, true)
+	_, errOut, err := captureOutput(func() error {
+		return runStack([]string{"alpha", "bravo", "--repo", paths.defaultPath, "--workspace", "default", "--yes", "--rebase-mode", "branch", "--stack-shape", "merge", "--conflict-strategy", "off"})
+	})
+	if err != nil {
+		t.Fatalf("expected conflicted merge stack to leave conflicts for resolution without failing, got %v\nstderr:%s", err, errOut)
+	}
+	if got := jjDescription(t, paths.defaultPath, "default@"); got != "chore: merge" {
+		t.Fatalf("expected conflicted default@ merge to be described, got %q\nstderr:%s", got, errOut)
+	}
+	if got := jjRevsetCount(t, paths.defaultPath, "default@-"); got != 2 {
+		t.Fatalf("expected default@ to stay on the two-parent conflicted merge, got %d parents", got)
+	}
+	if got := jjRevsetCount(t, paths.defaultPath, "conflicts() & default@"); got != 1 {
+		t.Fatalf("expected conflicts to remain at default@ for resolution, got %d", got)
+	}
+}
+
 type realStackRepoPaths struct {
 	defaultPath string
 	speedPath   string
 	childPath   string
+	alphaPath   string
+	bravoPath   string
 }
 
 func setupRealStackRepo(t *testing.T) realStackRepoPaths {
@@ -255,6 +298,58 @@ func setupRealStackRepo(t *testing.T) realStackRepoPaths {
 	return realStackRepoPaths{defaultPath: defaultPath, speedPath: speedPath, childPath: childPath}
 }
 
+func setupRealStackMergeRepo(t *testing.T, conflicting bool) realStackRepoPaths {
+	t.Helper()
+	if _, err := exec.LookPath("jj"); err != nil {
+		t.Skip("jj binary not available for integration test")
+	}
+	workspacesRoot := filepath.Join(t.TempDir(), "workspaces")
+	defaultPath := filepath.Join(workspacesRoot, "proj", "default")
+	alphaPath := filepath.Join(workspacesRoot, "proj", "alpha")
+	bravoPath := filepath.Join(workspacesRoot, "proj", "bravo")
+	if err := os.MkdirAll(filepath.Dir(defaultPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runJJ(t, "git", "init", "--colocate", defaultPath)
+	writeConfig(t, defaultPath, strings.Join([]string{
+		"workspaces_root: " + workspacesRoot,
+		"project: proj",
+		"main_workspace: default",
+		"stack:",
+		"  rebase_mode: branch",
+		"  shape: merge",
+		"  conflict_strategy: off",
+		"",
+	}, "\n"))
+	if err := os.WriteFile(filepath.Join(defaultPath, "shared.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = exec.Command("jj", "-R", defaultPath, "file", "track", "shared.txt").Run()
+	runJJ(t, "-R", defaultPath, "commit", "-m", "base")
+	runJJ(t, "-R", defaultPath, "workspace", "add", "--revision", "@", "--name", "alpha", alphaPath)
+	runJJ(t, "-R", defaultPath, "workspace", "add", "--revision", "@", "--name", "bravo", bravoPath)
+	if conflicting {
+		if err := os.WriteFile(filepath.Join(alphaPath, "shared.txt"), []byte("alpha\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(bravoPath, "shared.txt"), []byte("bravo\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		if err := os.WriteFile(filepath.Join(alphaPath, "alpha.txt"), []byte("alpha\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(bravoPath, "bravo.txt"), []byte("bravo\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_ = exec.Command("jj", "-R", alphaPath, "file", "track", "alpha.txt").Run()
+		_ = exec.Command("jj", "-R", bravoPath, "file", "track", "bravo.txt").Run()
+	}
+	runJJ(t, "-R", alphaPath, "commit", "-m", "feat: alpha")
+	runJJ(t, "-R", bravoPath, "commit", "-m", "feat: bravo")
+	return realStackRepoPaths{defaultPath: defaultPath, alphaPath: alphaPath, bravoPath: bravoPath}
+}
+
 func runJJ(t *testing.T, args ...string) {
 	t.Helper()
 	cmd := exec.Command("jj", args...)
@@ -277,6 +372,21 @@ func jjLog(t *testing.T, repoPath string, revset string) string {
 		t.Fatalf("jj log -r %s failed: %v\n%s", revset, err, out)
 	}
 	return string(out)
+}
+
+func jjDescription(t *testing.T, repoPath string, revset string) string {
+	t.Helper()
+	cmd := exec.Command("jj", "-R", repoPath, "log", "-r", revset, "--no-graph", "-T", "description.first_line() ++ \"\\n\"")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("jj description -r %s failed: %v\n%s", revset, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func jjRevsetCount(t *testing.T, repoPath string, revset string) int {
+	t.Helper()
+	return len(uniqueNonEmptyStrings(strings.Split(jjLog(t, repoPath, revset), "\n")))
 }
 
 // setupRealStackDescendantRepo creates a Main (default) Workspace and a feat-fix

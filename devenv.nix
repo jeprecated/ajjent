@@ -16,13 +16,13 @@
   '';
   scripts.install-local.exec = ''
     set -euo pipefail
-    install_dir="$(pwd)/bin"
+    install_dir="''${XDG_BIN_HOME:-$HOME/.local/bin}"
     install_path="$install_dir/ajj"
     mkdir -p "$install_dir"
     rm -f "$install_path"
     go build -o "$install_path" ./cmd/ajj
     echo "Installed latest checkout to $install_path"
-    "$install_path" --help | head -20
+    "$install_path" --help | awk 'NR <= 20 { print }'
     resolved="$(command -v ajj || true)"
     if [ "$resolved" != "$install_path" ]; then
       echo "WARNING: your shell currently resolves ajj as: ''${resolved:-not found}"

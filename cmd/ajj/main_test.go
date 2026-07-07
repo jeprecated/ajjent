@@ -335,6 +335,13 @@ func TestStackSelectorHintExplainsAllRowDoesNotOverrideCheckedBoxes(t *testing.T
 	}
 }
 
+func TestTidySelectorHintExplainsPreselectedTidyRows(t *testing.T) {
+	hint := selectorHint(selectorOptions{Mode: selectorMulti, Tidy: true})
+	if !strings.Contains(hint, "Tidy rows start checked") || !strings.Contains(hint, "leave one alone") {
+		t.Fatalf("expected tidy preselection hint, got %q", hint)
+	}
+}
+
 func TestStackPlanPromptShowsExactInputsAndOptions(t *testing.T) {
 	prompt := stackPlanPrompt([]string{"alpha", "charlie"}, stackConfig{Shape: "merge", RebaseMode: "revision", ConflictStrategy: "off"})
 	for _, want := range []string{"Stack 2 Workspaces", "alpha, charlie", "shape:merge", "rebase:revision", "conflicts:off"} {
@@ -436,6 +443,31 @@ func TestMoveToMainSelectorPreselectsWorkspaceBehindDescribedEmptyMerge(t *testi
 	}
 	if byHandle["research"].Selected || !byHandle["research"].Disabled || byHandle["research"].Status != "up-to-main" {
 		t.Fatalf("expected cursor with no relevant changes behind to stay disabled, got %+v", byHandle["research"])
+	}
+}
+
+func TestTidySelectorPreselectsOnlyClosableWorkspaces(t *testing.T) {
+	items := selectorItemsForTidy([]workspaceInfo{
+		{Ref: workspaceRef{Handle: "default"}, Main: true},
+		{Ref: workspaceRef{Handle: "empty"}, Empty: true},
+		{Ref: workspaceRef{Handle: "stacked"}, Stacked: true},
+		{Ref: workspaceRef{Handle: "unstacked"}, Ahead: 1},
+		{Ref: workspaceRef{Handle: "conflict"}, Conflict: true},
+		{Ref: workspaceRef{Handle: "missing"}, Missing: true},
+	})
+	byHandle := mapSelectorItemsByHandle(items)
+	for _, handle := range []string{"empty", "stacked"} {
+		if !byHandle[handle].Selected || byHandle[handle].Disabled {
+			t.Fatalf("expected %s selected as tidy, got %+v", handle, byHandle[handle])
+		}
+	}
+	for _, handle := range []string{"unstacked", "conflict", "missing"} {
+		if byHandle[handle].Selected || !byHandle[handle].Disabled {
+			t.Fatalf("expected %s disabled and not selected, got %+v", handle, byHandle[handle])
+		}
+	}
+	if _, ok := byHandle["default"]; ok {
+		t.Fatal("Main Workspace should not appear in tidy selector")
 	}
 }
 
@@ -1338,6 +1370,23 @@ func TestMaterializeAssimilatedFoldersRefusesToReplaceWorkspaceContent(t *testin
 	}
 }
 
+func TestMaterializeAssimilatedFoldersReplacesIdenticalWorkspaceFile(t *testing.T) {
+	mainPath := t.TempDir()
+	workspacePath := t.TempDir()
+	for _, path := range []string{filepath.Join(mainPath, ".envrc"), filepath.Join(workspacePath, ".envrc")} {
+		if err := os.WriteFile(path, []byte("use devenv\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := config{AssimilatedPaths: []string{".envrc"}}
+	if err := materializeAssimilatedFolders(mainPath, workspacePath, cfg, "proj"); err != nil {
+		t.Fatalf("expected identical Workspace file to be safely assimilated, got %v", err)
+	}
+	if target, err := os.Readlink(filepath.Join(workspacePath, ".envrc")); err != nil || target != filepath.Join(mainPath, ".envrc") {
+		t.Fatalf("expected identical .envrc to be replaced with symlink to main, got target=%q err=%v", target, err)
+	}
+}
+
 func TestMaterializeAssimilatedFoldersGlobSkipsRepoTrackedFiles(t *testing.T) {
 	mainPath := t.TempDir()
 	workspacePath := filepath.Join(t.TempDir(), "workspace")
@@ -1566,6 +1615,44 @@ func TestRunOpenMaterializesAssimilatedFoldersBeforePrintingPath(t *testing.T) {
 	}
 	if target, err := os.Readlink(filepath.Join(workspacePath, "scratch")); err != nil || target != filepath.Join(mainPath, "scratch") {
 		t.Fatalf("expected open to materialize scratch symlink to main, got target=%q err=%v", target, err)
+	}
+}
+
+func TestRunOpenWarnsButStillPrintsPathWhenAssimilationFails(t *testing.T) {
+	mainPath := t.TempDir()
+	workspacePath := filepath.Join(t.TempDir(), "alpha")
+	if err := os.WriteFile(filepath.Join(mainPath, ".envrc"), []byte("main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(workspacePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspacePath, ".envrc"), []byte("workspace-local\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeConfig(t, mainPath, strings.Join([]string{
+		"workspaces_root: /tmp/workspaces",
+		"project: proj",
+		"assimilated_paths:",
+		"  - .envrc",
+		"",
+	}, "\n"))
+	withCommandCapture(t, func(name string, args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "workspace list") {
+			return "default\tmain111\t" + mainPath + "\nalpha\talpha111\t" + workspacePath + "\n", nil
+		}
+		return "", nil
+	})
+	out, errOut, err := captureOutput(func() error { return runOpen([]string{"alpha", "--repo", mainPath}) })
+	if err != nil {
+		t.Fatalf("open should warn, not fail, when assimilation cannot replace local content: %v", err)
+	}
+	if strings.TrimSpace(out) != workspacePath {
+		t.Fatalf("expected open to print workspace path despite warning, got %q", out)
+	}
+	if !strings.Contains(errOut, "Warning:") || !strings.Contains(errOut, "refusing to replace") {
+		t.Fatalf("expected assimilation warning on stderr, got %q", errOut)
 	}
 }
 

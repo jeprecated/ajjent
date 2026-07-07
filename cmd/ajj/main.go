@@ -584,14 +584,19 @@ func openExistingWorkspace(repoRoot string, cfg config, project string, handle s
 			if info.Missing {
 				return fmt.Errorf("Workspace %q path not found: %s", handle, info.Path)
 			}
-			if err := materializeAndReportAssimilatedFolders(mainWorkspaceRoot(repoRoot), info.Path, cfg, project); err != nil {
-				return err
-			}
+			materializeAssimilatedFoldersForOpen(mainWorkspaceRoot(repoRoot), info.Path, cfg, project)
 			printNavigationPath(info.Path, "open")
 			return nil
 		}
 	}
 	return workspaceNotFoundError(handle)
+}
+
+func materializeAssimilatedFoldersForOpen(mainPath string, workspacePath string, cfg config, project string) {
+	if err := materializeAndReportAssimilatedFolders(mainPath, workspacePath, cfg, project); err != nil {
+		s := cliStylesForWriter(stderrWriter)
+		fmt.Fprintf(stderrWriter, "%s %v\n", s.Warn.Render("Warning:"), err)
+	}
 }
 
 func workspaceNotFoundError(handle string) error {
@@ -634,9 +639,7 @@ func runOpen(args []string) error {
 				if info.Missing {
 					return fmt.Errorf("Workspace %q path not found: %s", handle, info.Path)
 				}
-				if err := materializeAndReportAssimilatedFolders(mainWorkspaceRoot(repoRoot), info.Path, cfg, project); err != nil {
-					return err
-				}
+				materializeAssimilatedFoldersForOpen(mainWorkspaceRoot(repoRoot), info.Path, cfg, project)
 				printNavigationPath(info.Path, "open")
 				return nil
 			}
@@ -661,9 +664,7 @@ func runOpen(args []string) error {
 	if len(selected) == 0 {
 		return errors.New("no Workspace selected")
 	}
-	if err := materializeAndReportAssimilatedFolders(mainWorkspaceRoot(repoRoot), selected[0].Path, cfg, project); err != nil {
-		return err
-	}
+	materializeAssimilatedFoldersForOpen(mainWorkspaceRoot(repoRoot), selected[0].Path, cfg, project)
 	printNavigationPath(selected[0].Path, "open")
 	return nil
 }
@@ -896,11 +897,34 @@ func tidyClosableWorkspaces(repoRoot string, cfg config, project string, infos [
 		fmt.Fprintln(stderrWriter, cliStylesForWriter(stderrWriter).Muted.Render("No Workspaces with no unique content or described commits to tidy."))
 		return nil
 	}
-	fmt.Fprintf(stderrWriter, "%s\n", cliStylesForWriter(stderrWriter).Info.Render("Workspaces with no unique content or described commits: "+workspaceSummary(targets)))
-	if !yes {
-		ok, err := confirm(fmt.Sprintf("Close %d tidy Workspace(s)? [y/N]: ", len(targets)))
-		if err != nil || !ok {
+	if !yes && canUseTUI() {
+		items := selectorItemsForTidy(infos)
+		selected, _, err := runSelector(selectorOptions{Title: "Tidy Workspaces", Mode: selectorMulti, Items: items, Tidy: true})
+		if err != nil {
 			return err
+		}
+		selectedHandles := map[string]struct{}{}
+		for _, item := range selected {
+			selectedHandles[item.Handle] = struct{}{}
+		}
+		selectedTargets := targets[:0]
+		for _, target := range targets {
+			if _, ok := selectedHandles[target.Ref.Handle]; ok {
+				selectedTargets = append(selectedTargets, target)
+			}
+		}
+		targets = selectedTargets
+		if len(targets) == 0 {
+			fmt.Fprintln(stderrWriter, cliStylesForWriter(stderrWriter).Muted.Render("No tidy Workspaces selected."))
+			return nil
+		}
+	} else {
+		fmt.Fprintf(stderrWriter, "%s\n", cliStylesForWriter(stderrWriter).Info.Render("Workspaces with no unique content or described commits: "+workspaceSummary(targets)))
+		if !yes {
+			ok, err := confirm(fmt.Sprintf("Close %d tidy Workspace(s)? [y/N]: ", len(targets)))
+			if err != nil || !ok {
+				return err
+			}
 		}
 	}
 	mainInfo, ok := mapInfosByHandle(infos)[cfg.MainWorkspace]
@@ -1399,13 +1423,8 @@ func runStack(args []string) error {
 	if err != nil {
 		return err
 	}
-	if !conflicted {
-		if err := abandonTopEmptyMutableAncestors(mainInfo.Path); err != nil {
-			return err
-		}
-		if err := advanceMainToStackPayload(mainInfo.Path, cfg.MainWorkspace, inputs); err != nil {
-			return err
-		}
+	if err := finalizeStackTargetHead(mainInfo.Path, cfg.MainWorkspace, inputs, conflicted); err != nil {
+		return err
 	}
 	if err := advanceStackInputWorkspaces(mainInfo.Path, inputs); err != nil {
 		return err
@@ -2962,6 +2981,50 @@ func advanceStackInputWorkspaces(mainPath string, inputs []string) error {
 // preserves the distinction the close logic relies on: stacked payloads become ancestors
 // of Main@ (protected), while genuinely Workspace-only unstacked changes remain
 // descendants of Main@ (abandoned on force close).
+func finalizeStackTargetHead(mainPath, mainHandle string, inputs []string, conflicted bool) error {
+	if !conflicted {
+		if err := abandonTopEmptyMutableAncestors(mainPath); err != nil {
+			return err
+		}
+		if err := advanceMainToStackPayload(mainPath, mainHandle, inputs); err != nil {
+			return err
+		}
+		var err error
+		conflicted, err = workingCopyHasConflicts(mainPath)
+		if err != nil {
+			return err
+		}
+	}
+	mergeHead, err := describeCurrentMergeHead(mainPath)
+	if err != nil {
+		return err
+	}
+	if mergeHead && !conflicted {
+		fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Advance Main above Stack merge"))
+		return commandToStderrFn("jj", "-R", mainPath, "new", "@")
+	}
+	return nil
+}
+
+func describeCurrentMergeHead(mainPath string) (bool, error) {
+	parents, err := revisionCount(mainPath, "@-")
+	if err != nil {
+		return false, err
+	}
+	if parents <= 1 {
+		return false, nil
+	}
+	description, err := commandCaptureFn("jj", "-R", mainPath, "--ignore-working-copy", "log", "-r", "@", "--no-graph", "-T", "description")
+	if err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(description) != "" {
+		return true, nil
+	}
+	fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Describe Stack merge"))
+	return true, commandToStderrFn("jj", "-R", mainPath, "describe", "-m", "chore: merge")
+}
+
 func advanceMainToStackPayload(mainPath, mainHandle string, inputs []string) error {
 	inputs = uniqueNonEmptyStrings(inputs)
 	if len(inputs) == 0 {
@@ -3189,7 +3252,7 @@ func abandonEmptyWorkspaceHeads(repoPath string, infos []workspaceInfo) error {
 }
 
 func abandonTopEmptyMutableAncestors(repoPath string) error {
-	revset := "empty() & mutable() & ::@ & ~@"
+	revset := "empty() & description(\"\") & mutable() & ::@ & ~@"
 	hasEmpty, err := revisionMatches(repoPath, revset)
 	if err != nil {
 		return err
@@ -3512,20 +3575,29 @@ func matchAssimilatedGlobParts(patternParts []string, nameParts []string) (bool,
 
 func ensureAssimilatedSymlink(source string, dest string) (bool, error) {
 	if st, err := os.Lstat(dest); err == nil {
-		if st.Mode()&os.ModeSymlink == 0 {
+		if st.Mode()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(dest)
+			if err != nil {
+				return false, fmt.Errorf("read assimilated path symlink %s: %w", dest, err)
+			}
+			if !filepath.IsAbs(target) {
+				target = filepath.Clean(filepath.Join(filepath.Dir(dest), target))
+			}
+			if filepath.Clean(target) != filepath.Clean(source) {
+				return false, fmt.Errorf("refusing to replace existing Workspace symlink %s -> %s with assimilated path source %s", dest, target, source)
+			}
+			return false, nil
+		}
+		identical, err := regularFilesHaveSameContent(source, dest)
+		if err != nil {
+			return false, err
+		}
+		if !identical {
 			return false, fmt.Errorf("refusing to replace existing Workspace content with assimilated path symlink: %s", dest)
 		}
-		target, err := os.Readlink(dest)
-		if err != nil {
-			return false, fmt.Errorf("read assimilated path symlink %s: %w", dest, err)
+		if err := os.Remove(dest); err != nil {
+			return false, fmt.Errorf("replace identical Workspace file with assimilated path symlink %s: %w", dest, err)
 		}
-		if !filepath.IsAbs(target) {
-			target = filepath.Clean(filepath.Join(filepath.Dir(dest), target))
-		}
-		if filepath.Clean(target) != filepath.Clean(source) {
-			return false, fmt.Errorf("refusing to replace existing Workspace symlink %s -> %s with assimilated path source %s", dest, target, source)
-		}
-		return false, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return false, fmt.Errorf("stat assimilated path destination %s: %w", dest, err)
 	}
@@ -3536,6 +3608,29 @@ func ensureAssimilatedSymlink(source string, dest string) (bool, error) {
 		return false, fmt.Errorf("symlink assimilated path %s -> %s: %w", dest, source, err)
 	}
 	return true, nil
+}
+
+func regularFilesHaveSameContent(a string, b string) (bool, error) {
+	aInfo, err := os.Stat(a)
+	if err != nil {
+		return false, fmt.Errorf("stat assimilated path source %s: %w", a, err)
+	}
+	bInfo, err := os.Stat(b)
+	if err != nil {
+		return false, fmt.Errorf("stat assimilated path destination %s: %w", b, err)
+	}
+	if !aInfo.Mode().IsRegular() || !bInfo.Mode().IsRegular() || aInfo.Size() != bInfo.Size() {
+		return false, nil
+	}
+	aData, err := os.ReadFile(a)
+	if err != nil {
+		return false, fmt.Errorf("read assimilated path source %s: %w", a, err)
+	}
+	bData, err := os.ReadFile(b)
+	if err != nil {
+		return false, fmt.Errorf("read assimilated path destination %s: %w", b, err)
+	}
+	return bytes.Equal(aData, bData), nil
 }
 
 func resolveRepoRoot(override string) (string, error) {
@@ -3973,6 +4068,7 @@ type selectorOptions struct {
 	OrderedSelection bool
 	AllowRoleToggle  bool
 	MoveToMain       bool
+	Tidy             bool
 	StackOptions     stackConfig
 }
 
@@ -4356,6 +4452,9 @@ func selectorLegend(opts selectorOptions) string {
 	if opts.MoveToMain {
 		return "status: only Workspaces with no unique commits and behind Main are selected by default; uncheck any to leave alone"
 	}
+	if opts.Tidy {
+		return "status: empty/stacked Workspaces are tidy and selected by default; uncheck any to leave alone"
+	}
 	if opts.AllDefault {
 		return "status: unstacked/conflict = stack-relevant; stacked/empty/missing = shown for context"
 	}
@@ -4374,6 +4473,9 @@ func selectorHint(opts selectorOptions) string {
 	}
 	if opts.MoveToMain {
 		return "Choose Workspaces to move to the Main Workspace line. Movable rows start checked; press space to leave one alone."
+	}
+	if opts.Tidy {
+		return "Choose tidy Workspaces to close. Tidy rows start checked; press space to leave one alone."
 	}
 	if opts.AllDefault {
 		return "Choose Stack Inputs. The All row submits every stack-relevant Workspace only when no boxes are checked. Disabled rows are shown for context."
@@ -4439,6 +4541,18 @@ func selectorItemsForMoveToMain(infos []workspaceInfo) []selectorItem {
 		}
 		movable := isMovableToMain(info)
 		items = append(items, selectorItem{Handle: info.Ref.Handle, Path: info.Path, Status: moveToMainStatusLabel(info), Markers: strings.Join(markers(info), ","), Disabled: !movable, Selected: movable})
+	}
+	return items
+}
+
+func selectorItemsForTidy(infos []workspaceInfo) []selectorItem {
+	items := make([]selectorItem, 0, len(infos))
+	for _, info := range infos {
+		if info.Main {
+			continue
+		}
+		tidy := isClosable(info)
+		items = append(items, selectorItem{Handle: info.Ref.Handle, Path: info.Path, Status: statusLabel(info), Markers: strings.Join(markers(info), ","), Disabled: !tidy, Selected: tidy})
 	}
 	return items
 }
