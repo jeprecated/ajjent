@@ -1037,13 +1037,13 @@ func runClose(args []string) error {
 		return fmt.Errorf("Main Workspace path missing: %s", mainInfo.Path)
 	}
 	if force && !yes && !confirmedForce {
-		ok, err := confirm(fmt.Sprintf("Forced Closing will abandon unique mutable changes for %d Workspace(s). Continue? [y/N]: ", len(targets)))
+		ok, err := confirm(fmt.Sprintf("Forced Closing will abandon unique mutable changes for %s. Continue? [y/N]: ", workspaceSummary(targets)))
 		if err != nil || !ok {
 			return err
 		}
 	}
 	if !force && !yes {
-		ok, err := confirm(fmt.Sprintf("Close %d Workspace(s)? [y/N]: ", len(targets)))
+		ok, err := confirm(fmt.Sprintf("Close %s? [y/N]: ", workspaceSummary(targets)))
 		if err != nil || !ok {
 			return err
 		}
