@@ -3,12 +3,14 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
 )
@@ -375,21 +377,20 @@ func TestHelpMentionsLineStacking(t *testing.T) {
 	}
 }
 
-func TestShouldConfirmStackPlanOnlyForInteractiveSelectorWithoutYes(t *testing.T) {
+func TestShouldConfirmStackPlanForEveryInteractiveRunWithoutYes(t *testing.T) {
 	cases := []struct {
-		name         string
-		selectorUsed bool
-		yes          bool
-		canUseTUI    bool
-		want         bool
+		name      string
+		yes       bool
+		canUseTUI bool
+		want      bool
 	}{
-		{name: "interactive selector", selectorUsed: true, canUseTUI: true, want: true},
-		{name: "yes skips", selectorUsed: true, yes: true, canUseTUI: true, want: false},
-		{name: "positional skips", selectorUsed: false, canUseTUI: true, want: false},
-		{name: "non tty skips", selectorUsed: true, canUseTUI: false, want: false},
+		{name: "interactive selector", canUseTUI: true, want: true},
+		{name: "yes skips", yes: true, canUseTUI: true, want: false},
+		{name: "positional confirms", canUseTUI: true, want: true},
+		{name: "non tty skips", canUseTUI: false, want: false},
 	}
 	for _, tc := range cases {
-		if got := shouldConfirmStackPlan(tc.selectorUsed, tc.yes, tc.canUseTUI); got != tc.want {
+		if got := shouldConfirmStackPlan(tc.yes, tc.canUseTUI); got != tc.want {
 			t.Fatalf("%s: expected %v, got %v", tc.name, tc.want, got)
 		}
 	}
@@ -738,6 +739,39 @@ func TestSelectorViewKeepsPathColumnStableWithLongHandlesAndMarkers(t *testing.T
 		if got := visibleColumnOfSubstring(t, line, path); got != wantPathColumn {
 			t.Fatalf("selector item line %d path starts at visible column %d, want %d: %q", i+1, got, wantPathColumn, line)
 		}
+	}
+}
+
+func TestSelectorViewFitsTerminalHeightAndScrollsWithCursor(t *testing.T) {
+	items := make([]selectorItem, 12)
+	for i := range items {
+		items[i] = selectorItem{Handle: fmt.Sprintf("workspace-%02d", i+1), Status: "unstacked"}
+	}
+	model := selectorModel{
+		opts:     selectorOptions{Title: "Stack Workspaces", Mode: selectorMulti, Items: items},
+		selected: map[int]bool{},
+	}
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 120, Height: 8})
+	model = updated.(selectorModel)
+
+	view := model.View()
+	if got := len(strings.Split(strings.TrimRight(view, "\n"), "\n")); got > 8 {
+		t.Fatalf("selector rendered %d lines in an 8-line terminal:\n%s", got, view)
+	}
+	if !strings.Contains(view, "workspace-01") || !strings.Contains(view, "enter submit selected") {
+		t.Fatalf("expected first row and footer to remain visible, got:\n%s", view)
+	}
+
+	for range items[1:] {
+		updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+		model = updated.(selectorModel)
+	}
+	view = model.View()
+	if !strings.Contains(view, "workspace-12") || strings.Contains(view, "workspace-01") {
+		t.Fatalf("expected viewport to follow the cursor to the last row, got:\n%s", view)
+	}
+	if got := len(strings.Split(strings.TrimRight(view, "\n"), "\n")); got > 8 {
+		t.Fatalf("scrolled selector rendered %d lines in an 8-line terminal:\n%s", got, view)
 	}
 }
 
@@ -1903,6 +1937,52 @@ func TestRunStackExplicitWorkspaceStacksPayloadParentThenAdvancesWorkspaceHead(t
 	}
 	if !strings.Contains(errOut.String(), "To undo this run: jj op restore op-before-stack") {
 		t.Fatalf("expected undo restore hint, got stderr %q", errOut.String())
+	}
+}
+
+func TestRunStackPrintsUndoHintWhenMutationFails(t *testing.T) {
+	workspacesRoot := filepath.Join(t.TempDir(), "workspaces")
+	mainPath := filepath.Join(workspacesRoot, "proj", "default")
+	teamsPath := filepath.Join(workspacesRoot, "proj", "teams")
+	for _, path := range []string{mainPath, teamsPath} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeConfig(t, mainPath, "workspaces_root: "+workspacesRoot+"\nproject: proj\nmain_workspace: default\n")
+	withCommandCapture(t, func(name string, args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		switch {
+		case strings.Contains(joined, "workspace list"):
+			return "default\tmain111\t" + mainPath + "\nteams\tteams111\t" + teamsPath + "\n", nil
+		case strings.Contains(joined, " op log "):
+			return "op-before-stack\n", nil
+		case strings.Contains(joined, "description(\"\") & ~empty() & @"):
+			return "main111\n", nil
+		case strings.Contains(joined, "heads(teams@-)"):
+			return "teams-parent\n", nil
+		case strings.Contains(joined, workspaceAheadRevset("teams", "default")):
+			return "ahead\n", nil
+		case strings.Contains(joined, "empty() & teams@"):
+			return "empty\n", nil
+		default:
+			return "", nil
+		}
+	})
+	withCommandToStderr(t, func(name string, args ...string) error {
+		if strings.Contains(strings.Join(args, " "), " rebase ") {
+			return errors.New("injected rebase failure")
+		}
+		return nil
+	})
+	_, errOut, err := captureOutput(func() error {
+		return runStack([]string{"teams", "--repo", mainPath, "--yes"})
+	})
+	if err == nil || !strings.Contains(err.Error(), "injected rebase failure") {
+		t.Fatalf("expected injected Stack mutation failure, got %v", err)
+	}
+	if !strings.Contains(errOut, "To undo this run: jj op restore op-before-stack") {
+		t.Fatalf("expected failure path to print restore guidance, got %q", errOut)
 	}
 }
 

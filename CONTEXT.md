@@ -89,6 +89,7 @@ _Avoid_: Disposable workspace
 - **Line Stacking** targets an ordered line determined by **Stack Input** order, not necessarily the **Main Workspace**.
 - **Stacking** uses one or more **Stack Inputs**.
 - Main-targeted **Stack Inputs** are non-main **Workspaces**.
+- When Main-targeted **Stacking** produces a clean Stack merge, it keeps an **In-progress Workspace Head** in the target Workspace above that merge rather than turning its changes into the merge itself.
 - **Line Stacking** **Stack Inputs** are ordered **Workspaces** identified by **Workspace Handles**.
 - **Line Stacking** keeps an **In-progress Workspace Head** out of the payload line and rebases it onto the final Line Stacking tip.
 - **Moving to Main** applies to non-main **Workspaces** with no unique non-empty commits and advances their Workspace heads to the Main Workspace line.

@@ -238,6 +238,40 @@ func TestRunStackRealRepoCleanMergeDescribesMergeAndAdvancesMainAboveIt(t *testi
 	}
 }
 
+func TestRunStackRealRepoPreservesInProgressMainHeadAboveEmptyMerge(t *testing.T) {
+	paths := setupRealStackMergeRepo(t, false)
+	if err := os.WriteFile(filepath.Join(paths.defaultPath, "in-progress.txt"), []byte("target work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runJJ(t, "-R", paths.defaultPath, "file", "track", "root:in-progress.txt")
+	targetBefore := jjRev(t, paths.defaultPath, "default@")
+	if got := jjRevsetCount(t, paths.defaultPath, "~empty() & default@"); got != 1 {
+		t.Fatalf("expected non-empty in-progress default@ before Stack, got %d", got)
+	}
+
+	_, errOut, err := captureOutput(func() error {
+		return runStack([]string{"alpha", "bravo", "--repo", paths.defaultPath, "--workspace", "default", "--yes", "--rebase-mode", "revision", "--stack-shape", "merge", "--conflict-strategy", "off"})
+	})
+	if err != nil {
+		t.Fatalf("expected revision-mode merge Stack to preserve in-progress Main, got %v\nstderr:%s", err, errOut)
+	}
+	if got := jjRev(t, paths.defaultPath, "default@-"); got != targetBefore {
+		t.Fatalf("expected former default@ change %s to become the empty merge below the Workspace head, got %s\nstderr:%s", targetBefore, got, errOut)
+	}
+	if got := jjRevsetCount(t, paths.defaultPath, "~empty() & description(\"\") & default@"); got != 1 {
+		t.Fatalf("expected target changes to remain in an undescribed default@ above the merge, got %d\nstderr:%s", got, errOut)
+	}
+	if got := jjDescription(t, paths.defaultPath, "default@-"); got != "chore: merge" {
+		t.Fatalf("expected described merge directly below default@, got %q\nstderr:%s", got, errOut)
+	}
+	if got := jjRevsetCount(t, paths.defaultPath, "empty() & default@-"); got != 1 {
+		t.Fatalf("expected default@- merge to be empty, got %d\nstderr:%s", got, errOut)
+	}
+	if got := jjRevsetCount(t, paths.defaultPath, "default@--"); got != 2 {
+		t.Fatalf("expected empty merge to have two parents, got %d\nstderr:%s", got, errOut)
+	}
+}
+
 func TestRunStackRealRepoConflictedMergeDescribesMainHeadWithoutAdvancingAboveIt(t *testing.T) {
 	paths := setupRealStackMergeRepo(t, true)
 	_, errOut, err := captureOutput(func() error {

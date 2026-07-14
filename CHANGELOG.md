@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Main-targeted Stack now preserves a non-empty, undescribed target Workspace head above a clean, empty Stack merge instead of moving its changes into `chore: merge` and replacing the target with an empty cursor. Positional interactive Stack runs now show the resolved target and require the same confirmation as selector-driven runs unless `--yes` is supplied.
+- Stack selectors now respect terminal height and scroll with the cursor, keeping their header and controls visible when many Workspaces are available.
 - **Data loss on `ajj stack` + `ajj close --force` for a Workspace based at Main's working copy.** When a Workspace was created from Main's current working copy (its payload a descendant of `Main@`), `runStackRebase`'s `jj rebase -b @ -d payload` was a no-op, so `Main@` never advanced onto the payload. `advanceStackInputWorkspaces` then orphaned the payload (or left it as a non-ancestor of `Main@`), and `ajj close --force` abandoned it via `abandonUniqueMutableChanges` because it was not reachable from `Main@` — silently dropping a stacked child commit (recoverable only via `jj op log`). `runStack` now advances `Main@` onto the stacked payload tip when the payload is a descendant of `Main@` (`advanceMainToStackPayload`), making the payload an ancestor of `Main@` that the existing `~::mainHandle@` exclusion protects. Unstacked Workspace changes remain descendants of `Main@` and are still abandoned on force close.
 
 ## [1.0.0] - 2026-07-06

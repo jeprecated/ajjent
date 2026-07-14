@@ -1310,7 +1310,7 @@ func uniqueWorkspaceInfos(infos []workspaceInfo) []workspaceInfo {
 	return out
 }
 
-func runStack(args []string) error {
+func runStack(args []string) (retErr error) {
 	var err error
 	args, err = normalizePositionalsLast(args, map[string]struct{}{"--repo": {}, "--project": {}, "--workspaces-root": {}, "--workspace": {}, "--rebase-mode": {}, "--stack-shape": {}, "--conflict-strategy": {}})
 	if err != nil {
@@ -1356,7 +1356,6 @@ func runStack(args []string) error {
 		return runLineStack(cfg, infos, byHandle, target, positionals, yes)
 	}
 	inputs := []string{}
-	selectorUsed := false
 	if all {
 		for _, info := range infos {
 			if stackInputProtectedByTarget(info, target) {
@@ -1393,7 +1392,6 @@ func runStack(args []string) error {
 		if err != nil {
 			return err
 		}
-		selectorUsed = true
 		cfg.Stack = opts.StackOptions
 		for _, item := range selected {
 			inputs = append(inputs, item.Handle)
@@ -1403,27 +1401,36 @@ func runStack(args []string) error {
 	if len(inputs) == 0 {
 		return errors.New("no Stack Inputs selected")
 	}
-	if shouldConfirmStackPlan(selectorUsed, yes, canUseTUI()) {
+	mainInfo := byHandle[cfg.MainWorkspace]
+	printStackTargetResolution(target)
+	if err := validateLinearSelection(mainInfo.Path, inputs, cfg.Stack.Shape); err != nil {
+		return err
+	}
+	if shouldConfirmStackPlan(yes, canUseTUI()) {
 		ok, err := confirm(stackPlanPrompt(inputs, cfg.Stack))
 		if err != nil || !ok {
 			fmt.Fprintln(stderrWriter, cliStylesForWriter(stderrWriter).Muted.Render("Stack cancelled."))
 			return err
 		}
 	}
-	mainInfo := byHandle[cfg.MainWorkspace]
-	printStackTargetResolution(target)
+	preservedTarget, err := detectInProgressStackTarget(mainInfo.Path)
+	if err != nil {
+		return err
+	}
 	undoOpID, err := currentOperationID(mainInfo.Path)
 	if err != nil {
 		return fmt.Errorf("record pre-Stack operation id: %w", err)
 	}
-	if err := validateLinearSelection(mainInfo.Path, inputs, cfg.Stack.Shape); err != nil {
-		return err
-	}
+	defer func() {
+		if retErr != nil {
+			printStackUndoHint(undoOpID)
+		}
+	}()
 	conflicted, err := runStackRebase(mainInfo.Path, inputs, cfg.Stack)
 	if err != nil {
 		return err
 	}
-	if err := finalizeStackTargetHead(mainInfo.Path, cfg.MainWorkspace, inputs, conflicted); err != nil {
+	if err := finalizeStackTargetHead(mainInfo.Path, cfg.MainWorkspace, inputs, conflicted, preservedTarget); err != nil {
 		return err
 	}
 	if err := advanceStackInputWorkspaces(mainInfo.Path, inputs); err != nil {
@@ -2077,8 +2084,8 @@ func executeLineStackPlan(repoPath string, plan lineStackPlan) error {
 	return commandToStderrFn("jj", "-R", repoPath, "workspace", "update-stale")
 }
 
-func shouldConfirmStackPlan(selectorUsed bool, yes bool, canUseTUI bool) bool {
-	return selectorUsed && !yes && canUseTUI
+func shouldConfirmStackPlan(yes bool, canUseTUI bool) bool {
+	return !yes && canUseTUI
 }
 
 func stackPlanPrompt(inputs []string, stack stackConfig) string {
@@ -2788,6 +2795,25 @@ func abandonUniqueMutableChanges(repoRoot, handle string) error {
 	return commandToStderrFn("jj", "-R", repoRoot, "abandon", "-r", revset)
 }
 
+type inProgressStackTarget struct {
+	ChangeID string
+}
+
+func detectInProgressStackTarget(mainPath string) (inProgressStackTarget, error) {
+	out, err := commandCaptureFn("jj", "-R", mainPath, "log", "-r", "description(\"\") & ~empty() & @", "--no-graph", "-T", "change_id ++ \"\\n\"")
+	if err != nil {
+		return inProgressStackTarget{}, err
+	}
+	changes := uniqueNonEmptyStrings(strings.Split(out, "\n"))
+	if len(changes) == 0 {
+		return inProgressStackTarget{}, nil
+	}
+	if len(changes) != 1 {
+		return inProgressStackTarget{}, fmt.Errorf("expected one in-progress Stack target head, found %d", len(changes))
+	}
+	return inProgressStackTarget{ChangeID: changes[0]}, nil
+}
+
 func runStackRebase(mainPath string, inputs []string, stack stackConfig) (bool, error) {
 	resolvedConflictStrategy, err := resolveStackConflictStrategy(stack.ConflictStrategy)
 	if err != nil {
@@ -2981,7 +3007,7 @@ func advanceStackInputWorkspaces(mainPath string, inputs []string) error {
 // preserves the distinction the close logic relies on: stacked payloads become ancestors
 // of Main@ (protected), while genuinely Workspace-only unstacked changes remain
 // descendants of Main@ (abandoned on force close).
-func finalizeStackTargetHead(mainPath, mainHandle string, inputs []string, conflicted bool) error {
+func finalizeStackTargetHead(mainPath, mainHandle string, inputs []string, conflicted bool, preservedTarget inProgressStackTarget) error {
 	if !conflicted {
 		if err := abandonTopEmptyMutableAncestors(mainPath); err != nil {
 			return err
@@ -2995,6 +3021,13 @@ func finalizeStackTargetHead(mainPath, mainHandle string, inputs []string, confl
 			return err
 		}
 	}
+	parentCount, err := revisionCount(mainPath, "@-")
+	if err != nil {
+		return err
+	}
+	if preservedTarget.ChangeID != "" && parentCount > 1 && !conflicted {
+		return moveInProgressTargetChangesAboveMerge(mainPath)
+	}
 	mergeHead, err := describeCurrentMergeHead(mainPath)
 	if err != nil {
 		return err
@@ -3004,6 +3037,17 @@ func finalizeStackTargetHead(mainPath, mainHandle string, inputs []string, confl
 		return commandToStderrFn("jj", "-R", mainPath, "new", "@")
 	}
 	return nil
+}
+
+func moveInProgressTargetChangesAboveMerge(mainPath string) error {
+	fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Keep in-progress Stack target above merge"))
+	if err := commandToStderrFn("jj", "-R", mainPath, "new", "@"); err != nil {
+		return err
+	}
+	if err := commandToStderrFn("jj", "-R", mainPath, "squash", "--from", "@-", "--into", "@", "--keep-emptied", "--use-destination-message"); err != nil {
+		return err
+	}
+	return commandToStderrFn("jj", "-R", mainPath, "describe", "-r", "@-", "-m", "chore: merge")
 }
 
 func describeCurrentMergeHead(mainPath string) (bool, error) {
@@ -4088,6 +4132,7 @@ type selectorModel struct {
 	result        selectorResult
 	cancel        bool
 	width         int
+	height        int
 }
 
 func runSelector(opts selectorOptions) ([]selectorItem, selectorOptions, error) {
@@ -4120,6 +4165,7 @@ func (m selectorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
+		m.height = msg.Height
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "esc":
@@ -4349,25 +4395,30 @@ func selectorRoleInitial(role string) string {
 func (m selectorModel) View() string {
 	var b strings.Builder
 	styles := selectorStyles()
-	fmt.Fprintln(&b, styles.Title.Render(m.opts.Title))
-	fmt.Fprintln(&b, styles.Help.Render(selectorHint(m.opts)))
-	if m.filter != "" {
-		fmt.Fprintln(&b, styles.Help.Render("filter: "+m.filter))
-	}
 	visible := m.visibleItems()
-	widths := selectorColumnWidthsForItems(m.opts.Items, visible)
 	cursor := m.cursor
 	if cursor >= len(visible) && len(visible) > 0 {
 		cursor = len(visible) - 1
 	}
+	shown, first := selectorViewport(visible, cursor, m.selectorItemRows())
+	title := m.opts.Title
+	if len(shown) < len(visible) {
+		title += fmt.Sprintf(" (%d-%d/%d)", first+1, first+len(shown), len(visible))
+	}
+	fmt.Fprintln(&b, styles.Title.Render(title))
+	fmt.Fprintln(&b, styles.Help.Render(selectorHint(m.opts)))
+	if m.filter != "" {
+		fmt.Fprintln(&b, styles.Help.Render("filter: "+m.filter))
+	}
+	widths := selectorColumnWidthsForItems(m.opts.Items, visible)
 	if len(visible) == 0 {
 		fmt.Fprintln(&b, styles.Disabled.Render("No matching Workspaces"))
 	}
-	for row, idx := range visible {
+	for row, idx := range shown {
 		item := m.opts.Items[idx]
 		displayItem := item
 		pointer := "  "
-		if row == cursor {
+		if first+row == cursor {
 			pointer = "> "
 		}
 		mark := ""
@@ -4384,7 +4435,7 @@ func (m selectorModel) View() string {
 		line := formatSelectorItemLine(pointer, mark, displayItem, widths)
 		if item.Disabled {
 			line = styles.Disabled.Render(line)
-		} else if row == m.cursor {
+		} else if first+row == cursor {
 			line = styles.Selected.Render(line)
 		} else if itemHasMarker(item, "main") {
 			line = styles.Main.Render(line)
@@ -4409,6 +4460,31 @@ func (m selectorModel) View() string {
 	}
 	fmt.Fprintln(&b, styles.Help.Render(footer))
 	return b.String()
+}
+
+func (m selectorModel) selectorItemRows() int {
+	if m.height <= 0 {
+		return 0
+	}
+	chromeRows := 4 // title, hint, legend, and footer
+	if m.filter != "" {
+		chromeRows++
+	}
+	return max(1, m.height-chromeRows)
+}
+
+func selectorViewport(visible []int, cursor int, limit int) ([]int, int) {
+	if limit <= 0 || len(visible) <= limit {
+		return visible, 0
+	}
+	first := cursor - limit + 1
+	if first < 0 {
+		first = 0
+	}
+	if lastFirst := len(visible) - limit; first > lastFirst {
+		first = lastFirst
+	}
+	return visible[first : first+limit], first
 }
 
 type selectorColumnWidths struct {
