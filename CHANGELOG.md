@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- `ajj create --revision <full-commit-id>` bases a new Workspace on an exact, immutable commit instead of jj's implicit default. The value must be a full 40-character lowercase hexadecimal commit id; it is resolved against the selected repo before any creation side effect, passed to `jj workspace add --revision` as a discrete argv value (no shell construction), and verified by reading back the new working-copy parent. On a parent mismatch or read-back failure the half-created Workspace is forgotten and removed and the command fails rather than reporting success. Omitting `--revision` preserves the previous default behavior.
+
 ### Fixed
 
 - Main-targeted Stack now preserves a non-empty, undescribed target Workspace head above a clean, empty Stack merge instead of moving its changes into `chore: merge` and replacing the target with an empty cursor. Positional interactive Stack runs now show the resolved target and require the same confirmation as selector-driven runs unless `--yes` is supplied.

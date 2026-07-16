@@ -1507,7 +1507,7 @@ func TestCreateWorkspaceHelperCreatesPrintsAndMaterializes(t *testing.T) {
 		}
 		return nil
 	})
-	out, errOut, err := captureOutput(func() error { return createWorkspace(mainPath, cfg, "proj", "alpha", false, false) })
+	out, errOut, err := captureOutput(func() error { return createWorkspace(mainPath, cfg, "proj", "alpha", "", false, false) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1570,7 +1570,7 @@ func TestCreateWorkspaceHonorsDirenvAllowWhenAssimilationFails(t *testing.T) {
 		return "", os.ErrNotExist
 	})
 
-	err := createWorkspace(mainPath, cfg, "proj", "alpha", false, true)
+	err := createWorkspace(mainPath, cfg, "proj", "alpha", "", false, true)
 	if err == nil || !strings.Contains(err.Error(), "refusing to replace") {
 		t.Fatalf("expected assimilation refusal error, got %v", err)
 	}
@@ -1614,6 +1614,281 @@ func TestRunCreateMaterializesAssimilatedFolders(t *testing.T) {
 	}
 	if target, err := os.Readlink(filepath.Join(workspacePath, "scratch")); err != nil || target != filepath.Join(mainPath, "scratch") {
 		t.Fatalf("expected create to materialize scratch symlink to main, got target=%q err=%v", target, err)
+	}
+}
+
+const testRevisionCommitID = "0123456789abcdef0123456789abcdef01234567"
+
+func argvValue(args []string, flag string) (string, bool) {
+	for i := 0; i < len(args); i++ {
+		if args[i] == flag {
+			if i+1 < len(args) {
+				return args[i+1], true
+			}
+			return "", true
+		}
+	}
+	return "", false
+}
+
+func argvHasFlag(args []string, flag string) bool {
+	for _, a := range args {
+		if a == flag {
+			return true
+		}
+	}
+	return false
+}
+
+func TestValidateCreateRevision(t *testing.T) {
+	cases := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{"omitted", "", "", false},
+		{"whitespace only", "   ", "", false},
+		{"full lowercase hex", testRevisionCommitID, testRevisionCommitID, false},
+		{"trimmed", "  " + testRevisionCommitID + "  ", testRevisionCommitID, false},
+		{"too short", "0123456789abcdef", "", true},
+		{"too long", testRevisionCommitID + "0", "", true},
+		{"uppercase", strings.ToUpper(testRevisionCommitID), "", true},
+		{"non-hex", strings.Repeat("z", 40), "", true},
+		{"revset expression", "@-", "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := validateCreateRevision(tc.input)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q, got nil (result %q)", tc.input, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error for %q: %v", tc.input, err)
+			}
+			if got != tc.want {
+				t.Fatalf("expected %q, got %q", tc.want, got)
+			}
+		})
+	}
+}
+
+// TestCreateWorkspacePassesRevisionAsSeparateArgvAndVerifiesParent proves the
+// exact commit id is passed to `jj workspace add` as a discrete argv value (no
+// shell construction) and that a matching read-back of the new working-copy
+// parent is treated as success.
+func TestCreateWorkspacePassesRevisionAsSeparateArgvAndVerifiesParent(t *testing.T) {
+	mainPath := t.TempDir()
+	workspacesRoot := filepath.Join(t.TempDir(), "workspaces")
+	cfg := config{WorkspacesRoot: workspacesRoot, Project: "proj", MainWorkspace: "default"}
+	workspacePath := filepath.Join(workspacesRoot, "proj", "alpha")
+
+	var resolveArgs, addArgs []string
+	withCommandCapture(t, func(name string, args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "workspace list") {
+			return "default\tmain111\t" + mainPath + "\n", nil
+		}
+		if rev, ok := argvValue(args, "-r"); ok {
+			switch rev {
+			case testRevisionCommitID: // pre-create membership resolution
+				resolveArgs = append([]string(nil), args...)
+				return testRevisionCommitID + "\n", nil
+			case "@-": // post-create read-back of the working-copy parent
+				return testRevisionCommitID + "\n", nil
+			}
+		}
+		return "", nil
+	})
+	withCommandToStderr(t, func(name string, args ...string) error {
+		if name == "jj" && argvHasFlag(args, "add") {
+			addArgs = append([]string(nil), args...)
+			return os.MkdirAll(args[len(args)-1], 0o755)
+		}
+		return nil
+	})
+
+	out, _, err := captureOutput(func() error {
+		return createWorkspace(mainPath, cfg, "proj", "alpha", testRevisionCommitID, false, false)
+	})
+	if err != nil {
+		t.Fatalf("expected create to succeed, got %v", err)
+	}
+	if strings.TrimSpace(out) != workspacePath {
+		t.Fatalf("expected workspace path %q, got %q", workspacePath, out)
+	}
+	if len(resolveArgs) == 0 {
+		t.Fatal("expected pre-create revision resolution before side effects")
+	}
+	if !argvHasFlag(resolveArgs, "--ignore-working-copy") {
+		t.Fatalf("expected resolution to use --ignore-working-copy (no source retarget), got %v", resolveArgs)
+	}
+	rev, ok := argvValue(addArgs, "--revision")
+	if !ok || rev != testRevisionCommitID {
+		t.Fatalf("expected `jj workspace add --revision %s` as separate argv, got %v", testRevisionCommitID, addArgs)
+	}
+	// The commit id must never be fused with the handle or target into one token.
+	for _, a := range addArgs {
+		if a != testRevisionCommitID && strings.Contains(a, testRevisionCommitID) {
+			t.Fatalf("commit id must be a discrete argv value, found fused token %q", a)
+		}
+	}
+}
+
+// TestCreateWorkspaceOmittedRevisionUnchanged proves the default create path is
+// untouched: no `--revision` argv, and no pre/post revision jj lookups.
+func TestCreateWorkspaceOmittedRevisionUnchanged(t *testing.T) {
+	mainPath := t.TempDir()
+	workspacesRoot := filepath.Join(t.TempDir(), "workspaces")
+	cfg := config{WorkspacesRoot: workspacesRoot, Project: "proj", MainWorkspace: "default"}
+
+	var addArgs []string
+	var sawCommitTemplate bool
+	withCommandCapture(t, func(name string, args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "workspace list") {
+			return "default\tmain111\t" + mainPath + "\n", nil
+		}
+		if strings.Contains(joined, "commit_id") {
+			sawCommitTemplate = true
+		}
+		return "", nil
+	})
+	withCommandToStderr(t, func(name string, args ...string) error {
+		if name == "jj" && argvHasFlag(args, "add") {
+			addArgs = append([]string(nil), args...)
+			return os.MkdirAll(args[len(args)-1], 0o755)
+		}
+		return nil
+	})
+
+	if _, _, err := captureOutput(func() error {
+		return createWorkspace(mainPath, cfg, "proj", "alpha", "", false, false)
+	}); err != nil {
+		t.Fatalf("expected create to succeed, got %v", err)
+	}
+	if argvHasFlag(addArgs, "--revision") {
+		t.Fatalf("omitted --revision must not add a revision argv, got %v", addArgs)
+	}
+	if sawCommitTemplate {
+		t.Fatal("omitted --revision must not perform commit-id resolution or read-back")
+	}
+}
+
+// TestCreateWorkspaceUnknownRevisionFailsBeforeCreation proves an unknown
+// revision is rejected before any creation side effect: no `jj workspace add`,
+// no directory.
+func TestCreateWorkspaceUnknownRevisionFailsBeforeCreation(t *testing.T) {
+	mainPath := t.TempDir()
+	workspacesRoot := filepath.Join(t.TempDir(), "workspaces")
+	cfg := config{WorkspacesRoot: workspacesRoot, Project: "proj", MainWorkspace: "default"}
+	workspacePath := filepath.Join(workspacesRoot, "proj", "alpha")
+
+	var addCalled bool
+	withCommandCapture(t, func(name string, args ...string) (string, error) {
+		if rev, ok := argvValue(args, "-r"); ok && rev == testRevisionCommitID {
+			return "", nil // resolves to nothing: unknown commit
+		}
+		return "", nil
+	})
+	withCommandToStderr(t, func(name string, args ...string) error {
+		if name == "jj" && argvHasFlag(args, "add") {
+			addCalled = true
+		}
+		return nil
+	})
+
+	err := createWorkspace(mainPath, cfg, "proj", "alpha", testRevisionCommitID, false, false)
+	if err == nil || !strings.Contains(err.Error(), "does not resolve") {
+		t.Fatalf("expected unknown-revision error, got %v", err)
+	}
+	if addCalled {
+		t.Fatal("workspace add must not run when the revision is unknown")
+	}
+	if exists(workspacePath) {
+		t.Fatalf("no Workspace directory should be created for an unknown revision: %s", workspacePath)
+	}
+}
+
+// TestCreateWorkspaceRevisionParentMismatchCleansUp proves that when read-back
+// shows the new working-copy parent is not the requested commit, create fails
+// honestly and cleans up (forget + remove) rather than reporting success.
+func TestCreateWorkspaceRevisionParentMismatchCleansUp(t *testing.T) {
+	mainPath := t.TempDir()
+	workspacesRoot := filepath.Join(t.TempDir(), "workspaces")
+	cfg := config{WorkspacesRoot: workspacesRoot, Project: "proj", MainWorkspace: "default"}
+	workspacePath := filepath.Join(workspacesRoot, "proj", "alpha")
+	otherCommit := "89abcdef0123456789abcdef0123456789abcdef"
+
+	withCommandCapture(t, func(name string, args ...string) (string, error) {
+		if rev, ok := argvValue(args, "-r"); ok {
+			switch rev {
+			case testRevisionCommitID:
+				return testRevisionCommitID + "\n", nil // membership OK
+			case "@-":
+				return otherCommit + "\n", nil // read-back mismatch
+			}
+		}
+		return "", nil
+	})
+	var forgotHandle string
+	withCommandToStderr(t, func(name string, args ...string) error {
+		if name == "jj" && argvHasFlag(args, "add") {
+			return os.MkdirAll(args[len(args)-1], 0o755)
+		}
+		if name == "jj" && argvHasFlag(args, "forget") {
+			if h, ok := argvValue(args, "forget"); ok {
+				forgotHandle = h
+			}
+		}
+		return nil
+	})
+
+	err := createWorkspace(mainPath, cfg, "proj", "alpha", testRevisionCommitID, false, false)
+	if err == nil {
+		t.Fatal("expected mismatch error, got nil")
+	}
+	if !strings.Contains(err.Error(), testRevisionCommitID) || !strings.Contains(err.Error(), "cleaned up") {
+		t.Fatalf("expected honest mismatch+cleanup error, got %v", err)
+	}
+	if forgotHandle != "alpha" {
+		t.Fatalf("expected cleanup to forget Workspace \"alpha\", forgot %q", forgotHandle)
+	}
+	if exists(workspacePath) {
+		t.Fatalf("expected cleanup to remove %s", workspacePath)
+	}
+}
+
+func TestRunCreateRejectsMalformedRevisionBeforeCreation(t *testing.T) {
+	mainPath := t.TempDir()
+	workspacesRoot := filepath.Join(t.TempDir(), "workspaces")
+	writeConfig(t, mainPath, strings.Join([]string{
+		"workspaces_root: " + workspacesRoot,
+		"project: proj",
+		"",
+	}, "\n"))
+	var addCalled bool
+	withCommandCapture(t, func(name string, args ...string) (string, error) {
+		if strings.Contains(strings.Join(args, " "), "workspace list") {
+			return "default\tmain111\t" + mainPath + "\n", nil
+		}
+		return "", nil
+	})
+	withCommandToStderr(t, func(name string, args ...string) error {
+		if name == "jj" && argvHasFlag(args, "add") {
+			addCalled = true
+		}
+		return nil
+	})
+	err := runCreate([]string{"alpha", "--repo", mainPath, "--revision", "not-a-commit"})
+	if err == nil || !strings.Contains(err.Error(), "full 40-character") {
+		t.Fatalf("expected malformed-revision error, got %v", err)
+	}
+	if addCalled {
+		t.Fatal("workspace add must not run for a malformed --revision")
 	}
 }
 

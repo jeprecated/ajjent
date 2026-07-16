@@ -471,19 +471,24 @@ func runInit(args []string) error {
 
 func runCreate(args []string) error {
 	var err error
-	args, err = normalizePositionalsLast(args, map[string]struct{}{"--repo": {}, "--project": {}, "--workspaces-root": {}})
+	args, err = normalizePositionalsLast(args, map[string]struct{}{"--repo": {}, "--project": {}, "--workspaces-root": {}, "--revision": {}})
 	if err != nil {
 		return err
 	}
 	fs := flag.NewFlagSet("create", flag.ContinueOnError)
-	var repoRootOverride, projectOverride, rootOverride string
+	var repoRootOverride, projectOverride, rootOverride, revision string
 	var envrc, direnvAllow bool
 	fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
 	fs.StringVar(&projectOverride, "project", "", "Project override")
 	fs.StringVar(&rootOverride, "workspaces-root", "", "Workspaces root override")
+	fs.StringVar(&revision, "revision", "", "base the new Workspace on an exact full commit id instead of jj's default")
 	fs.BoolVar(&envrc, "envrc", false, "create .envrc in the new Workspace")
 	fs.BoolVar(&direnvAllow, "direnv-allow", false, "run direnv allow for the new Workspace")
 	if handled, err := parseCommandFlags(fs, args, "ajj create [handle] [options]", "Create a new Workspace and print its path."); handled || err != nil {
+		return err
+	}
+	revision, err = validateCreateRevision(revision)
+	if err != nil {
 		return err
 	}
 	positionals := fs.Args()
@@ -524,10 +529,18 @@ func runCreate(args []string) error {
 			return err
 		}
 	}
-	return createWorkspace(repoRoot, cfg, project, handle, envrc, direnvAllow)
+	return createWorkspace(repoRoot, cfg, project, handle, revision, envrc, direnvAllow)
 }
 
-func createWorkspace(repoRoot string, cfg config, project string, handle string, envrc bool, direnvAllow bool) (err error) {
+func createWorkspace(repoRoot string, cfg config, project string, handle string, revision string, envrc bool, direnvAllow bool) (err error) {
+	// Resolve and verify an explicit --revision against the selected repo BEFORE
+	// any Workspace creation side effect (directory creation, `jj workspace
+	// add`). A malformed or unknown revision fails here, leaving no partial state.
+	if revision != "" {
+		if err := verifyRevisionInRepo(repoRoot, revision); err != nil {
+			return err
+		}
+	}
 	target := filepath.Join(cfg.WorkspacesRoot, project, handle)
 	if exists(target) {
 		return fmt.Errorf("Workspace path already exists: %s", target)
@@ -535,8 +548,22 @@ func createWorkspace(repoRoot string, cfg config, project string, handle string,
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return fmt.Errorf("create Workspace parent: %w", err)
 	}
-	if err := commandToStderrFn("jj", "-R", repoRoot, "workspace", "add", "--name", handle, target); err != nil {
+	addArgs := []string{"-R", repoRoot, "workspace", "add", "--name", handle}
+	if revision != "" {
+		// Pass the exact commit id as a separate argv value; never shell-construct.
+		addArgs = append(addArgs, "--revision", revision)
+	}
+	addArgs = append(addArgs, target)
+	if err := commandToStderrFn("jj", addArgs...); err != nil {
 		return err
+	}
+	// Read back and confirm the new Workspace working-copy change has exactly the
+	// requested commit as its parent. On mismatch, fail honestly and clean up the
+	// half-created Workspace so a retry starts from a clean slate.
+	if revision != "" {
+		if err := verifyWorkspaceRevisionParent(repoRoot, handle, target, revision); err != nil {
+			return err
+		}
 	}
 	// Honor a requested `direnv allow` for the new Workspace even when a later
 	// step (e.g. an assimilated-path conflict) returns an error. Without this,
@@ -572,6 +599,102 @@ func maybeDirenvAllow(target string) {
 	if _, err := lookPathFn("direnv"); err == nil {
 		_ = commandToStderrFn("direnv", "allow", target)
 	}
+}
+
+// revisionCommitIDRE matches a full, exact, immutable commit id: exactly 40
+// lowercase hexadecimal characters. A full id is bounded (fixed length) and
+// unambiguous, and a commit id — unlike a jj change id — names an immutable
+// snapshot, so `ajj create --revision` bases the new Workspace on an exact
+// commit rather than a rewritable change. jj change ids use the letters k–z,
+// so an all-hex string never collides with one.
+var revisionCommitIDRE = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
+// validateCreateRevision enforces the bounded exact-commit-id shape of the
+// --revision input. It returns the trimmed value ("" when omitted) so the
+// caller can treat an absent flag as "use jj's default base".
+func validateCreateRevision(revision string) (string, error) {
+	revision = strings.TrimSpace(revision)
+	if revision == "" {
+		return "", nil
+	}
+	if !revisionCommitIDRE.MatchString(revision) {
+		return "", fmt.Errorf("--revision must be a full 40-character lowercase hexadecimal commit id, got %q", revision)
+	}
+	return revision, nil
+}
+
+// verifyRevisionInRepo confirms revision resolves to exactly one commit in
+// repoRoot and that its canonical commit id equals the requested id, before any
+// creation side effect. It uses --ignore-working-copy so the lookup never
+// snapshots or retargets the source Workspace. The 40-hex input is safe to pass
+// as a revset with no shell construction.
+func verifyRevisionInRepo(repoRoot, revision string) error {
+	out, err := commandCaptureFn("jj", "-R", repoRoot, "--ignore-working-copy", "log", "-r", revision, "--no-graph", "-T", "commit_id ++ \"\\n\"")
+	if err != nil {
+		return fmt.Errorf("resolve --revision %s in %s: %w", revision, repoRoot, err)
+	}
+	ids := uniqueNonEmptyStrings(strings.Split(out, "\n"))
+	if len(ids) == 0 {
+		return fmt.Errorf("--revision %s does not resolve to a commit in %s", revision, repoRoot)
+	}
+	if len(ids) > 1 {
+		return fmt.Errorf("--revision %s is ambiguous in %s; it resolves to %d commits", revision, repoRoot, len(ids))
+	}
+	if ids[0] != revision {
+		return fmt.Errorf("--revision %s resolved to a different commit id %s; pass the exact full commit id", revision, ids[0])
+	}
+	return nil
+}
+
+// verifyWorkspaceRevisionParent reads back the new Workspace's working-copy
+// parent and confirms it is exactly the requested commit. On any mismatch or
+// read-back failure it cleans up the half-created Workspace and returns a
+// non-nil error, so a caller never treats a mis-based Workspace as success.
+func verifyWorkspaceRevisionParent(repoRoot, handle, target, revision string) error {
+	parent, err := workspaceParentCommitID(target)
+	if err == nil && parent == revision {
+		return nil
+	}
+	mismatch := fmt.Errorf("new Workspace %q working-copy parent is %s, expected requested --revision %s", handle, parent, revision)
+	if err != nil {
+		mismatch = fmt.Errorf("verify new Workspace %q working-copy parent against --revision %s: %w", handle, revision, err)
+	}
+	if cleanupErr := cleanupFailedRevisionWorkspace(repoRoot, handle, target); cleanupErr != nil {
+		return fmt.Errorf("%w; automatic cleanup also failed (%v) — manually run `jj -R %s workspace forget %s` and remove %s", mismatch, cleanupErr, repoRoot, handle, target)
+	}
+	return fmt.Errorf("%w; the half-created Workspace was cleaned up", mismatch)
+}
+
+// workspaceParentCommitID returns the single working-copy parent commit id of
+// the Workspace rooted at path. It errors if the working copy has zero or more
+// than one parent, since an exact-revision base must be a single commit.
+func workspaceParentCommitID(path string) (string, error) {
+	out, err := commandCaptureFn("jj", "-R", path, "--ignore-working-copy", "log", "-r", "@-", "--no-graph", "-T", "commit_id ++ \"\\n\"")
+	if err != nil {
+		return "", err
+	}
+	ids := uniqueNonEmptyStrings(strings.Split(out, "\n"))
+	if len(ids) != 1 {
+		return "", fmt.Errorf("expected exactly one working-copy parent, got %d", len(ids))
+	}
+	return ids[0], nil
+}
+
+// cleanupFailedRevisionWorkspace forgets the Workspace handle and removes its
+// directory after a failed exact-revision create, leaving no dangling registration
+// or partial working copy for the next attempt.
+func cleanupFailedRevisionWorkspace(repoRoot, handle, target string) error {
+	var problems []string
+	if err := commandToStderrFn("jj", "-R", repoRoot, "workspace", "forget", handle); err != nil {
+		problems = append(problems, fmt.Sprintf("forget Workspace %q: %v", handle, err))
+	}
+	if err := os.RemoveAll(target); err != nil {
+		problems = append(problems, fmt.Sprintf("remove %s: %v", target, err))
+	}
+	if len(problems) > 0 {
+		return errors.New(strings.Join(problems, "; "))
+	}
+	return nil
 }
 
 func openExistingWorkspace(repoRoot string, cfg config, project string, handle string) error {
@@ -649,7 +772,7 @@ func runOpen(args []string) error {
 			if err != nil || !ok {
 				return err
 			}
-			return createWorkspace(repoRoot, cfg, project, handle, false, false)
+			return createWorkspace(repoRoot, cfg, project, handle, "", false, false)
 		}
 		return workspaceNotFoundError(handle)
 	}
