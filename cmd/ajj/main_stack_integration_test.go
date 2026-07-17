@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -134,6 +135,74 @@ func rebaseDestinations(args []string) []string {
 	return dests
 }
 
+func TestDetachedOperationIDParsesJJOutput(t *testing.T) {
+	got, err := detachedOperationID("Rebased 1 commits to destination\nOperation left uncommitted because --no-integrate-operation was requested: a1b2c3d4e5f6\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "a1b2c3d4e5f6" {
+		t.Fatalf("expected detached operation id, got %q", got)
+	}
+}
+
+func TestJJSupportsDetachedOperationsFrom041(t *testing.T) {
+	orig := jjVersionFn
+	t.Cleanup(func() { jjVersionFn = orig })
+	for _, tc := range []struct {
+		version string
+		want    bool
+	}{
+		{version: "jj 0.40.0", want: false},
+		{version: "jj 0.41.0", want: true},
+		{version: "jj 0.43.0", want: true},
+		{version: "unknown", want: false},
+	} {
+		jjVersionFn = func() (string, error) { return tc.version, nil }
+		if got := jjSupportsDetachedOperations(); got != tc.want {
+			t.Fatalf("jjSupportsDetachedOperations(%q) = %v, want %v", tc.version, got, tc.want)
+		}
+	}
+}
+
+func TestTidyProbeRejectsConcurrentOperationAfterConflictInspection(t *testing.T) {
+	opReads := 0
+	withCommandCapture(t, func(name string, args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		switch {
+		case strings.Contains(joined, "--at-op=abc123"):
+			return "abc999\n", nil
+		case strings.Contains(joined, " op log "):
+			opReads++
+			if opReads < 3 {
+				return "111111\n", nil
+			}
+			return "222222\n", nil
+		case strings.Contains(joined, "(::alpha@ & ~::@ & ~empty())") && !strings.Contains(joined, "immutable()"):
+			return "abc999\n", nil
+		default:
+			return "", nil
+		}
+	})
+	origCombined := commandCombinedCaptureFn
+	commandCombinedCaptureFn = func(name string, args ...string) (string, error) {
+		return "Operation left uncommitted because --no-integrate-operation was requested: abc123\n", nil
+	}
+	t.Cleanup(func() { commandCombinedCaptureFn = origCombined })
+	mutations := 0
+	withCommandToStderr(t, func(name string, args ...string) error {
+		mutations++
+		return nil
+	})
+
+	_, _, err := trySingleInputTidyLinearProbe("/repo", "alpha")
+	if err == nil || !strings.Contains(err.Error(), "operation changed while inspecting tidy Stack probe") {
+		t.Fatalf("expected concurrent-operation rejection, got %v", err)
+	}
+	if mutations != 0 {
+		t.Fatalf("expected no integration or fallback mutation after concurrent operation, got %d calls", mutations)
+	}
+}
+
 func TestResolveStackConflictStrategyDefaultsPreferClean(t *testing.T) {
 	got, err := resolveStackConflictStrategy("")
 	if err != nil {
@@ -213,6 +282,111 @@ func TestRunStackRealRepoSelfTargetGuard(t *testing.T) {
 	err := runStack([]string{"agm-speed-transition", "--repo", paths.childPath, "--yes", "--rebase-mode", "branch", "--conflict-strategy", "off"})
 	if err == nil || !strings.Contains(err.Error(), "target workspace") || !strings.Contains(err.Error(), "--workspace") {
 		t.Fatalf("expected self-target guard with --workspace guidance, got %v", err)
+	}
+}
+
+func TestRunStackRealRepoAutoPrefersCleanLinearInsertionForSingleDivergentPayload(t *testing.T) {
+	paths := setupRealTidySingleStackRepo(t, false)
+	payloadChange := jjRev(t, paths.defaultPath, "alpha@-")
+	mainChange := jjRev(t, paths.defaultPath, "default@-")
+
+	_, errOut, err := captureOutput(func() error {
+		return runStack([]string{"alpha", "--repo", paths.defaultPath, "--workspace", "default", "--yes"})
+	})
+	if err != nil {
+		t.Fatalf("expected tidy auto Stack to succeed, got %v\nstderr:%s", err, errOut)
+	}
+	if got := jjRev(t, paths.defaultPath, "default@-"); got != payloadChange {
+		t.Fatalf("expected payload change %s directly below Main, got %s\nstderr:%s", payloadChange, got, errOut)
+	}
+	if got := jjRev(t, paths.defaultPath, "default@--"); got != mainChange {
+		t.Fatalf("expected original Main change %s below payload, got %s\nstderr:%s", mainChange, got, errOut)
+	}
+	if got := jjRevsetCount(t, paths.defaultPath, "parents(default@-)"); got != 1 {
+		t.Fatalf("expected one-parent linear payload, got %d parents\nstderr:%s", got, errOut)
+	}
+	if got := jjRevsetCount(t, paths.defaultPath, fmt.Sprintf("conflicts() & %s::default@", payloadChange)); got != 0 {
+		t.Fatalf("expected conflict-free payload-to-Main line, got %d conflicted revisions\nstderr:%s", got, errOut)
+	}
+	if got := jjRevsetCount(t, paths.defaultPath, fmt.Sprintf("description(exact:\"chore: merge\") & %s::default@", mainChange)); got != 0 {
+		t.Fatalf("expected no structural chore: merge commit, got %d\nstderr:%s", got, errOut)
+	}
+	if !strings.Contains(errOut, "Tidy Stack result: clean linear insertion") {
+		t.Fatalf("expected tidy probe selection in stderr, got:\n%s", errOut)
+	}
+}
+
+func TestRunStackRealRepoAutoKeepsInProgressMainAboveCleanLinearInsertion(t *testing.T) {
+	paths := setupRealTidySingleStackRepo(t, false)
+	if err := os.WriteFile(filepath.Join(paths.defaultPath, "in-progress.txt"), []byte("target work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runJJ(t, "-R", paths.defaultPath, "file", "track", "root:in-progress.txt")
+	targetChange := jjRev(t, paths.defaultPath, "default@")
+	payloadChange := jjRev(t, paths.defaultPath, "alpha@-")
+	mainChange := jjRev(t, paths.defaultPath, "default@-")
+
+	_, errOut, err := captureOutput(func() error {
+		return runStack([]string{"alpha", "--repo", paths.defaultPath, "--workspace", "default", "--yes"})
+	})
+	if err != nil {
+		t.Fatalf("expected tidy Stack to preserve in-progress Main, got %v\nstderr:%s", err, errOut)
+	}
+	if got := jjRev(t, paths.defaultPath, "default@"); got != targetChange {
+		t.Fatalf("expected in-progress Main change %s to remain current, got %s\nstderr:%s", targetChange, got, errOut)
+	}
+	if got := jjRevsetCount(t, paths.defaultPath, "~empty() & description(\"\") & default@"); got != 1 {
+		t.Fatalf("expected non-empty undescribed Main head, got %d\nstderr:%s", got, errOut)
+	}
+	if got := jjRev(t, paths.defaultPath, "default@-"); got != payloadChange {
+		t.Fatalf("expected payload %s below in-progress Main, got %s\nstderr:%s", payloadChange, got, errOut)
+	}
+	if got := jjRev(t, paths.defaultPath, "default@--"); got != mainChange {
+		t.Fatalf("expected original Main %s below payload, got %s\nstderr:%s", mainChange, got, errOut)
+	}
+	if got := jjRevsetCount(t, paths.defaultPath, fmt.Sprintf("conflicts() & %s::default@", payloadChange)); got != 0 {
+		t.Fatalf("expected conflict-free payload and in-progress Main, got %d conflicted revisions\nstderr:%s", got, errOut)
+	}
+	if got := jjRevsetCount(t, paths.defaultPath, fmt.Sprintf("description(exact:\"chore: merge\") & %s::default@", mainChange)); got != 0 {
+		t.Fatalf("expected no empty merge below in-progress Main, got %d\nstderr:%s", got, errOut)
+	}
+}
+
+func TestRunStackRealRepoAutoRejectsConflictedTidyProbeBeforeMergeFallback(t *testing.T) {
+	paths := setupRealTidySingleStackRepo(t, true)
+	beforeProbeOp, err := currentOperationID(paths.defaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	integrated, conflicted, err := trySingleInputTidyLinearProbe(paths.defaultPath, "alpha")
+	if err != nil {
+		t.Fatalf("detached conflict probe failed: %v", err)
+	}
+	if integrated || !conflicted {
+		t.Fatalf("expected rejected conflicted probe, got integrated=%v conflicted=%v", integrated, conflicted)
+	}
+	afterProbeOp, err := currentOperationID(paths.defaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterProbeOp != beforeProbeOp {
+		t.Fatalf("conflicted detached probe changed current operation: before=%s after=%s", beforeProbeOp, afterProbeOp)
+	}
+
+	_, errOut, err := captureOutput(func() error {
+		return runStack([]string{"alpha", "--repo", paths.defaultPath, "--workspace", "default", "--yes"})
+	})
+	if err != nil {
+		t.Fatalf("expected conflict fallback to leave a resolvable merge, got %v\nstderr:%s", err, errOut)
+	}
+	if !strings.Contains(errOut, "Tidy Stack probe conflicted; trying merge fallback") {
+		t.Fatalf("expected conflicted tidy probe to be rejected, got:\n%s", errOut)
+	}
+	if got := jjDescription(t, paths.defaultPath, "default@"); got != "chore: merge" {
+		t.Fatalf("expected merge fallback at default@, got %q\nstderr:%s", got, errOut)
+	}
+	if got := jjRevsetCount(t, paths.defaultPath, "conflicts() & default@"); got != 1 {
+		t.Fatalf("expected conflicted merge fallback, got %d conflicted default@ revisions\nstderr:%s", got, errOut)
 	}
 }
 
@@ -330,6 +504,57 @@ func setupRealStackRepo(t *testing.T) realStackRepoPaths {
 	_ = exec.Command("jj", "-R", childPath, "file", "track", "payload.txt").Run()
 	runJJ(t, "-R", childPath, "commit", "-m", "child payload")
 	return realStackRepoPaths{defaultPath: defaultPath, speedPath: speedPath, childPath: childPath}
+}
+
+func setupRealTidySingleStackRepo(t *testing.T, conflicting bool) realStackRepoPaths {
+	t.Helper()
+	if _, err := exec.LookPath("jj"); err != nil {
+		t.Skip("jj binary not available for integration test")
+	}
+	workspacesRoot := filepath.Join(t.TempDir(), "workspaces")
+	defaultPath := filepath.Join(workspacesRoot, "proj", "default")
+	alphaPath := filepath.Join(workspacesRoot, "proj", "alpha")
+	if err := os.MkdirAll(filepath.Dir(defaultPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runJJ(t, "git", "init", "--colocate", defaultPath)
+	writeConfig(t, defaultPath, strings.Join([]string{
+		"workspaces_root: " + workspacesRoot,
+		"project: proj",
+		"main_workspace: default",
+		"stack:",
+		"  rebase_mode: auto",
+		"  shape: auto",
+		"  conflict_strategy: prefer-clean",
+		"",
+	}, "\n"))
+	if err := os.WriteFile(filepath.Join(defaultPath, "shared.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = exec.Command("jj", "-R", defaultPath, "file", "track", "root:shared.txt").Run()
+	runJJ(t, "-R", defaultPath, "commit", "-m", "base")
+	runJJ(t, "-R", defaultPath, "workspace", "add", "--revision", "@-", "--name", "alpha", alphaPath)
+	mainFile := "main.txt"
+	if conflicting {
+		mainFile = "shared.txt"
+	}
+	if err := os.WriteFile(filepath.Join(defaultPath, mainFile), []byte("main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = exec.Command("jj", "-R", defaultPath, "file", "track", "root:"+mainFile).Run()
+	runJJ(t, "-R", defaultPath, "commit", "-m", "main advance")
+	runJJ(t, "-R", alphaPath, "workspace", "update-stale")
+	alphaFile := "alpha.txt"
+	if conflicting {
+		alphaFile = "shared.txt"
+	}
+	if err := os.WriteFile(filepath.Join(alphaPath, alphaFile), []byte("alpha\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = exec.Command("jj", "-R", alphaPath, "file", "track", "root:"+alphaFile).Run()
+	runJJ(t, "-R", alphaPath, "commit", "-m", "alpha payload")
+	runJJ(t, "-R", defaultPath, "workspace", "update-stale")
+	return realStackRepoPaths{defaultPath: defaultPath, alphaPath: alphaPath}
 }
 
 func setupRealStackMergeRepo(t *testing.T, conflicting bool) realStackRepoPaths {

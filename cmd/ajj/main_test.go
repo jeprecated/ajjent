@@ -268,6 +268,34 @@ func TestRunAcceptsGlobalRepoFlag(t *testing.T) {
 	}
 }
 
+func TestWorkspacesSubdirCreatesAndPrintsProjectDirectory(t *testing.T) {
+	repoRoot := t.TempDir()
+	workspacesRoot := filepath.Join(t.TempDir(), "workspaces")
+	want := filepath.Join(workspacesRoot, "agentjack")
+	writeConfig(t, repoRoot, "workspaces_root: "+workspacesRoot+"\nproject: agentjack\n")
+
+	for i := 0; i < 2; i++ {
+		out, err := captureStdout(func() error {
+			return runWorkspacesSubdir([]string{"--repo", repoRoot})
+		})
+		if err != nil {
+			t.Fatalf("workspaces-subdir run %d failed: %v", i+1, err)
+		}
+		if strings.TrimSpace(out) != want {
+			t.Fatalf("expected %q, got %q", want, out)
+		}
+		if info, err := os.Stat(want); err != nil || !info.IsDir() {
+			t.Fatalf("expected Project Workspaces subdirectory to exist: info=%v err=%v", info, err)
+		}
+	}
+}
+
+func TestWorkspacesSubdirRejectsPositionalArguments(t *testing.T) {
+	if err := runWorkspacesSubdir([]string{"unexpected"}); err == nil || !strings.Contains(err.Error(), "no positional arguments") {
+		t.Fatalf("expected positional argument rejection, got %v", err)
+	}
+}
+
 func TestRunRejectsGlobalAndCommandRepoFlagsTogether(t *testing.T) {
 	err := run([]string{"--repo", "/repo-a", "list", "--repo", "/repo-b", "--paths"})
 	if err == nil || !strings.Contains(err.Error(), "either before the command or in command options") {
@@ -370,7 +398,7 @@ func TestHelpMentionsLineStacking(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"stack --line [handle...]", "move-to-main [handle...]"} {
+	for _, want := range []string{"stack --line [handle...]", "move-to-main [handle...]", "workspaces-subdir"} {
 		if !strings.Contains(topOut, want) {
 			t.Fatalf("expected top-level help to mention %q, got %q", want, topOut)
 		}
@@ -588,6 +616,7 @@ func TestLineStackSelectorViewShowsOrderAndRole(t *testing.T) {
 		}},
 		selected:      map[int]bool{0: true, 1: true},
 		selectedOrder: []int{1, 0},
+		height:        20,
 	}
 	view := model.View()
 	for _, want := range []string{"[2:P] alpha", "[1:F] empty", "a toggle payload/follow", "selection order defines the line"} {
@@ -731,6 +760,7 @@ func TestSelectorViewKeepsPathColumnStableWithLongHandlesAndMarkers(t *testing.T
 		cursor:   2,
 		selected: map[int]bool{},
 		width:    120,
+		height:   20,
 	}
 	view := model.View()
 	wantPathColumn := visibleColumnOfSubstring(t, lineContaining(t, view, paths[0]), paths[0])
@@ -739,6 +769,47 @@ func TestSelectorViewKeepsPathColumnStableWithLongHandlesAndMarkers(t *testing.T
 		if got := visibleColumnOfSubstring(t, line, path); got != wantPathColumn {
 			t.Fatalf("selector item line %d path starts at visible column %d, want %d: %q", i+1, got, wantPathColumn, line)
 		}
+	}
+}
+
+func TestSelectorInitialViewDoesNotPrintEveryItemBeforeWindowSize(t *testing.T) {
+	items := make([]selectorItem, 40)
+	for i := range items {
+		items[i] = selectorItem{Handle: fmt.Sprintf("workspace-%02d", i+1), Status: "unstacked"}
+	}
+	model := selectorModel{
+		opts:     selectorOptions{Title: "Open Workspace", Mode: selectorSingle, Items: items},
+		selected: map[int]bool{},
+	}
+
+	view := model.View()
+	if strings.Contains(view, "workspace-01") || strings.Contains(view, "workspace-40") {
+		t.Fatalf("initial selector view rendered items before terminal size was known:\n%s", view)
+	}
+	if strings.HasSuffix(view, "\n") {
+		t.Fatalf("initial selector view must not end with a newline: %q", view)
+	}
+	if got := lipgloss.Height(view); got > 2 {
+		t.Fatalf("initial selector view height = %d, want <= 2:\n%s", got, view)
+	}
+}
+
+func TestSelectorViewClipsEveryLineToTerminalWidth(t *testing.T) {
+	model := selectorModel{
+		opts: selectorOptions{Title: "Open Workspace", Mode: selectorSingle, Items: []selectorItem{
+			{Handle: "workspace-with-a-long-handle", Status: "unstacked", Markers: "outside-layout,current", Path: "/a/very/long/path/that/would/otherwise/wrap/onto/multiple/terminal/rows"},
+		}},
+		selected: map[int]bool{},
+	}
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 40, Height: 8})
+	view := updated.(selectorModel).View()
+	for i, line := range strings.Split(view, "\n") {
+		if got := lipgloss.Width(line); got > 40 {
+			t.Fatalf("selector line %d width = %d, want <= 40: %q\n%s", i+1, got, line, view)
+		}
+	}
+	if got := lipgloss.Height(view); got > 8 {
+		t.Fatalf("selector view height = %d, want <= 8:\n%s", got, view)
 	}
 }
 
@@ -755,10 +826,10 @@ func TestSelectorViewFitsTerminalHeightAndScrollsWithCursor(t *testing.T) {
 	model = updated.(selectorModel)
 
 	view := model.View()
-	if got := len(strings.Split(strings.TrimRight(view, "\n"), "\n")); got > 8 {
-		t.Fatalf("selector rendered %d lines in an 8-line terminal:\n%s", got, view)
+	if got := len(strings.Split(view, "\n")); got > 8 {
+		t.Fatalf("selector rendered %d Bubble Tea buffer lines in an 8-line terminal:\n%s", got, view)
 	}
-	if !strings.Contains(view, "workspace-01") || !strings.Contains(view, "enter submit selected") {
+	if !strings.Contains(view, "Stack Workspaces") || !strings.Contains(view, "workspace-01") || !strings.Contains(view, "enter submit selected") {
 		t.Fatalf("expected first row and footer to remain visible, got:\n%s", view)
 	}
 
@@ -770,8 +841,8 @@ func TestSelectorViewFitsTerminalHeightAndScrollsWithCursor(t *testing.T) {
 	if !strings.Contains(view, "workspace-12") || strings.Contains(view, "workspace-01") {
 		t.Fatalf("expected viewport to follow the cursor to the last row, got:\n%s", view)
 	}
-	if got := len(strings.Split(strings.TrimRight(view, "\n"), "\n")); got > 8 {
-		t.Fatalf("scrolled selector rendered %d lines in an 8-line terminal:\n%s", got, view)
+	if got := len(strings.Split(view, "\n")); got > 8 {
+		t.Fatalf("scrolled selector rendered %d Bubble Tea buffer lines in an 8-line terminal:\n%s", got, view)
 	}
 }
 

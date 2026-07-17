@@ -127,6 +127,7 @@ Repo-aware commands can target another checkout with either the global form `ajj
 - `ajj close --all` — close all Closable Workspaces.
 - `ajj close --force [--yes] ...` — Forced Closing: abandon unique mutable changes not reachable from Main or any other Workspace, then close.
 - `ajj main` — print the Main Workspace path.
+- `ajj workspaces-subdir` — create the current Project's `<workspaces_root>/<project>` directory if needed and print its path. Accepts `--repo`, `--project`, and `--workspaces-root` overrides.
 
 ### Stacking
 
@@ -147,7 +148,91 @@ Stack's All row includes Workspaces with commits ahead of the target or conflict
 - `--stack-shape auto|linear|merge`
 - `--conflict-strategy off|prefer-clean`
 
-When `prefer-clean` is used with `--stack-shape auto`, `ajj` tries the auto-selected shape, undoes on conflict, and tries the alternative shape. If every fallback conflicts, it keeps the merge-shaped conflicted Main Workspace so the conflict can be resolved there.
+With the default `prefer-clean`, `auto` settings and jj 0.41 or newer, a single divergent Workspace containing one unique non-empty payload commit is tried tidiest-first. `ajj` uses `jj --no-integrate-operation` to project inserting the payload immediately before the target Workspace head; a clean projection is integrated as a one-parent line, preserving an in-progress target head above it. A conflicted projection is not integrated and falls back directly to the merge-shaped result. Other auto cases retain the existing shape fallback, and if every available result conflicts, `ajj` keeps the merge-shaped conflicted target Workspace so the conflict can be resolved there.
+
+#### Tidy-first Stack examples
+
+In these graphs, `default@` is the target Workspace head, `T` is existing Main work, and `J` through `N` are payload commits from other Workspaces.
+
+**One clean divergent Workspace.** Starting from two lines:
+
+```text
+A──T──○  default@
+ \
+  J──○   J@
+```
+
+run:
+
+```sh
+ajj stack J --workspace default --yes
+```
+
+Ajjent probes inserting `J` before `default@`. If that projection is clean, it integrates the linear result:
+
+```text
+A──T──J'──○  default@
+```
+
+There is no structural `chore: merge` commit. The `J` Workspace cursor is advanced after its payload is incorporated.
+
+**Main has in-progress changes.** If `W` is a non-empty, undescribed `default@` working change:
+
+```text
+A──T──W   default@
+ \
+  J──○    J@
+```
+
+then the same command preserves that change above the inserted payload:
+
+```text
+A──T──J'──W'  default@
+```
+
+`W` keeps its Jujutsu change identity; its contents are rebased rather than moved into an empty merge.
+
+**The linear projection conflicts.** If `J` cannot be inserted cleanly before Main, the detached probe is rejected without changing the current repository operation. Ajjent then retains the existing merge-shaped conflict fallback:
+
+```text
+T────╮
+J────┴─G  default@ (conflicted merge)
+```
+
+Resolve the conflict in the target Workspace. Explicit `--stack-shape merge` skips the tidy probe and requests this merge behavior directly.
+
+**Stacking `J`, `K`, `L`, `M`, and `N` into Main without choosing an order.** Run:
+
+```sh
+ajj stack J K L M N --workspace default --yes
+```
+
+Ajjent does not invent an ordering for divergent inputs. Auto shape therefore keeps them as a multi-parent integration:
+
+```text
+T────╮
+J────┤
+K────┤
+L────┤
+M────┤
+N────┴─G  default@
+```
+
+This is appropriate when the five payloads are independent and the merge itself records their integration.
+
+**Putting the same five Workspaces onto one deliberate line.** When the desired order is Main, then `J`, `K`, `L`, `M`, and `N`, use Line Stack and state that order explicitly:
+
+```sh
+ajj stack --line default J K L M N --yes
+```
+
+The payload history becomes:
+
+```text
+A──T──J'──K'──L'──M'──N'
+```
+
+Selected Workspace cursors, including `default@`, advance to the resulting line. Line Stack previews the exact plan before mutation and stops at a conflict instead of silently choosing another ordering or falling back to a merge. Omitted Workspaces remain untouched.
 
 `move-to-main` is for Workspaces that have no unique content or described commits and are only behind the Main Workspace. The TUI starts movable rows checked so you can quickly uncheck Workspaces to leave alone. Empty undescribed changes are ignored, but empty described merges still count as `ahead`/`behind`. If the Main Workspace head is empty, `ajj` advances each selected Workspace with `jj new main@-`, making the Workspace cursors siblings of the Main Workspace cursor; otherwise it uses `jj new main@`.
 

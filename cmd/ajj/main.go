@@ -34,18 +34,20 @@ var version = "dev"
 
 // Jujutsu (jj) support floor and the version the tool is exercised against.
 const (
-	jjMinVersion    = "0.20.0"
-	jjTestedVersion = "0.42.x"
+	jjMinVersion                  = "0.20.0"
+	jjDetachedOperationMinVersion = "0.41.0"
+	jjTestedVersion               = "0.42.x"
 )
 
 var (
-	commandCaptureFn            = runCommandCapture
-	commandToStderrFn           = runCommandToStderr
-	lookPathFn                  = exec.LookPath
-	jjVersionFn                 = defaultJJVersion
-	stdinReader       io.Reader = os.Stdin
-	stdoutWriter      io.Writer = os.Stdout
-	stderrWriter      io.Writer = os.Stderr
+	commandCaptureFn                   = runCommandCapture
+	commandCombinedCaptureFn           = runCommandCombinedCapture
+	commandToStderrFn                  = runCommandToStderr
+	lookPathFn                         = exec.LookPath
+	jjVersionFn                        = defaultJJVersion
+	stdinReader              io.Reader = os.Stdin
+	stdoutWriter             io.Writer = os.Stdout
+	stderrWriter             io.Writer = os.Stderr
 )
 
 type config struct {
@@ -161,6 +163,8 @@ func run(args []string) error {
 		return runList(commandArgs)
 	case "main":
 		return runMain(commandArgs)
+	case "workspaces-subdir":
+		return runWorkspacesSubdir(commandArgs)
 	case "shell-init":
 		return runShellInit(commandArgs)
 	case "close":
@@ -230,7 +234,7 @@ func countRepoFlags(args []string) int {
 
 func commandAcceptsRepoFlag(command string) bool {
 	switch command {
-	case "init", "create", "open", "list", "main", "close", "tidy", "stack", "move-to-main", "catch-up":
+	case "init", "create", "open", "list", "main", "workspaces-subdir", "close", "tidy", "stack", "move-to-main", "catch-up":
 		return true
 	default:
 		return false
@@ -262,6 +266,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, s.Section.Render("Inspect and housekeeping:"))
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "list", 18), "List Workspaces with status and markers")
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "main", 18), "Print the Main Workspace path")
+	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "workspaces-subdir", 18), "Create and print this Project's Workspaces subdirectory")
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "tidy", 18), "Close tidy Workspaces and remove empty leftover directories")
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "shell-init", 18), "Print shell integration for cd-on-open/main")
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "version", 18), "Print the ajj version (also --version)")
@@ -942,6 +947,30 @@ func runMain(args []string) error {
 		}
 	}
 	return fmt.Errorf("Main Workspace %q not found", cfg.MainWorkspace)
+}
+
+func runWorkspacesSubdir(args []string) error {
+	fs := flag.NewFlagSet("workspaces-subdir", flag.ContinueOnError)
+	var repoRootOverride, projectOverride, rootOverride string
+	fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
+	fs.StringVar(&projectOverride, "project", "", "Project override")
+	fs.StringVar(&rootOverride, "workspaces-root", "", "Workspaces root override")
+	if handled, err := parseCommandFlags(fs, args, "ajj workspaces-subdir [options]", "Create this Project's Workspaces subdirectory if needed and print its path."); handled || err != nil {
+		return err
+	}
+	if len(fs.Args()) != 0 {
+		return errors.New("workspaces-subdir accepts no positional arguments")
+	}
+	_, cfg, project, err := commandContext(repoRootOverride, projectOverride, rootOverride)
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(cfg.WorkspacesRoot, project)
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		return fmt.Errorf("create Project Workspaces subdirectory: %w", err)
+	}
+	fmt.Fprintln(stdoutWriter, path)
+	return nil
 }
 
 func runTidy(args []string) error {
@@ -2942,9 +2971,27 @@ func runStackRebase(mainPath string, inputs []string, stack stackConfig) (bool, 
 	if err != nil {
 		return false, err
 	}
+	tidyProbeConflicted := false
+	if eligibleForSingleInputTidyProbe(inputs, stack, resolvedConflictStrategy) && jjSupportsDetachedOperations() {
+		integrated, conflicted, err := trySingleInputTidyLinearProbe(mainPath, inputs[0])
+		if err != nil {
+			return false, err
+		}
+		if integrated {
+			return false, nil
+		}
+		tidyProbeConflicted = conflicted
+	}
 	resolvedMode, reason, err := resolveStackRebaseMode(mainPath, stack.RebaseMode)
 	if err != nil {
 		return false, err
+	}
+	if tidyProbeConflicted {
+		mergeShape, mergeReason, mergeDestinations, err := resolveStackShape(mainPath, inputs, "merge")
+		if err != nil {
+			return false, err
+		}
+		return runStackRebaseAttempt(mainPath, inputs, resolvedMode, reason, mergeShape, mergeReason, mergeDestinations)
 	}
 	resolvedShape, shapeReason, baseDestinations, err := resolveStackShape(mainPath, inputs, stack.Shape)
 	if err != nil {
@@ -2993,6 +3040,114 @@ func runStackRebase(mainPath string, inputs []string, stack stackConfig) (bool, 
 		}
 	}
 	return finalConflicted, nil
+}
+
+func eligibleForSingleInputTidyProbe(inputs []string, stack stackConfig, conflictStrategy string) bool {
+	shape := strings.TrimSpace(strings.ToLower(stack.Shape))
+	mode := strings.TrimSpace(strings.ToLower(stack.RebaseMode))
+	return len(uniqueNonEmptyStrings(inputs)) == 1 &&
+		(shape == "" || shape == "auto") &&
+		(mode == "" || mode == "auto") &&
+		conflictStrategy == "prefer-clean"
+}
+
+func jjSupportsDetachedOperations() bool {
+	out, err := jjVersionFn()
+	if err != nil {
+		return false
+	}
+	version := parseJJVersion(out)
+	return version != "" && compareVersions(version, jjDetachedOperationMinVersion) >= 0
+}
+
+func trySingleInputTidyLinearProbe(mainPath, input string) (bool, bool, error) {
+	payloadRevset := fmt.Sprintf("(::%s@ & ~::@ & ~empty())", input)
+	payloadChanges, err := revisionChangeIDs(mainPath, payloadRevset)
+	if err != nil {
+		return false, false, err
+	}
+	if len(payloadChanges) != 1 {
+		return false, false, nil
+	}
+	payloadCannotBeProbed, err := revisionMatches(mainPath, fmt.Sprintf("(immutable() | conflicts()) & %s", payloadRevset))
+	if err != nil {
+		return false, false, err
+	}
+	if payloadCannotBeProbed {
+		return false, false, nil
+	}
+	payloadIsAncestor, err := revisionIsAncestor(mainPath, payloadChanges[0], "@")
+	if err != nil {
+		return false, false, err
+	}
+	mainIsAncestor, err := revisionIsAncestor(mainPath, "@", payloadChanges[0])
+	if err != nil {
+		return false, false, err
+	}
+	if payloadIsAncestor || mainIsAncestor {
+		return false, false, nil
+	}
+
+	baseOpID, err := currentOperationID(mainPath)
+	if err != nil {
+		return false, false, fmt.Errorf("record tidy Stack probe base operation: %w", err)
+	}
+	fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Tidy Stack probe: insert %s payload before target Workspace head", input))
+	out, err := commandCombinedCaptureFn("jj", "-R", mainPath, "--no-integrate-operation", "rebase", "-r", payloadRevset, "-B", "@")
+	if err != nil {
+		return false, false, err
+	}
+	probeOpID, err := detachedOperationID(out)
+	if err != nil {
+		return false, false, err
+	}
+	currentOpID, err := currentOperationID(mainPath)
+	if err != nil {
+		return false, false, err
+	}
+	if currentOpID != baseOpID {
+		return false, false, fmt.Errorf("repository operation changed during tidy Stack probe (expected %s, got %s); retry Stack", baseOpID, currentOpID)
+	}
+	conflictScope := fmt.Sprintf("conflicts() & (%s::@)", payloadChanges[0])
+	conflicted, err := revisionMatchesAtOperation(mainPath, probeOpID, conflictScope)
+	if err != nil {
+		return false, false, err
+	}
+	currentOpID, err = currentOperationID(mainPath)
+	if err != nil {
+		return false, false, err
+	}
+	if currentOpID != baseOpID {
+		return false, false, fmt.Errorf("repository operation changed while inspecting tidy Stack probe (expected %s, got %s); retry Stack", baseOpID, currentOpID)
+	}
+	if conflicted {
+		fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Tidy Stack probe conflicted; trying merge fallback"))
+		return false, true, nil
+	}
+	fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Tidy Stack result: clean linear insertion"))
+	if err := commandToStderrFn("jj", "-R", mainPath, "op", "integrate", probeOpID); err != nil {
+		return false, false, err
+	}
+	if err := commandToStderrFn("jj", "-R", mainPath, "workspace", "update-stale"); err != nil {
+		return false, false, err
+	}
+	return true, false, nil
+}
+
+func detachedOperationID(output string) (string, error) {
+	match := regexp.MustCompile(`(?m)Operation left uncommitted because --no-integrate-operation was requested: ([0-9a-f]+)\s*$`).FindStringSubmatch(output)
+	if len(match) != 2 {
+		return "", fmt.Errorf("could not read detached operation id from jj output: %s", strings.TrimSpace(output))
+	}
+	return match[1], nil
+}
+
+func revisionMatchesAtOperation(repoPath, operationID, revset string) (bool, error) {
+	out, err := commandCaptureFn("jj", "-R", repoPath, "--ignore-working-copy", "--at-op="+operationID, "log", "-r", revset, "--no-graph", "-T", "change_id.short() ++ \"\\n\"")
+	if err != nil {
+		return false, err
+	}
+	return len(uniqueNonEmptyStrings(strings.Split(out, "\n"))) > 0, nil
 }
 
 func runStackRebaseAttempt(mainPath string, inputs []string, resolvedMode string, modeReason string, resolvedShape string, shapeReason string, baseDestinations []string) (bool, error) {
@@ -4518,6 +4673,9 @@ func selectorRoleInitial(role string) string {
 func (m selectorModel) View() string {
 	var b strings.Builder
 	styles := selectorStyles()
+	if m.height <= 0 {
+		return clipSelectorLine(styles.Title.Render(m.opts.Title), m.width)
+	}
 	visible := m.visibleItems()
 	cursor := m.cursor
 	if cursor >= len(visible) && len(visible) > 0 {
@@ -4528,14 +4686,14 @@ func (m selectorModel) View() string {
 	if len(shown) < len(visible) {
 		title += fmt.Sprintf(" (%d-%d/%d)", first+1, first+len(shown), len(visible))
 	}
-	fmt.Fprintln(&b, styles.Title.Render(title))
-	fmt.Fprintln(&b, styles.Help.Render(selectorHint(m.opts)))
+	fmt.Fprintln(&b, clipSelectorLine(styles.Title.Render(title), m.width))
+	fmt.Fprintln(&b, clipSelectorLine(styles.Help.Render(selectorHint(m.opts)), m.width))
 	if m.filter != "" {
-		fmt.Fprintln(&b, styles.Help.Render("filter: "+m.filter))
+		fmt.Fprintln(&b, clipSelectorLine(styles.Help.Render("filter: "+m.filter), m.width))
 	}
 	widths := selectorColumnWidthsForItems(m.opts.Items, visible)
 	if len(visible) == 0 {
-		fmt.Fprintln(&b, styles.Disabled.Render("No matching Workspaces"))
+		fmt.Fprintln(&b, clipSelectorLine(styles.Disabled.Render("No matching Workspaces"), m.width))
 	}
 	for row, idx := range shown {
 		item := m.opts.Items[idx]
@@ -4565,9 +4723,9 @@ func (m selectorModel) View() string {
 		} else {
 			line = styleStatus(styles, item.Status, line)
 		}
-		fmt.Fprintln(&b, line)
+		fmt.Fprintln(&b, clipSelectorLine(line, m.width))
 	}
-	fmt.Fprintln(&b, styles.Help.Render(selectorLegend(m.opts)))
+	fmt.Fprintln(&b, clipSelectorLine(styles.Help.Render(selectorLegend(m.opts)), m.width))
 	footer := "↑/↓ move  type filter  enter choose  q quit"
 	if m.opts.Mode == selectorMulti {
 		footer = "↑/↓ move  space toggle  enter submit selected  type filter  q quit"
@@ -4581,8 +4739,18 @@ func (m selectorModel) View() string {
 	if m.opts.StackOptions.Shape != "" || m.opts.StackOptions.RebaseMode != "" || m.opts.StackOptions.ConflictStrategy != "" {
 		footer += fmt.Sprintf("  s shape:%s  r rebase:%s  c conflicts:%s", emptyDefault(m.opts.StackOptions.Shape, "auto"), emptyDefault(m.opts.StackOptions.RebaseMode, "auto"), emptyDefault(m.opts.StackOptions.ConflictStrategy, "prefer-clean"))
 	}
-	fmt.Fprintln(&b, styles.Help.Render(footer))
-	return b.String()
+	fmt.Fprintln(&b, clipSelectorLine(styles.Help.Render(footer), m.width))
+	// Bubble Tea counts a trailing newline as an extra empty buffer row and
+	// drops rows from the top when the buffer exceeds the terminal height.
+	// Returning exactly the budgeted rows keeps the title and viewport visible.
+	return strings.TrimSuffix(b.String(), "\n")
+}
+
+func clipSelectorLine(line string, width int) string {
+	if width <= 0 {
+		return line
+	}
+	return lipgloss.NewStyle().MaxWidth(width).Render(line)
 }
 
 func (m selectorModel) selectorItemRows() int {
@@ -4906,7 +5074,7 @@ func versionString() string {
 // shell-init and init do not touch jj and must not trigger the check.
 func commandNeedsJJ(command string) bool {
 	switch command {
-	case "create", "open", "list", "main", "close", "tidy", "stack", "move-to-main", "catch-up":
+	case "create", "open", "list", "main", "workspaces-subdir", "close", "tidy", "stack", "move-to-main", "catch-up":
 		return true
 	default:
 		return false
@@ -5020,6 +5188,20 @@ func runCommandCapture(name string, args ...string) (string, error) {
 		return "", fmt.Errorf("%s %s failed: %w", name, strings.Join(args, " "), err)
 	}
 	return out.String(), nil
+}
+
+func runCommandCombinedCapture(name string, args ...string) (string, error) {
+	cmd := exec.Command(name, args...)
+	setCommandWorkingDir(cmd, name, args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg != "" {
+			return "", fmt.Errorf("%s %s failed: %s", name, strings.Join(args, " "), msg)
+		}
+		return "", fmt.Errorf("%s %s failed: %w", name, strings.Join(args, " "), err)
+	}
+	return string(out), nil
 }
 
 func runCommandToStderr(name string, args ...string) error {
