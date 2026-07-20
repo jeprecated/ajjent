@@ -17,3 +17,7 @@ devenv.local.yaml
 # Local Hunk review session artifacts
 .hunk
 .hunk/change-context/
+
+# Local agent runtime artifacts
+/.agentleman/
+/.pi-scratch.md
