@@ -12,6 +12,7 @@ devenv.local.yaml
 .devbox/
 
 .ajj/state.json
+.ajj/integrations/
 
 # Local Hunk review session artifacts
 .hunk

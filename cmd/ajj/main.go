@@ -34,9 +34,10 @@ var version = "dev"
 
 // Jujutsu (jj) support floor and the version the tool is exercised against.
 const (
-	jjMinVersion                  = "0.20.0"
-	jjDetachedOperationMinVersion = "0.41.0"
-	jjTestedVersion               = "0.42.x"
+	jjMinVersion                    = "0.41.0"
+	jjDetachedOperationMinVersion   = "0.41.0"
+	jjTestedVersion                 = "0.43.x"
+	detachedOperationResultMaxBytes = 64 * 1024
 )
 
 var (
@@ -90,17 +91,18 @@ type workspaceRef struct {
 }
 
 type workspaceInfo struct {
-	Ref      workspaceRef
-	Path     string
-	Missing  bool
-	Empty    bool
-	Stacked  bool
-	Conflict bool
-	Current  bool
-	Main     bool
-	External bool
-	Ahead    int
-	Behind   int
+	Ref                  workspaceRef
+	Path                 string
+	Missing              bool
+	Empty                bool
+	Stacked              bool
+	RepresentedElsewhere bool
+	Conflict             bool
+	Current              bool
+	Main                 bool
+	External             bool
+	Ahead                int
+	Behind               int
 }
 
 const (
@@ -173,6 +175,10 @@ func run(args []string) error {
 		return runTidy(commandArgs)
 	case "stack":
 		return runStack(commandArgs)
+	case "integrate":
+		return runIntegrate(commandArgs)
+	case "capabilities":
+		return runCapabilities(commandArgs)
 	case "move-to-main", "catch-up":
 		return runMoveToMain(commandArgs)
 	case "version", "--version":
@@ -222,6 +228,15 @@ func extractGlobalRepoFlag(args []string) (string, []string, error) {
 	return repo, nil, nil
 }
 
+func hasArgumentFlag(args []string, name string) bool {
+	for _, arg := range args {
+		if arg == name || strings.HasPrefix(arg, name+"=") {
+			return true
+		}
+	}
+	return false
+}
+
 func countRepoFlags(args []string) int {
 	count := 0
 	for _, arg := range args {
@@ -234,7 +249,7 @@ func countRepoFlags(args []string) int {
 
 func commandAcceptsRepoFlag(command string) bool {
 	switch command {
-	case "init", "create", "open", "list", "main", "workspaces-subdir", "close", "tidy", "stack", "move-to-main", "catch-up":
+	case "init", "create", "open", "list", "main", "workspaces-subdir", "close", "tidy", "stack", "integrate", "move-to-main", "catch-up":
 		return true
 	default:
 		return false
@@ -247,6 +262,8 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w)
 	fmt.Fprintf(w, "%s %s\n", s.Section.Render("Usage:"), s.Command.Render("ajj [--repo PATH] <command> [options]"))
 	fmt.Fprintln(w)
+	fmt.Fprintf(w, "%s Jujutsu (jj) %s or newer is required for repo-aware commands.\n", s.Section.Render("Requirement:"), jjMinVersion)
+	fmt.Fprintln(w)
 	fmt.Fprintln(w, s.Section.Render("Global options:"))
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Option, "--repo PATH", 18), "run a repo-aware command against this repository root")
 	fmt.Fprintln(w)
@@ -254,21 +271,23 @@ func printUsage(w io.Writer) {
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "init", 18), "Create ajj config")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, s.Section.Render("Workspace lifecycle:"))
-	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "create [handle]", 18), "Create a Workspace and print its path")
+	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "create [handle]", 18), "Create a Workspace, or reconcile strict machine state with --request-json")
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "open [handle]", 18), "Open an existing Workspace; with no handle, use the selector")
-	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "close [handle...]", 18), "Close Workspaces; with no handle, use the selector")
+	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "close [handle...]", 18), "Close Workspaces represented by surviving registered Workspace heads")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, s.Section.Render("Stacking:"))
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "stack [handle...]", 18), "Stack selected Workspaces into the target Workspace; with no handles, use the selector")
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "stack --line [handle...]", 18), "Line Stack selected Workspaces in explicit order")
+	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "integrate", 18), "Prepare or recover an exact machine integration into the Current Workspace")
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "move-to-main [handle...]", 18), "Move selected tidy Workspace cursors up to the Main Workspace line")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, s.Section.Render("Inspect and housekeeping:"))
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "list", 18), "List Workspaces with status and markers")
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "main", 18), "Print the Main Workspace path")
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "workspaces-subdir", 18), "Create and print this Project's Workspaces subdirectory")
-	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "tidy", 18), "Close tidy Workspaces and remove empty leftover directories")
+	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "tidy", 18), "Close represented non-Current Workspaces and remove empty leftovers")
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "shell-init", 18), "Print shell integration for cd-on-open/main")
+	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "capabilities --json", 18), "Print bounded machine protocol capabilities")
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "version", 18), "Print the ajj version (also --version)")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, s.Muted.Render("Run `ajj <command> --help` for command-specific options."))
@@ -475,22 +494,30 @@ func runInit(args []string) error {
 }
 
 func runCreate(args []string) error {
+	if hasArgumentFlag(args, "--request-json") {
+		return runCreateMachine(args)
+	}
 	var err error
 	args, err = normalizePositionalsLast(args, map[string]struct{}{"--repo": {}, "--project": {}, "--workspaces-root": {}, "--revision": {}})
 	if err != nil {
 		return err
 	}
 	fs := flag.NewFlagSet("create", flag.ContinueOnError)
-	var repoRootOverride, projectOverride, rootOverride, revision string
-	var envrc, direnvAllow bool
+	var repoRootOverride, projectOverride, rootOverride, revision, machineRequestHelp string
+	var envrc, direnvAllow, machineJSONHelp bool
 	fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
 	fs.StringVar(&projectOverride, "project", "", "Project override")
 	fs.StringVar(&rootOverride, "workspaces-root", "", "Workspaces root override")
 	fs.StringVar(&revision, "revision", "", "base the new Workspace on an exact full commit id instead of jj's default")
 	fs.BoolVar(&envrc, "envrc", false, "create .envrc in the new Workspace")
 	fs.BoolVar(&direnvAllow, "direnv-allow", false, "run direnv allow for the new Workspace")
+	fs.StringVar(&machineRequestHelp, "request-json", "", "machine mode: read a strict create request from PATH or -")
+	fs.BoolVar(&machineJSONHelp, "json", false, "machine mode: write one bounded state receipt")
 	if handled, err := parseCommandFlags(fs, args, "ajj create [handle] [options]", "Create a new Workspace and print its path."); handled || err != nil {
 		return err
+	}
+	if machineRequestHelp != "" || machineJSONHelp {
+		return errors.New("create machine mode requires both --request-json and --json")
 	}
 	revision, err = validateCreateRevision(revision)
 	if err != nil {
@@ -537,7 +564,14 @@ func runCreate(args []string) error {
 	return createWorkspace(repoRoot, cfg, project, handle, revision, envrc, direnvAllow)
 }
 
-func createWorkspace(repoRoot string, cfg config, project string, handle string, revision string, envrc bool, direnvAllow bool) (err error) {
+func createWorkspace(repoRoot string, cfg config, project string, handle string, revision string, envrc bool, direnvAllow bool) error {
+	return createWorkspaceInternal(repoRoot, cfg, project, handle, revision, envrc, direnvAllow, true)
+}
+
+// createWorkspaceInternal is shared by human create and strict machine-create.
+// Machine mode suppresses the navigation path while preserving the existing
+// workspace-add, exact-revision verification, and provider setup mechanics.
+func createWorkspaceInternal(repoRoot string, cfg config, project string, handle string, revision string, envrc bool, direnvAllow bool, printPath bool) (err error) {
 	// Resolve and verify an explicit --revision against the selected repo BEFORE
 	// any Workspace creation side effect (directory creation, `jj workspace
 	// add`). A malformed or unknown revision fails here, leaving no partial state.
@@ -559,7 +593,11 @@ func createWorkspace(repoRoot string, cfg config, project string, handle string,
 		addArgs = append(addArgs, "--revision", revision)
 	}
 	addArgs = append(addArgs, target)
-	if err := commandToStderrFn("jj", addArgs...); err != nil {
+	createCommand := commandToStderrFn
+	if !printPath {
+		createCommand = createMachineCommandFn
+	}
+	if err := createCommand("jj", addArgs...); err != nil {
 		return err
 	}
 	// Read back and confirm the new Workspace working-copy change has exactly the
@@ -579,7 +617,7 @@ func createWorkspace(repoRoot string, cfg config, project string, handle string,
 	allowDirenv := direnvAllow || cfg.Create.DirenvAllow
 	defer func() {
 		if err != nil && allowDirenv {
-			maybeDirenvAllow(target)
+			maybeDirenvAllowMode(target, printPath)
 		}
 	}()
 	if envrc || cfg.Create.Envrc {
@@ -587,13 +625,19 @@ func createWorkspace(repoRoot string, cfg config, project string, handle string,
 			return err
 		}
 	}
-	if err := materializeAndReportAssimilatedFolders(mainWorkspaceRoot(repoRoot), target, cfg, project); err != nil {
+	if printPath {
+		if err := materializeAndReportAssimilatedFolders(mainWorkspaceRoot(repoRoot), target, cfg, project); err != nil {
+			return err
+		}
+	} else if err := materializeAssimilatedFolders(mainWorkspaceRoot(repoRoot), target, cfg, project); err != nil {
 		return err
 	}
 	if allowDirenv {
-		maybeDirenvAllow(target)
+		maybeDirenvAllowMode(target, printPath)
 	}
-	printNavigationPath(target, "create")
+	if printPath {
+		printNavigationPath(target, "create")
+	}
 	return nil
 }
 
@@ -601,8 +645,16 @@ func createWorkspace(repoRoot string, cfg config, project string, handle string,
 // Errors are ignored (matching the historical best-effort behavior) since a
 // missing or failing direnv is informational, not a Workspace creation failure.
 func maybeDirenvAllow(target string) {
+	maybeDirenvAllowMode(target, true)
+}
+
+func maybeDirenvAllowMode(target string, humanOutput bool) {
 	if _, err := lookPathFn("direnv"); err == nil {
-		_ = commandToStderrFn("direnv", "allow", target)
+		run := commandToStderrFn
+		if !humanOutput {
+			run = createMachineCommandFn
+		}
+		_ = run("direnv", "allow", target)
 	}
 }
 
@@ -976,12 +1028,13 @@ func runWorkspacesSubdir(args []string) error {
 func runTidy(args []string) error {
 	fs := flag.NewFlagSet("tidy", flag.ContinueOnError)
 	var repoRootOverride, projectOverride, rootOverride string
-	var yes bool
+	var force, yes bool
 	fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
 	fs.StringVar(&projectOverride, "project", "", "Project override")
 	fs.StringVar(&rootOverride, "workspaces-root", "", "Workspaces root override")
+	fs.BoolVar(&force, "force", false, "forced tidy: abandon unique mutable changes before closing")
 	fs.BoolVar(&yes, "yes", false, "skip confirmation")
-	if handled, err := parseCommandFlags(fs, args, "ajj tidy [options]", "Close Workspaces with no unique content or described commits, then remove empty leftover Workspace directories."); handled || err != nil {
+	if handled, err := parseCommandFlags(fs, args, "ajj tidy [options]", "Close non-Current Workspaces represented by surviving registered Workspace heads, optionally abandoning unique mutable changes with --force, then remove empty leftovers."); handled || err != nil {
 		return err
 	}
 	repoRoot, cfg, project, err := commandContext(repoRootOverride, projectOverride, rootOverride)
@@ -992,7 +1045,7 @@ func runTidy(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := tidyClosableWorkspaces(repoRoot, cfg, project, infos, yes); err != nil {
+	if err := tidyWorkspaces(repoRoot, cfg, project, infos, force, yes); err != nil {
 		return err
 	}
 	active := make(map[string]struct{}, len(infos))
@@ -1038,46 +1091,28 @@ func runTidy(args []string) error {
 	return nil
 }
 
-func tidyClosableWorkspaces(repoRoot string, cfg config, project string, infos []workspaceInfo, yes bool) error {
-	targets := []workspaceInfo{}
-	for _, info := range infos {
-		if isClosable(info) {
-			targets = append(targets, info)
-		}
-	}
-	if len(targets) == 0 {
-		fmt.Fprintln(stderrWriter, cliStylesForWriter(stderrWriter).Muted.Render("No Workspaces with no unique content or described commits to tidy."))
-		return nil
-	}
-	if !yes && canUseTUI() {
-		items := selectorItemsForTidy(infos)
-		selected, _, err := runSelector(selectorOptions{Title: "Tidy Workspaces", Mode: selectorMulti, Items: items, Tidy: true})
+func tidyWorkspaces(repoRoot string, cfg config, project string, infos []workspaceInfo, force bool, yes bool) error {
+	targets := tidyTargets(infos, force)
+	interactive := !yes && canUseTUI()
+	if interactive {
+		items := selectorItemsForTidy(infos, force)
+		selected, opts, err := runSelector(selectorOptions{Title: "Tidy Workspaces", Mode: selectorMulti, Items: items, Tidy: true, ForceEnabled: force, AllowForceToggle: true})
 		if err != nil {
 			return err
 		}
-		selectedHandles := map[string]struct{}{}
+		force = opts.ForceEnabled
+		byHandle := mapInfosByHandle(infos)
+		targets = targets[:0]
 		for _, item := range selected {
-			selectedHandles[item.Handle] = struct{}{}
-		}
-		selectedTargets := targets[:0]
-		for _, target := range targets {
-			if _, ok := selectedHandles[target.Ref.Handle]; ok {
-				selectedTargets = append(selectedTargets, target)
+			info, ok := byHandle[item.Handle]
+			if !ok || info.Main || info.Missing || (!force && !isClosable(info)) {
+				continue
 			}
+			targets = append(targets, info)
 		}
-		targets = selectedTargets
-		if len(targets) == 0 {
-			fmt.Fprintln(stderrWriter, cliStylesForWriter(stderrWriter).Muted.Render("No tidy Workspaces selected."))
-			return nil
-		}
-	} else {
-		fmt.Fprintf(stderrWriter, "%s\n", cliStylesForWriter(stderrWriter).Info.Render("Workspaces with no unique content or described commits: "+workspaceSummary(targets)))
-		if !yes {
-			ok, err := confirm(fmt.Sprintf("Close %d tidy Workspace(s)? [y/N]: ", len(targets)))
-			if err != nil || !ok {
-				return err
-			}
-		}
+	}
+	if err := validateUniqueCloseTargets(targets); err != nil {
+		return err
 	}
 	mainInfo, ok := mapInfosByHandle(infos)[cfg.MainWorkspace]
 	if !ok {
@@ -1086,20 +1121,82 @@ func tidyClosableWorkspaces(repoRoot string, cfg config, project string, infos [
 	if mainInfo.Missing {
 		return fmt.Errorf("Main Workspace path missing: %s", mainInfo.Path)
 	}
-	if err := abandonEmptyWorkspaceHeads(mainInfo.Path, targets); err != nil {
-		return err
-	}
-	closed, err := closeWorkspaces(mainInfo.Path, targets, false, yes)
+	unsafeTargets, err := normallyUnclosableTargets(mainInfo.Path, targets)
 	if err != nil {
 		return err
 	}
+	if !force && len(unsafeTargets) > 0 {
+		unsafe := make(map[string]struct{}, len(unsafeTargets))
+		for _, info := range unsafeTargets {
+			unsafe[info.Ref.Handle] = struct{}{}
+		}
+		filtered := targets[:0]
+		for _, info := range targets {
+			if _, found := unsafe[info.Ref.Handle]; !found {
+				filtered = append(filtered, info)
+			}
+		}
+		targets = filtered
+		unsafeTargets = nil
+	}
+	if len(targets) == 0 {
+		fmt.Fprintln(stderrWriter, cliStylesForWriter(stderrWriter).Muted.Render("No tidy Workspaces selected."))
+		return nil
+	}
+	if !interactive {
+		if force {
+			fmt.Fprintf(stderrWriter, "%s\n", cliStylesForWriter(stderrWriter).Warn.Render("Workspaces selected for Forced Tidying: "+workspaceSummary(targets)))
+		} else {
+			fmt.Fprintf(stderrWriter, "%s\n", cliStylesForWriter(stderrWriter).Info.Render("Workspaces represented by surviving registered Workspace heads: "+workspaceSummary(targets)))
+			if !yes {
+				ok, err := confirm(fmt.Sprintf("Close %d tidy Workspace(s)? [y/N]: ", len(targets)))
+				if err != nil || !ok {
+					return err
+				}
+			}
+		}
+	}
+	forcedTargets := unsafeTargets
+	if len(forcedTargets) > 0 && !force {
+		return fmt.Errorf("%s require Forced Tidying", workspaceSummary(forcedTargets))
+	}
+	if len(forcedTargets) > 0 && !yes {
+		ok, err := confirm(fmt.Sprintf("Forced Tidying will abandon unique mutable changes for %s. Continue? [y/N]: ", workspaceSummary(forcedTargets)))
+		if err != nil || !ok {
+			return err
+		}
+	}
+	protection, err := newCloseProtectionContext(mainInfo.Path, targets)
+	if err != nil {
+		return err
+	}
+	if err := abandonEmptyWorkspaceHeads(mainInfo.Path, targets); err != nil {
+		return err
+	}
+	closed, closeErr := closeWorkspacesWithProtection(mainInfo.Path, targets, len(forcedTargets) > 0, yes, protection)
 	for _, path := range closed {
 		fmt.Fprintln(stdoutWriter, path)
+	}
+	if closeErr != nil {
+		return closeErr
 	}
 	if err := abandonTopEmptyMutableAncestors(mainInfo.Path); err != nil {
 		return err
 	}
 	return commandToStderrFn("jj", "-R", mainInfo.Path, "workspace", "update-stale")
+}
+
+func tidyTargets(infos []workspaceInfo, force bool) []workspaceInfo {
+	targets := []workspaceInfo{}
+	for _, info := range infos {
+		if info.Main || info.Missing || info.Current {
+			continue
+		}
+		if force || isClosable(info) {
+			targets = append(targets, info)
+		}
+	}
+	return targets
 }
 
 func runClose(args []string) error {
@@ -1114,15 +1211,19 @@ func runClose(args []string) error {
 	fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
 	fs.StringVar(&projectOverride, "project", "", "Project override")
 	fs.StringVar(&rootOverride, "workspaces-root", "", "Workspaces root override")
-	fs.BoolVar(&all, "all", false, "close all Closable Workspaces")
+	fs.BoolVar(&all, "all", false, "close all normally closable Workspaces represented outside the closing set")
 	fs.BoolVar(&force, "force", false, "forced close: abandon unique mutable changes before closing")
 	fs.BoolVar(&yes, "yes", false, "skip confirmation")
-	if handled, err := parseCommandFlags(fs, args, "ajj close [handle...] [options]", "Close Workspace(s)."); handled || err != nil {
+	if handled, err := parseCommandFlags(fs, args, "ajj close [handle...] [options]", "Close Workspaces represented by surviving registered Workspace heads; each explicit Handle may appear once."); handled || err != nil {
 		return err
 	}
 	positionals := fs.Args()
 	if all && len(positionals) > 0 {
 		return errors.New("provide either --all or Workspace Handles, not both")
+	}
+	positionals, err = canonicalUniqueWorkspaceHandles(positionals)
+	if err != nil {
+		return err
 	}
 	repoRoot, cfg, project, err := commandContext(repoRootOverride, projectOverride, rootOverride)
 	if err != nil {
@@ -1145,10 +1246,6 @@ func runClose(args []string) error {
 		}
 	} else if len(positionals) > 0 {
 		for _, h := range positionals {
-			h = strings.TrimSpace(h)
-			if err := validateWorkspaceHandle(h); err != nil {
-				return err
-			}
 			info, ok := byHandle[h]
 			if !ok {
 				return fmt.Errorf("Workspace %q not found", h)
@@ -1181,7 +1278,6 @@ func runClose(args []string) error {
 		fmt.Fprintln(stderrWriter, cliStylesForWriter(stderrWriter).Muted.Render("No Workspaces to close."))
 		return nil
 	}
-	unsafeTargets := []workspaceInfo{}
 	for _, info := range targets {
 		if info.Main {
 			return fmt.Errorf("Main Workspace %q is never closable", info.Ref.Handle)
@@ -1189,21 +1285,6 @@ func runClose(args []string) error {
 		if info.Missing {
 			return fmt.Errorf("Workspace %q path missing: %s", info.Ref.Handle, info.Path)
 		}
-		if !force && !isClosable(info) {
-			unsafeTargets = append(unsafeTargets, info)
-		}
-	}
-	confirmedForce := false
-	if len(unsafeTargets) > 0 {
-		if !canUseTUI() {
-			return fmt.Errorf("%s not normally closable; stack first or run this close with --force", workspaceSummary(unsafeTargets))
-		}
-		ok, err := confirm(fmt.Sprintf("%s not normally closable. Forced Closing abandons unique mutable changes. Force close instead? [y/N]: ", workspaceSummary(unsafeTargets)))
-		if err != nil || !ok {
-			return err
-		}
-		force = true
-		confirmedForce = true
 	}
 	mainInfo, ok := byHandle[cfg.MainWorkspace]
 	if !ok {
@@ -1211,6 +1292,25 @@ func runClose(args []string) error {
 	}
 	if mainInfo.Missing {
 		return fmt.Errorf("Main Workspace path missing: %s", mainInfo.Path)
+	}
+	unsafeTargets, err := normallyUnclosableTargets(mainInfo.Path, targets)
+	if err != nil {
+		return err
+	}
+	if force {
+		unsafeTargets = nil
+	}
+	confirmedForce := false
+	if len(unsafeTargets) > 0 {
+		if !canUseTUI() {
+			return fmt.Errorf("%s not normally closable; integrate its work into a surviving Workspace or run this close with --force", workspaceSummary(unsafeTargets))
+		}
+		ok, err := confirm(fmt.Sprintf("%s not normally closable. Forced Closing abandons unique mutable changes. Force close instead? [y/N]: ", workspaceSummary(unsafeTargets)))
+		if err != nil || !ok {
+			return err
+		}
+		force = true
+		confirmedForce = true
 	}
 	if force && !yes && !confirmedForce {
 		ok, err := confirm(fmt.Sprintf("Forced Closing will abandon unique mutable changes for %s. Continue? [y/N]: ", workspaceSummary(targets)))
@@ -2562,6 +2662,13 @@ func workspaceInfosForRefs(repoRoot string, cfg config, project string, refs []w
 		if err != nil {
 			return nil, fmt.Errorf("probe conflict status for Workspace %q from %s: %w", ref.Handle, graphRepoPath, err)
 		}
+		if !info.Main {
+			protectors := workspaceHandlesExcept(refs, map[string]struct{}{ref.Handle: {}})
+			info.RepresentedElsewhere, err = workspaceRepresentedElsewhere(graphRepoPath, ref.Handle, protectors)
+			if err != nil {
+				return nil, fmt.Errorf("probe representation status for Workspace %q from %s: %w", ref.Handle, graphRepoPath, err)
+			}
+		}
 		if !info.Main && cfg.MainWorkspace != "" {
 			info.Ahead, err = workspaceAheadCount(graphRepoPath, ref.Handle, cfg.MainWorkspace)
 			if err != nil {
@@ -2647,6 +2754,36 @@ func workspaceRelevantRevset() string {
 	return "~(empty() & description(\"\"))"
 }
 
+func workspaceUniqueRelevantMutableRevset(handle string, protectorHandles []string) string {
+	revset := "mutable() & ::" + handle + "@ & " + workspaceRelevantRevset()
+	if len(protectorHandles) == 0 {
+		return revset
+	}
+	protected := make([]string, 0, len(protectorHandles))
+	for _, protector := range uniqueNonEmptyStrings(protectorHandles) {
+		protected = append(protected, "::"+protector+"@")
+	}
+	return revset + " & ~(" + strings.Join(protected, " | ") + ")"
+}
+
+func workspaceRepresentedElsewhere(repoPath, handle string, protectorHandles []string) (bool, error) {
+	unique, err := revisionMatches(repoPath, workspaceUniqueRelevantMutableRevset(handle, protectorHandles))
+	if err != nil {
+		return false, err
+	}
+	return !unique, nil
+}
+
+func workspaceHandlesExcept(refs []workspaceRef, excluded map[string]struct{}) []string {
+	handles := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		if _, skip := excluded[ref.Handle]; !skip {
+			handles = append(handles, ref.Handle)
+		}
+	}
+	return handles
+}
+
 func mapInfosByHandle(infos []workspaceInfo) map[string]workspaceInfo {
 	m := make(map[string]workspaceInfo, len(infos))
 	for _, info := range infos {
@@ -2656,7 +2793,7 @@ func mapInfosByHandle(infos []workspaceInfo) map[string]workspaceInfo {
 }
 
 func isClosable(info workspaceInfo) bool {
-	return !info.Main && !info.Missing && !info.Conflict && (info.Empty || info.Stacked)
+	return !info.Main && !info.Missing && !info.Conflict && info.RepresentedElsewhere
 }
 
 func isStackRelevant(info workspaceInfo) bool {
@@ -2869,8 +3006,126 @@ func markers(info workspaceInfo) []string {
 	return out
 }
 
+type closeProtectionContext struct {
+	closingHandles   map[string]struct{}
+	protectorHandles []string
+}
+
+func canonicalUniqueWorkspaceHandles(handles []string) ([]string, error) {
+	canonical := make([]string, 0, len(handles))
+	seen := make(map[string]struct{}, len(handles))
+	for _, raw := range handles {
+		handle := strings.TrimSpace(raw)
+		if err := validateWorkspaceHandle(handle); err != nil {
+			return nil, err
+		}
+		if _, duplicate := seen[handle]; duplicate {
+			return nil, fmt.Errorf("duplicate Workspace Handle %q; provide each Workspace once", boundedWorkspaceHandleForError(handle))
+		}
+		seen[handle] = struct{}{}
+		canonical = append(canonical, handle)
+	}
+	return canonical, nil
+}
+
+func boundedWorkspaceHandleForError(handle string) string {
+	const maxBytes = 64
+	if len(handle) <= maxBytes {
+		return handle
+	}
+	return handle[:maxBytes-len("...")] + "..."
+}
+
+func validateUniqueCloseTargets(targets []workspaceInfo) error {
+	handles := make([]string, 0, len(targets))
+	for _, target := range targets {
+		handles = append(handles, target.Ref.Handle)
+	}
+	_, err := canonicalUniqueWorkspaceHandles(handles)
+	return err
+}
+
+func newCloseProtectionContext(repoPath string, targets []workspaceInfo) (closeProtectionContext, error) {
+	if err := validateUniqueCloseTargets(targets); err != nil {
+		return closeProtectionContext{}, err
+	}
+	refs, err := listWorkspaceRefs(repoPath)
+	if err != nil {
+		return closeProtectionContext{}, err
+	}
+	registered := make(map[string]struct{}, len(refs))
+	for _, ref := range refs {
+		registered[ref.Handle] = struct{}{}
+	}
+	closing := make(map[string]struct{}, len(targets))
+	for _, target := range targets {
+		if _, ok := registered[target.Ref.Handle]; !ok {
+			return closeProtectionContext{}, fmt.Errorf("Workspace %q is no longer registered", target.Ref.Handle)
+		}
+		closing[target.Ref.Handle] = struct{}{}
+	}
+	return closeProtectionContext{
+		closingHandles:   closing,
+		protectorHandles: workspaceHandlesExcept(refs, closing),
+	}, nil
+}
+
+func normallyUnclosableTargets(repoPath string, targets []workspaceInfo) ([]workspaceInfo, error) {
+	protection, err := newCloseProtectionContext(repoPath, targets)
+	if err != nil {
+		return nil, err
+	}
+	return normallyUnclosableTargetsWithProtection(repoPath, targets, protection)
+}
+
+func normallyUnclosableTargetsWithProtection(repoPath string, targets []workspaceInfo, protection closeProtectionContext) ([]workspaceInfo, error) {
+	unsafe := make([]workspaceInfo, 0)
+	for _, target := range targets {
+		if target.Main || target.Missing || !workspacePathExists(target.Path) {
+			unsafe = append(unsafe, target)
+			continue
+		}
+		conflicted, err := workspaceHasConflictCommits(repoPath, target.Ref.Handle)
+		if err != nil {
+			return nil, fmt.Errorf("recheck conflict status for Workspace %q: %w", target.Ref.Handle, err)
+		}
+		if conflicted {
+			unsafe = append(unsafe, target)
+			continue
+		}
+		represented, err := workspaceRepresentedElsewhere(repoPath, target.Ref.Handle, protection.protectorHandles)
+		if err != nil {
+			return nil, fmt.Errorf("prove Workspace %q represented outside closing set: %w", target.Ref.Handle, err)
+		}
+		if !represented {
+			unsafe = append(unsafe, target)
+		}
+	}
+	return unsafe, nil
+}
+
 func closeWorkspaces(repoPath string, targets []workspaceInfo, force bool, yes bool) ([]string, error) {
+	protection, err := newCloseProtectionContext(repoPath, targets)
+	if err != nil {
+		return nil, err
+	}
+	return closeWorkspacesWithProtection(repoPath, targets, force, yes, protection)
+}
+
+func closeWorkspacesWithProtection(repoPath string, targets []workspaceInfo, force bool, yes bool, protection closeProtectionContext) ([]string, error) {
 	closed := []string{}
+	if err := validateUniqueCloseTargets(targets); err != nil {
+		return closed, err
+	}
+	if !force {
+		unsafe, err := normallyUnclosableTargetsWithProtection(repoPath, targets, protection)
+		if err != nil {
+			return closed, err
+		}
+		if len(unsafe) > 0 {
+			return closed, fmt.Errorf("%s not normally closable against surviving Workspaces", workspaceSummary(unsafe))
+		}
+	}
 	externalTargets := []workspaceInfo{}
 	for _, info := range targets {
 		if info.External {
@@ -2885,15 +3140,15 @@ func closeWorkspaces(repoPath string, targets []workspaceInfo, force bool, yes b
 	}
 	for _, info := range targets {
 		if force {
-			if err := abandonUniqueMutableChanges(repoPath, info.Ref.Handle); err != nil {
+			if err := abandonUniqueMutableChanges(repoPath, info.Ref.Handle, protection.protectorHandles); err != nil {
 				return closed, err
 			}
 		}
-		if err := commandToStderrFn("jj", "-R", repoPath, "workspace", "forget", info.Ref.Handle); err != nil {
-			return closed, err
-		}
 		if err := os.RemoveAll(info.Path); err != nil {
-			return closed, fmt.Errorf("remove %s: %w", info.Path, err)
+			return closed, fmt.Errorf("cannot remove Workspace %q directory %s: %w; the Workspace remains registered in jj — fix the filesystem issue and retry", info.Ref.Handle, info.Path, err)
+		}
+		if err := commandToStderrFn("jj", "-R", repoPath, "workspace", "forget", info.Ref.Handle); err != nil {
+			return closed, fmt.Errorf("removed Workspace %q directory %s, but could not forget it in jj: %w; finish cleanup with `jj -R %s workspace forget %s`", info.Ref.Handle, info.Path, err, repoPath, info.Ref.Handle)
 		}
 		closed = append(closed, info.Path)
 	}
@@ -2912,28 +3167,16 @@ func externalDeletePrompt(targets []workspaceInfo) string {
 	return fmt.Sprintf("%d Workspaces are outside the canonical Project layout: %s. Delete these directories? [y/N]: ", len(targets), strings.Join(handles, ", "))
 }
 
-func abandonUniqueMutableChanges(repoRoot, handle string) error {
-	// Abandon only mutable changes reachable from the closing Workspace's working copy
-	// that are NOT reachable from any other Workspace's working copy. This protects
-	// commits already integrated into another Workspace (e.g. Main) while still dropping
-	// genuinely Workspace-only unstacked changes on force close.
-	//
-	// Invariant relied upon here: a successfully stacked payload is an ANCESTOR of Main@
-	// (runStack + advanceMainToStackPayload advance Main@ onto the payload tip), so it is
-	// excluded by `~::mainHandle@`. Do not weaken this to also spare descendants of Main@,
-	// because unstacked Workspace changes are descendants of Main@ and must be abandoned.
-	refs, err := listWorkspaceRefs(repoRoot)
-	if err != nil {
-		return err
-	}
-	var otherAncestors []string
-	for _, ref := range refs {
-		if ref.Handle != handle {
-			otherAncestors = append(otherAncestors, "::"+ref.Handle+"@")
-		}
-	}
+func abandonUniqueMutableChanges(repoRoot, handle string, protectorHandles []string) error {
+	// The immutable protector set is computed once for the complete closing batch. Members
+	// of that batch can never protect each other; every surviving registered Workspace can,
+	// including one whose directory is missing but whose jj Workspace ref still exists.
 	revset := "mutable() & ::" + handle + "@"
-	if len(otherAncestors) > 0 {
+	if len(protectorHandles) > 0 {
+		otherAncestors := make([]string, 0, len(protectorHandles))
+		for _, protector := range uniqueNonEmptyStrings(protectorHandles) {
+			otherAncestors = append(otherAncestors, "::"+protector+"@")
+		}
 		revset += " & ~(" + strings.Join(otherAncestors, " | ") + ")"
 	}
 	has, err := revisionMatches(repoRoot, revset)
@@ -3093,7 +3336,7 @@ func trySingleInputTidyLinearProbe(mainPath, input string) (bool, bool, error) {
 		return false, false, fmt.Errorf("record tidy Stack probe base operation: %w", err)
 	}
 	fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Tidy Stack probe: insert %s payload before target Workspace head", input))
-	out, err := commandCombinedCaptureFn("jj", "-R", mainPath, "--no-integrate-operation", "rebase", "-r", payloadRevset, "-B", "@")
+	out, err := commandCombinedCaptureFn("jj", "-R", mainPath, "--color=never", "--no-pager", "--no-integrate-operation", "rebase", "-r", payloadRevset, "-B", "@")
 	if err != nil {
 		return false, false, err
 	}
@@ -3134,12 +3377,32 @@ func trySingleInputTidyLinearProbe(mainPath, input string) (bool, bool, error) {
 	return true, false, nil
 }
 
+var detachedOperationResultLineRE = regexp.MustCompile(`^Operation left uncommitted because --no-integrate-operation was requested: ([0-9a-f]{12,128})$`)
+
+// detachedOperationID accepts only jj's documented --no-integrate-operation
+// result grammar. Other command progress is ignored, never interpreted as
+// authority, and the bounded output must contain exactly one result candidate.
+// The returned value is only a prefix; callers must immediately expand it with
+// a machine-templated --at-op query and prove its exact operation ancestry.
 func detachedOperationID(output string) (string, error) {
-	match := regexp.MustCompile(`(?m)Operation left uncommitted because --no-integrate-operation was requested: ([0-9a-f]+)\s*$`).FindStringSubmatch(output)
-	if len(match) != 2 {
-		return "", fmt.Errorf("could not read detached operation id from jj output: %s", strings.TrimSpace(output))
+	if len(output) == 0 || len(output) > detachedOperationResultMaxBytes {
+		return "", errors.New("detached operation result is missing or exceeds the size limit")
 	}
-	return match[1], nil
+	candidate := ""
+	for _, line := range strings.Split(strings.TrimSuffix(output, "\n"), "\n") {
+		match := detachedOperationResultLineRE.FindStringSubmatch(line)
+		if len(match) != 2 {
+			continue
+		}
+		if candidate != "" {
+			return "", errors.New("detached operation result contains multiple candidates")
+		}
+		candidate = match[1]
+	}
+	if candidate == "" {
+		return "", errors.New("detached operation result does not match the documented grammar")
+	}
+	return candidate, nil
 }
 
 func revisionMatchesAtOperation(repoPath, operationID, revset string) (bool, error) {
@@ -3520,7 +3783,7 @@ func frontierHeads(repoPath string, revs []string) ([]string, error) {
 }
 
 func parentChangeIDs(repoPath string) ([]string, error) {
-	out, err := commandCaptureFn("jj", "-R", repoPath, "log", "-r", "parents(@)", "--no-graph", "-T", "change_id.short() ++ \"\\n\"")
+	out, err := commandCaptureFn("jj", "-R", repoPath, "--ignore-working-copy", "log", "-r", "parents(@)", "--no-graph", "-T", "change_id.short() ++ \"\\n\"")
 	if err != nil {
 		return nil, err
 	}
@@ -3551,17 +3814,17 @@ func isAncestorOfAny(repoPath string, ancestor string, descendants []string) (bo
 }
 
 func abandonEmptyWorkspaceHeads(repoPath string, infos []workspaceInfo) error {
-	revs := []string{}
+	revs := make([]string, 0, len(infos))
 	for _, info := range infos {
-		if info.Empty {
-			revs = append(revs, info.Ref.Handle+"@")
-		}
+		revs = append(revs, info.Ref.Handle+"@")
 	}
 	revs = uniqueNonEmptyStrings(revs)
 	if len(revs) == 0 {
 		return nil
 	}
-	revset := "empty() & mutable() & (" + strings.Join(revs, " | ") + ")"
+	// Only the conventional empty, undescribed working-copy cursor is disposable. A
+	// described empty merge is relevant history and must survive normal close/tidy.
+	revset := "empty() & description(\"\") & mutable() & (" + strings.Join(revs, " | ") + ")"
 	hasEmpty, err := revisionMatches(repoPath, revset)
 	if err != nil {
 		return err
@@ -3573,8 +3836,12 @@ func abandonEmptyWorkspaceHeads(repoPath string, infos []workspaceInfo) error {
 	return commandToStderrFn("jj", "-R", repoPath, "abandon", "-r", revset)
 }
 
+func topEmptyMutableAncestorsRevset(target string) string {
+	return "empty() & description(\"\") & mutable() & ::" + target + " & ~" + target
+}
+
 func abandonTopEmptyMutableAncestors(repoPath string) error {
-	revset := "empty() & description(\"\") & mutable() & ::@ & ~@"
+	revset := topEmptyMutableAncestorsRevset("@")
 	hasEmpty, err := revisionMatches(repoPath, revset)
 	if err != nil {
 		return err
@@ -4002,7 +4269,7 @@ func listWorkspaceHandles(repoRoot string) ([]string, error) {
 }
 
 func listWorkspaceRefs(repoRoot string) ([]workspaceRef, error) {
-	out, err := commandCaptureFn("jj", "-R", repoRoot, "--ignore-working-copy", "workspace", "list", "-T", "name ++ \"\\t\" ++ target.change_id().short() ++ \"\\t\" ++ root ++ \"\\n\"")
+	out, err := commandCaptureFn("jj", "-R", repoRoot, "--color=never", "--no-pager", "--ignore-working-copy", "workspace", "list", "-T", "name ++ \"\\t\" ++ target.change_id().short() ++ \"\\t\" ++ root ++ \"\\n\"")
 	if err != nil {
 		return nil, err
 	}
@@ -4040,7 +4307,7 @@ func currentWorkspaceHandle(repoRoot string, refs []workspaceRef) (string, error
 	if len(rootMatches) > 1 {
 		return "", fmt.Errorf("ambiguous Current Workspace for %s: %s", repoRoot, strings.Join(rootMatches, ", "))
 	}
-	out, err := commandCaptureFn("jj", "-R", repoRoot, "log", "-r", "@", "--no-graph", "-T", "change_id.short() ++ \"\\n\"")
+	out, err := commandCaptureFn("jj", "-R", repoRoot, "--color=never", "--no-pager", "log", "-r", "@", "--no-graph", "-T", "change_id.short() ++ \"\\n\"")
 	if err != nil {
 		return "", err
 	}
@@ -4470,6 +4737,9 @@ func (m selectorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				visible := m.visibleItems()
 				if m.cursor >= 0 && m.cursor < len(visible) {
 					m.toggleSelection(visible[m.cursor])
+					if m.cursor < len(visible)-1 {
+						m.cursor++
+					}
 				}
 			}
 		case "enter":
@@ -4728,7 +4998,7 @@ func (m selectorModel) View() string {
 	fmt.Fprintln(&b, clipSelectorLine(styles.Help.Render(selectorLegend(m.opts)), m.width))
 	footer := "↑/↓ move  type filter  enter choose  q quit"
 	if m.opts.Mode == selectorMulti {
-		footer = "↑/↓ move  space toggle  enter submit selected  type filter  q quit"
+		footer = "↑/↓ move  space toggle/next  enter submit selected  type filter  q quit"
 	}
 	if m.opts.AllowForceToggle {
 		footer += fmt.Sprintf("  f force:%v", m.opts.ForceEnabled)
@@ -4820,13 +5090,13 @@ func selectorLegend(opts selectorOptions) string {
 		return "status: only Workspaces with no unique commits and behind Main are selected by default; uncheck any to leave alone"
 	}
 	if opts.Tidy {
-		return "status: empty/stacked Workspaces are tidy and selected by default; uncheck any to leave alone"
+		return "status: Represented Elsewhere non-Current Workspaces start selected; labels remain Main-relative; f enables Forced Tidying"
 	}
 	if opts.AllDefault {
 		return "status: unstacked/conflict = stack-relevant; stacked/empty/missing = shown for context"
 	}
 	if opts.AllowForceToggle {
-		return "status: empty/stacked = closable; unstacked/conflict need Stacking or Forced Closing; missing cannot close"
+		return "status: normal close requires representation by a surviving Workspace; labels remain Main-relative; missing cannot close"
 	}
 	return "status: current/main markers show where you are; missing rows cannot be opened"
 }
@@ -4836,19 +5106,19 @@ func selectorHint(opts selectorOptions) string {
 		return "Choose the Workspace to open. Type to filter by handle, status, marker, or path."
 	}
 	if opts.OrderedSelection {
-		return "Choose Line Stacking order. Space selects in order; press a on a selected row to toggle payload/follow-only. The target Workspace is disabled."
+		return "Choose Line Stacking order. Space toggles and advances in selection order; press a on a selected row to toggle payload/follow-only. The target Workspace is disabled."
 	}
 	if opts.MoveToMain {
 		return "Choose Workspaces to move to the Main Workspace line. Movable rows start checked; press space to leave one alone."
 	}
 	if opts.Tidy {
-		return "Choose tidy Workspaces to close. Tidy rows start checked; press space to leave one alone."
+		return "Choose represented Workspaces to tidy. Safe non-Current rows start checked; the complete closing set cannot protect itself. Press f for Forced Tidying."
 	}
 	if opts.AllDefault {
 		return "Choose Stack Inputs. The All row submits every stack-relevant Workspace only when no boxes are checked. Disabled rows are shown for context."
 	}
 	if opts.AllowForceToggle {
-		return "Choose Workspaces to close. Press f to preview Forced Closing availability instead of re-running with --force."
+		return "Choose Workspaces to close. Normal close requires representation outside the complete closing set; Press f for Forced Closing."
 	}
 	return "Choose Workspaces. Type to filter by handle, status, marker, or path."
 }
@@ -4912,14 +5182,15 @@ func selectorItemsForMoveToMain(infos []workspaceInfo) []selectorItem {
 	return items
 }
 
-func selectorItemsForTidy(infos []workspaceInfo) []selectorItem {
+func selectorItemsForTidy(infos []workspaceInfo, force bool) []selectorItem {
 	items := make([]selectorItem, 0, len(infos))
 	for _, info := range infos {
 		if info.Main {
 			continue
 		}
 		tidy := isClosable(info)
-		items = append(items, selectorItem{Handle: info.Ref.Handle, Path: info.Path, Status: statusLabel(info), Markers: strings.Join(markers(info), ","), Disabled: !tidy, Selected: tidy})
+		disabled := info.Missing || (!force && !tidy)
+		items = append(items, selectorItem{Handle: info.Ref.Handle, Path: info.Path, Status: statusLabel(info), Markers: strings.Join(markers(info), ","), Disabled: disabled, Selected: tidy && !info.Current})
 	}
 	return items
 }
@@ -5074,7 +5345,7 @@ func versionString() string {
 // shell-init and init do not touch jj and must not trigger the check.
 func commandNeedsJJ(command string) bool {
 	switch command {
-	case "create", "open", "list", "main", "workspaces-subdir", "close", "tidy", "stack", "move-to-main", "catch-up":
+	case "create", "open", "list", "main", "workspaces-subdir", "close", "tidy", "stack", "integrate", "move-to-main", "catch-up":
 		return true
 	default:
 		return false
@@ -5087,7 +5358,7 @@ var (
 	jjCheckErr  error
 )
 
-// ensureJJ verifies jj is installed and warns when it is older than the
+// ensureJJ verifies jj is installed and rejects versions older than the
 // documented minimum. It parses `jj --version` at most once and caches the
 // result, so repeated calls incur no additional subprocess cost.
 func ensureJJ() error {
@@ -5117,20 +5388,14 @@ func checkJJ() error {
 	}
 	out, err := jjVersionFn()
 	if err != nil {
-		// jj is present but we could not determine its version; proceed
-		// rather than blocking on an unexpected --version failure.
-		return nil
+		return fmt.Errorf("could not determine the installed jj version required to enforce minimum %s: %w; upgrade or reinstall: https://github.com/jj-vcs/jj", jjMinVersion, err)
 	}
 	got := parseJJVersion(out)
 	if got == "" {
-		return nil
+		return fmt.Errorf("could not parse the installed jj version required to enforce minimum %s; upgrade or reinstall: https://github.com/jj-vcs/jj", jjMinVersion)
 	}
 	if compareVersions(got, jjMinVersion) < 0 {
-		s := cliStylesForWriter(stderrWriter)
-		fmt.Fprintf(stderrWriter, "%s jj %s is older than the minimum supported version %s "+
-			"(tested against jj %s). Some commands may misbehave; please upgrade: "+
-			"https://github.com/jj-vcs/jj\n",
-			s.Warn.Render("warning:"), got, jjMinVersion, jjTestedVersion)
+		return fmt.Errorf("jj %s is older than the minimum supported version %s (tested against jj %s); upgrade before using Ajj: https://github.com/jj-vcs/jj", got, jjMinVersion, jjTestedVersion)
 	}
 	return nil
 }
@@ -5190,18 +5455,46 @@ func runCommandCapture(name string, args ...string) (string, error) {
 	return out.String(), nil
 }
 
+type boundedCommandOutput struct {
+	buffer   bytes.Buffer
+	limit    int
+	exceeded bool
+}
+
+func (w *boundedCommandOutput) Write(p []byte) (int, error) {
+	remaining := w.limit - w.buffer.Len()
+	if remaining > 0 {
+		write := len(p)
+		if write > remaining {
+			write = remaining
+		}
+		_, _ = w.buffer.Write(p[:write])
+	}
+	if len(p) > remaining {
+		w.exceeded = true
+	}
+	return len(p), nil
+}
+
 func runCommandCombinedCapture(name string, args ...string) (string, error) {
 	cmd := exec.Command(name, args...)
+	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
 	setCommandWorkingDir(cmd, name, args...)
-	out, err := cmd.CombinedOutput()
+	out := &boundedCommandOutput{limit: detachedOperationResultMaxBytes}
+	cmd.Stdout = out
+	cmd.Stderr = out
+	err := cmd.Run()
+	if out.exceeded {
+		return "", errors.New("detached command output exceeds the size limit")
+	}
 	if err != nil {
-		msg := strings.TrimSpace(string(out))
+		msg := strings.TrimSpace(out.buffer.String())
 		if msg != "" {
 			return "", fmt.Errorf("%s %s failed: %s", name, strings.Join(args, " "), msg)
 		}
 		return "", fmt.Errorf("%s %s failed: %w", name, strings.Join(args, " "), err)
 	}
-	return string(out), nil
+	return out.buffer.String(), nil
 }
 
 func runCommandToStderr(name string, args ...string) error {

@@ -351,10 +351,18 @@ func TestRunShellInitRejectsUnknownShell(t *testing.T) {
 	}
 }
 
-func TestSelectorHintMentionsForceToggleInsteadOfReRun(t *testing.T) {
+func TestCloseSelectorGuidanceExplainsRepresentationSafety(t *testing.T) {
 	hint := selectorHint(selectorOptions{Mode: selectorMulti, AllowForceToggle: true})
-	if !strings.Contains(hint, "Press f") || !strings.Contains(hint, "instead of re-running") {
-		t.Fatalf("expected force-toggle hint, got %q", hint)
+	legend := selectorLegend(selectorOptions{Mode: selectorMulti, AllowForceToggle: true})
+	for _, want := range []string{"outside the complete closing set", "Press f", "Forced Closing"} {
+		if !strings.Contains(hint, want) {
+			t.Fatalf("expected close hint to mention %q, got %q", want, hint)
+		}
+	}
+	for _, want := range []string{"surviving Workspace", "Main-relative", "missing cannot close"} {
+		if !strings.Contains(legend, want) {
+			t.Fatalf("expected close legend to mention %q, got %q", want, legend)
+		}
 	}
 }
 
@@ -365,10 +373,49 @@ func TestStackSelectorHintExplainsAllRowDoesNotOverrideCheckedBoxes(t *testing.T
 	}
 }
 
-func TestTidySelectorHintExplainsPreselectedTidyRows(t *testing.T) {
-	hint := selectorHint(selectorOptions{Mode: selectorMulti, Tidy: true})
-	if !strings.Contains(hint, "Tidy rows start checked") || !strings.Contains(hint, "leave one alone") {
-		t.Fatalf("expected tidy preselection hint, got %q", hint)
+func TestTidySelectorGuidanceExplainsRepresentationAndCurrentDefault(t *testing.T) {
+	hint := selectorHint(selectorOptions{Mode: selectorMulti, Tidy: true, AllowForceToggle: true})
+	legend := selectorLegend(selectorOptions{Mode: selectorMulti, Tidy: true, AllowForceToggle: true})
+	for _, want := range []string{"represented", "non-Current", "complete closing set", "Press f", "Forced Tidying"} {
+		if !strings.Contains(hint, want) {
+			t.Fatalf("expected tidy hint to mention %q, got %q", want, hint)
+		}
+	}
+	for _, want := range []string{"Represented Elsewhere", "non-Current", "Main-relative", "Forced Tidying"} {
+		if !strings.Contains(legend, want) {
+			t.Fatalf("expected tidy legend to mention %q, got %q", want, legend)
+		}
+	}
+}
+
+func TestTidyHelpOffersForcedTidying(t *testing.T) {
+	out, err := captureStdout(func() error { return runTidy([]string{"--help"}) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"surviving registered Workspace heads", "non-Current", "--force", "abandon unique mutable changes"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected tidy help to mention %q, got %q", want, out)
+		}
+	}
+}
+
+func TestCloseHelpAndGeneralUsageExplainRepresentationSafety(t *testing.T) {
+	out, err := captureStdout(func() error { return runClose([]string{"--help"}) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"surviving registered Workspace heads", "each explicit Handle may appear once", "outside the closing set"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected close help to mention %q, got %q", want, out)
+		}
+	}
+	var usage bytes.Buffer
+	printUsage(&usage)
+	for _, want := range []string{"Close Workspaces represented by surviving registered Workspace heads", "Close represented non-Current Workspaces"} {
+		if !strings.Contains(usage.String(), want) {
+			t.Fatalf("expected general usage to mention %q, got %q", want, usage.String())
+		}
 	}
 }
 
@@ -381,6 +428,16 @@ func TestStackPlanPromptShowsExactInputsAndOptions(t *testing.T) {
 	}
 	if strings.Contains(prompt, "bravo") {
 		t.Fatalf("prompt should only show selected inputs, got %q", prompt)
+	}
+}
+
+func TestGlobalHelpStatesJJMinimum(t *testing.T) {
+	out, err := captureStdout(func() error { return run([]string{"help"}) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "Jujutsu (jj) "+jjMinVersion+" or newer") {
+		t.Fatalf("global help does not state the minimum jj version: %q", out)
 	}
 }
 
@@ -478,12 +535,12 @@ func TestMoveToMainSelectorPreselectsWorkspaceBehindDescribedEmptyMerge(t *testi
 func TestTidySelectorPreselectsOnlyClosableWorkspaces(t *testing.T) {
 	items := selectorItemsForTidy([]workspaceInfo{
 		{Ref: workspaceRef{Handle: "default"}, Main: true},
-		{Ref: workspaceRef{Handle: "empty"}, Empty: true},
-		{Ref: workspaceRef{Handle: "stacked"}, Stacked: true},
+		{Ref: workspaceRef{Handle: "empty"}, Empty: true, RepresentedElsewhere: true},
+		{Ref: workspaceRef{Handle: "stacked"}, Stacked: true, RepresentedElsewhere: true},
 		{Ref: workspaceRef{Handle: "unstacked"}, Ahead: 1},
-		{Ref: workspaceRef{Handle: "conflict"}, Conflict: true},
+		{Ref: workspaceRef{Handle: "conflict"}, Conflict: true, RepresentedElsewhere: true},
 		{Ref: workspaceRef{Handle: "missing"}, Missing: true},
-	})
+	}, false)
 	byHandle := mapSelectorItemsByHandle(items)
 	for _, handle := range []string{"empty", "stacked"} {
 		if !byHandle[handle].Selected || byHandle[handle].Disabled {
@@ -497,6 +554,48 @@ func TestTidySelectorPreselectsOnlyClosableWorkspaces(t *testing.T) {
 	}
 	if _, ok := byHandle["default"]; ok {
 		t.Fatal("Main Workspace should not appear in tidy selector")
+	}
+}
+
+func TestTidySelectorForceEnablesUnstackedAndConflictedWorkspaces(t *testing.T) {
+	items := selectorItemsForTidy([]workspaceInfo{
+		{Ref: workspaceRef{Handle: "default"}, Main: true},
+		{Ref: workspaceRef{Handle: "empty"}, Empty: true, RepresentedElsewhere: true},
+		{Ref: workspaceRef{Handle: "unstacked"}, Ahead: 1},
+		{Ref: workspaceRef{Handle: "conflict"}, Conflict: true},
+		{Ref: workspaceRef{Handle: "missing"}, Missing: true},
+	}, true)
+	byHandle := mapSelectorItemsByHandle(items)
+	if !byHandle["empty"].Selected || byHandle["empty"].Disabled {
+		t.Fatalf("expected empty Workspace to remain preselected, got %+v", byHandle["empty"])
+	}
+	for _, handle := range []string{"unstacked", "conflict"} {
+		if byHandle[handle].Selected || byHandle[handle].Disabled {
+			t.Fatalf("expected Forced Tidying to enable %s without preselecting it, got %+v", handle, byHandle[handle])
+		}
+	}
+	if !byHandle["missing"].Disabled {
+		t.Fatalf("missing Workspace must remain disabled, got %+v", byHandle["missing"])
+	}
+}
+
+func TestTidySelectorForceToggleEnablesUnstackedRows(t *testing.T) {
+	items := selectorItemsForTidy([]workspaceInfo{
+		{Ref: workspaceRef{Handle: "unstacked"}, Ahead: 1},
+		{Ref: workspaceRef{Handle: "missing"}, Missing: true},
+	}, false)
+	model := selectorModel{
+		opts:     selectorOptions{Mode: selectorMulti, Items: items, Tidy: true, AllowForceToggle: true},
+		selected: map[int]bool{},
+	}
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
+	model = updated.(selectorModel)
+	byHandle := mapSelectorItemsByHandle(model.opts.Items)
+	if !model.opts.ForceEnabled || byHandle["unstacked"].Disabled {
+		t.Fatalf("expected f to enable Forced Tidying, got force=%v item=%+v", model.opts.ForceEnabled, byHandle["unstacked"])
+	}
+	if !byHandle["missing"].Disabled {
+		t.Fatalf("missing Workspace must remain disabled, got %+v", byHandle["missing"])
 	}
 }
 
@@ -525,6 +624,46 @@ func TestPreselectedMultiSelectorSubmitsDefaultCheckedRows(t *testing.T) {
 	model = model.submit()
 	if got := selectorHandles(model.result.Items); strings.Join(got, ",") != "alpha,bravo" {
 		t.Fatalf("expected preselected handles, got %v", got)
+	}
+}
+
+func TestMultiSelectorSpaceTogglesAndAdvances(t *testing.T) {
+	for _, ordered := range []bool{false, true} {
+		model := selectorModel{
+			opts: selectorOptions{Mode: selectorMulti, OrderedSelection: ordered, Items: []selectorItem{
+				{Handle: "alpha"},
+				{Handle: "bravo"},
+				{Handle: "charlie"},
+			}},
+			selected:      map[int]bool{},
+			selectedRoles: map[int]string{},
+		}
+		for press, wantCursor := range []int{1, 2, 2} {
+			updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+			model = updated.(selectorModel)
+			if model.cursor != wantCursor {
+				t.Fatalf("ordered=%v press=%d: cursor=%d, want %d", ordered, press+1, model.cursor, wantCursor)
+			}
+		}
+		model = model.submit()
+		if got := selectorHandles(model.result.Items); strings.Join(got, ",") != "alpha,bravo,charlie" {
+			t.Fatalf("ordered=%v: expected Space spam to select every row, got %v", ordered, got)
+		}
+	}
+}
+
+func TestMultiSelectorSpaceAdvancesPastDisabledRow(t *testing.T) {
+	model := selectorModel{
+		opts: selectorOptions{Mode: selectorMulti, Items: []selectorItem{
+			{Handle: "disabled", Disabled: true},
+			{Handle: "enabled"},
+		}},
+		selected: map[int]bool{},
+	}
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	model = updated.(selectorModel)
+	if model.cursor != 1 || len(model.selected) != 0 {
+		t.Fatalf("expected Space to skip disabled row, got cursor=%d selected=%v", model.cursor, model.selected)
 	}
 }
 
@@ -1194,7 +1333,7 @@ func TestRunTidyClosesWorkspacesWithNoUniqueNonEmptyCommits(t *testing.T) {
 		if strings.Contains(joined, "workspace list") {
 			return "default\tmain111\t" + mainPath + "\ndelta\tdelta111\t" + deltaPath + "\nalpha\talpha111\t" + alphaPath + "\n", nil
 		}
-		if strings.Contains(joined, workspaceAheadRevset("alpha", "default")) {
+		if strings.Contains(joined, workspaceAheadRevset("alpha", "default")) || strings.Contains(joined, "mutable() & ::alpha@ & "+workspaceRelevantRevset()) {
 			return "unique-alpha\n", nil
 		}
 		if strings.Contains(joined, workspaceAheadRevset("delta", "default")) {
@@ -1203,7 +1342,7 @@ func TestRunTidyClosesWorkspacesWithNoUniqueNonEmptyCommits(t *testing.T) {
 		if strings.Contains(joined, "empty() & delta@") {
 			return "delta-empty\n", nil
 		}
-		if strings.Contains(joined, "empty() & mutable() & (delta@)") {
+		if strings.Contains(joined, "empty() & description(\"\") & mutable() & (delta@)") {
 			return "delta-empty\n", nil
 		}
 		return "", nil
@@ -1219,7 +1358,7 @@ func TestRunTidyClosesWorkspacesWithNoUniqueNonEmptyCommits(t *testing.T) {
 		if strings.Contains(joined, "workspace forget alpha") {
 			t.Fatal("tidy must not close Workspace with unique non-empty commits")
 		}
-		if strings.Contains(joined, "abandon -r empty() & mutable() & (delta@)") {
+		if strings.Contains(joined, "abandon -r empty() & description(\"\") & mutable() & (delta@)") {
 			abandonedDelta = true
 		}
 		if strings.Contains(joined, "workspace update-stale") {
@@ -1246,8 +1385,158 @@ func TestRunTidyClosesWorkspacesWithNoUniqueNonEmptyCommits(t *testing.T) {
 	if !strings.Contains(out.String(), deltaPath) {
 		t.Fatalf("expected closed Workspace path on stdout, got %q", out.String())
 	}
-	if !strings.Contains(errOut.String(), "delta") || strings.Contains(errOut.String(), "alpha (unstacked)") {
-		t.Fatalf("expected stderr to identify only tidyable Workspace, got %q", errOut.String())
+	if !strings.Contains(errOut.String(), "Workspaces represented by surviving registered Workspace heads") || !strings.Contains(errOut.String(), "delta") || strings.Contains(errOut.String(), "alpha (unstacked)") {
+		t.Fatalf("expected representation guidance naming only tidyable Workspace, got %q", errOut.String())
+	}
+}
+
+func TestForcedTidyRequiresDestructiveConfirmation(t *testing.T) {
+	mainPath := t.TempDir()
+	workspacePath := filepath.Join(t.TempDir(), "alpha")
+	if err := os.MkdirAll(workspacePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	infos := []workspaceInfo{
+		{Ref: workspaceRef{Handle: "default"}, Path: mainPath, Main: true},
+		{Ref: workspaceRef{Handle: "alpha"}, Path: workspacePath, Ahead: 1},
+	}
+	origIn, origErr := stdinReader, stderrWriter
+	stdinReader = strings.NewReader("n\n")
+	var errOut bytes.Buffer
+	stderrWriter = &errOut
+	t.Cleanup(func() { stdinReader, stderrWriter = origIn, origErr })
+
+	withCommandCapture(t, func(name string, args ...string) (string, error) {
+		if strings.Contains(strings.Join(args, " "), "workspace list") {
+			return "default\tmain111\t" + mainPath + "\nalpha\talpha111\t" + workspacePath + "\n", nil
+		}
+		return "unique-alpha\n", nil
+	})
+	cfg := config{MainWorkspace: "default"}
+	if err := tidyWorkspaces(mainPath, cfg, "proj", infos, true, false); err != nil {
+		t.Fatal(err)
+	}
+	if !exists(workspacePath) {
+		t.Fatal("declining Forced Tidying confirmation must leave the Workspace alone")
+	}
+	for _, want := range []string{"Forced Tidying", "abandon unique mutable changes", "alpha"} {
+		if !strings.Contains(errOut.String(), want) {
+			t.Fatalf("expected confirmation to mention %q, got %q", want, errOut.String())
+		}
+	}
+}
+
+func TestForcedTidyAbandonsAndClosesUnstackedWorkspace(t *testing.T) {
+	mainPath := t.TempDir()
+	workspacePath := filepath.Join(t.TempDir(), "alpha")
+	if err := os.MkdirAll(workspacePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	infos := []workspaceInfo{
+		{Ref: workspaceRef{Handle: "default"}, Path: mainPath, Main: true},
+		{Ref: workspaceRef{Handle: "alpha"}, Path: workspacePath, Ahead: 1},
+	}
+	withCommandCapture(t, func(name string, args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "workspace list") {
+			return "default\tmain111\t" + mainPath + "\nalpha\talpha111\t" + workspacePath + "\n", nil
+		}
+		if strings.Contains(joined, "mutable() & ::alpha@") {
+			return "unique-alpha\n", nil
+		}
+		return "", nil
+	})
+	abandonedAlpha := false
+	forgotAlpha := false
+	withCommandToStderr(t, func(name string, args ...string) error {
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "abandon -r mutable() & ::alpha@") {
+			abandonedAlpha = true
+		}
+		if strings.Contains(joined, "workspace forget alpha") {
+			forgotAlpha = true
+		}
+		return nil
+	})
+
+	cfg := config{MainWorkspace: "default"}
+	if err := tidyWorkspaces(mainPath, cfg, "proj", infos, true, true); err != nil {
+		t.Fatal(err)
+	}
+	if !abandonedAlpha || !forgotAlpha {
+		t.Fatalf("expected Forced Tidying to abandon and forget alpha, got abandon=%v forget=%v", abandonedAlpha, forgotAlpha)
+	}
+	if exists(workspacePath) {
+		t.Fatalf("expected Forced Tidying to remove %s", workspacePath)
+	}
+}
+
+func TestCloseWorkspacesKeepsJJRegistrationWhenDirectoryRemovalFails(t *testing.T) {
+	workspacePath := filepath.Join(t.TempDir(), "delta")
+	lockedDir := filepath.Join(workspacePath, ".devenv", "state")
+	if err := os.MkdirAll(lockedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(lockedDir, "root-owned-file"), []byte("locked"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(lockedDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(lockedDir, 0o755)
+	})
+
+	forgot := false
+	withCommandToStderr(t, func(name string, args ...string) error {
+		if strings.Contains(strings.Join(args, " "), "workspace forget delta") {
+			forgot = true
+		}
+		return nil
+	})
+
+	withCommandCapture(t, func(name string, args ...string) (string, error) { return "", nil })
+	_, err := closeWorkspacesWithProtection(t.TempDir(), []workspaceInfo{{
+		Ref:  workspaceRef{Handle: "delta"},
+		Path: workspacePath,
+	}}, true, true, closeProtectionContext{})
+	if err == nil {
+		t.Fatal("expected directory removal to fail")
+	}
+	if forgot {
+		t.Fatal("Workspace must remain registered in jj when its directory cannot be removed")
+	}
+	if !strings.Contains(err.Error(), "remains registered in jj") {
+		t.Fatalf("expected actionable partial-failure message, got %v", err)
+	}
+}
+
+func TestCloseWorkspacesReportsRecoveryWhenJJForgetFails(t *testing.T) {
+	workspacePath := filepath.Join(t.TempDir(), "delta")
+	if err := os.MkdirAll(workspacePath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	withCommandToStderr(t, func(name string, args ...string) error {
+		if strings.Contains(strings.Join(args, " "), "workspace forget delta") {
+			return errors.New("jj operation failed")
+		}
+		return nil
+	})
+
+	withCommandCapture(t, func(name string, args ...string) (string, error) { return "", nil })
+	_, err := closeWorkspacesWithProtection(t.TempDir(), []workspaceInfo{{
+		Ref:  workspaceRef{Handle: "delta"},
+		Path: workspacePath,
+	}}, true, true, closeProtectionContext{})
+	if err == nil {
+		t.Fatal("expected jj forget to fail")
+	}
+	if exists(workspacePath) {
+		t.Fatal("expected directory removal to complete before jj forget")
+	}
+	if !strings.Contains(err.Error(), "removed Workspace \"delta\" directory") ||
+		!strings.Contains(err.Error(), "finish cleanup with `jj -R") {
+		t.Fatalf("expected actionable partial-failure recovery, got %v", err)
 	}
 }
 
@@ -2057,9 +2346,9 @@ func TestRunOpenNonTTYWithoutHandleFails(t *testing.T) {
 func TestCloseAllSelectsOnlyClosableWithoutForce(t *testing.T) {
 	infos := []workspaceInfo{
 		{Ref: workspaceRef{Handle: "default"}, Main: true},
-		{Ref: workspaceRef{Handle: "empty"}, Empty: true},
-		{Ref: workspaceRef{Handle: "stacked"}, Stacked: true},
-		{Ref: workspaceRef{Handle: "conflict"}, Conflict: true},
+		{Ref: workspaceRef{Handle: "empty"}, Empty: true, RepresentedElsewhere: true},
+		{Ref: workspaceRef{Handle: "stacked"}, Stacked: true, RepresentedElsewhere: true},
+		{Ref: workspaceRef{Handle: "conflict"}, Conflict: true, RepresentedElsewhere: true},
 		{Ref: workspaceRef{Handle: "unstacked"}},
 	}
 	closable := []string{}
@@ -2088,6 +2377,12 @@ func TestCloseWorkspacesConfirmsExternalDeletionOnce(t *testing.T) {
 	stderrWriter = &errOut
 	defer func() { stdinReader, stderrWriter = origIn, origErr }()
 	forgot := []string{}
+	withCommandCapture(t, func(name string, args ...string) (string, error) {
+		if strings.Contains(strings.Join(args, " "), "workspace list") {
+			return "default\tmain111\t/default\nalpha\ta111\t" + alphaPath + "\nbravo\tb111\t" + bravoPath + "\n", nil
+		}
+		return "", nil
+	})
 	withCommandToStderr(t, func(name string, args ...string) error {
 		if len(args) >= 5 && args[2] == "workspace" && args[3] == "forget" {
 			forgot = append(forgot, args[4])
@@ -3562,15 +3857,30 @@ func TestEnsureJJ(t *testing.T) {
 			wantErrText: "Jujutsu (jj) is required",
 		},
 		{
-			name:       "jj-old",
-			lookPath:   func(string) (string, error) { return "/usr/bin/jj", nil },
-			versionOut: "jj 0.15.0\n",
-			wantWarn:   true,
+			name:        "jj-version-command-fails",
+			lookPath:    func(string) (string, error) { return "/usr/bin/jj", nil },
+			versionErr:  errors.New("version failed"),
+			wantErr:     true,
+			wantErrText: "could not determine the installed jj version",
 		},
 		{
-			name:       "jj-ok",
+			name:        "jj-version-unparseable",
+			lookPath:    func(string) (string, error) { return "/usr/bin/jj", nil },
+			versionOut:  "unknown\n",
+			wantErr:     true,
+			wantErrText: "could not parse the installed jj version",
+		},
+		{
+			name:        "jj-old",
+			lookPath:    func(string) (string, error) { return "/usr/bin/jj", nil },
+			versionOut:  "jj 0.40.0\n",
+			wantErr:     true,
+			wantErrText: "older than the minimum supported version 0.41.0",
+		},
+		{
+			name:       "jj-minimum",
 			lookPath:   func(string) (string, error) { return "/usr/bin/jj", nil },
-			versionOut: "jj 0.42.0\n",
+			versionOut: "jj 0.41.0\n",
 			wantWarn:   false,
 		},
 	}

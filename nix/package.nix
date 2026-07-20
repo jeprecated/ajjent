@@ -8,6 +8,8 @@
 let
   version = "1.0.0";
 in
+assert lib.assertMsg (lib.versionAtLeast jujutsu.version "0.41.0")
+  "ajjent requires jujutsu 0.41.0 or newer";
 buildGoModule {
   pname = "ajjent";
   inherit version;
@@ -21,8 +23,8 @@ buildGoModule {
     "-X"
     "main.version=${version}"
   ];
-  # Tests shell out to `jj`; keep disabled unless jujutsu is added to checkInputs.
-  doCheck = false;
+  doCheck = true;
+  nativeCheckInputs = [ jujutsu ];
 
   nativeBuildInputs = [ makeWrapper ];
 

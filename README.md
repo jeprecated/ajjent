@@ -94,8 +94,8 @@ nix run github:jeprecated/ajjent -- --help
 
 `ajj` shells out to `jj` (Jujutsu), which must be on `PATH`.
 
-- Minimum supported `jj`: 0.20.0
-- Tested against: 0.42.x
+- Minimum supported `jj`: 0.41.0
+- Tested against: 0.43.x
 
 Commands that only print help or version information do not require `jj`; repo-aware commands do.
 
@@ -122,10 +122,28 @@ Repo-aware commands can target another checkout with either the global form `ajj
 
 - `ajj create [handle]` — create a Workspace and print its path. Without a Handle, picks one from `workspace_handles`. Materializes configured **Assimilated paths**: repo-relative local files, directories, or globs shared into Workspaces by symlink.
 - `ajj create [handle] --revision <full-commit-id>` — base the new Workspace on an exact, immutable commit instead of jj's default. The value must be a full 40-character lowercase hexadecimal commit id; it is resolved against the selected repo before anything is created, passed straight through to `jj workspace add --revision`, and verified by read-back so the new working-copy change has exactly that commit as parent (on mismatch the half-created Workspace is cleaned up and the command fails). To inherit a source Workspace's dirty content, first capture its exact current commit (for example `jj -R <source> log -r @ --no-graph -T commit_id`) and pass that id.
+- `ajj create --repo PATH --request-json PATH|- --json` — strict machine create/ensure. cwd/`--repo` is the Current Workspace target; the request asserts its exact Handle/head and names one child while Ajj configuration owns the destination. Replaying the request reconciles desired provider state and returns `ready`, `partial`, `not-created`, or `conflict`. It does **not** prove which actor created a matching Workspace and does not advertise `recoverByOperationId`.
+
+Machine create request example:
+
+```json
+{"schema":"ajj-create-request-v1","requestId":"placement-A1-001","target":{"expectedWorkspace":"A","expectedHeadCommit":"1111111111111111111111111111111111111111"},"child":{"workspace":"A1"}}
+```
+
+Substitute the exact runtime target head, then run:
+
+```sh
+ajj create --repo "$A" --request-json create-A1.json --json
+ajj capabilities --json --schema ajj-capabilities-v2
+```
+
+`requestId` is correlation metadata, not durable creator identity. A matching existing Workspace is accepted only after Ajj verifies its configured path, repository, exact parent, fresh cursor, and provider setup. Contradictory state is never deleted or adopted. `ready` is snapshot evidence linearized at the final stable Jujutsu operation read, not a lease against later direct `jj` changes; reconcile again before delayed use. See [ADR 0011](docs/adr/0011-add-state-reconciled-machine-create.md).
 - `ajj open [handle]` — print an existing Workspace path. With no Handle, opens the built-in selector. Opening never creates. It also repairs configured Assimilated path symlinks.
-- `ajj close [handle...]` — close Workspaces and print the Main Workspace path for shell wrappers.
-- `ajj close --all` — close all Closable Workspaces.
-- `ajj close --force [--yes] ...` — Forced Closing: abandon unique mutable changes not reachable from Main or any other Workspace, then close.
+- `ajj close [handle...]` — normally close registered, present, non-main, nonconflicted Workspaces whose relevant mutable changes are represented by surviving registered Workspace heads, then print the Main Workspace path for shell wrappers. Each explicit Handle must appear exactly once.
+- `ajj close --all` — close all normally Closable Workspaces that remain safe when the complete selected closing set is excluded from protection.
+- `ajj close --force [--yes] ...` — Forced Closing: abandon only mutable changes not reachable from any surviving registered Workspace head outside the complete closing set, then close. A surviving registered Workspace protects reachable work even when its directory is missing.
+
+Normal-close safety is called **Represented Elsewhere** and is intentionally distinct from the visible **Stacked** status. `Stacked` means represented specifically in configured Main; a Main-relative `unstacked` child can still be normally closable after its work is integrated into a surviving parent Workspace. Empty undescribed working-copy cursors are ignored, but they cannot hide a unique payload line. Batch close never lets selected Workspaces protect each other, and missing selected targets remain unavailable.
 - `ajj main` — print the Main Workspace path.
 - `ajj workspaces-subdir` — create the current Project's `<workspaces_root>/<project>` directory if needed and print its path. Accepts `--repo`, `--project`, and `--workspaces-root` overrides.
 
@@ -148,7 +166,7 @@ Stack's All row includes Workspaces with commits ahead of the target or conflict
 - `--stack-shape auto|linear|merge`
 - `--conflict-strategy off|prefer-clean`
 
-With the default `prefer-clean`, `auto` settings and jj 0.41 or newer, a single divergent Workspace containing one unique non-empty payload commit is tried tidiest-first. `ajj` uses `jj --no-integrate-operation` to project inserting the payload immediately before the target Workspace head; a clean projection is integrated as a one-parent line, preserving an in-progress target head above it. A conflicted projection is not integrated and falls back directly to the merge-shaped result. Other auto cases retain the existing shape fallback, and if every available result conflicts, `ajj` keeps the merge-shaped conflicted target Workspace so the conflict can be resolved there.
+With the default `prefer-clean`, `auto` settings, a single divergent Workspace containing one unique non-empty payload commit is tried tidiest-first. `ajj` uses `jj --no-integrate-operation` to project inserting the payload immediately before the target Workspace head; a clean projection is integrated as a one-parent line, preserving an in-progress target head above it. A conflicted projection is not integrated and falls back directly to the merge-shaped result. Other auto cases retain the existing shape fallback, and if every available result conflicts, `ajj` keeps the merge-shaped conflicted target Workspace so the conflict can be resolved there.
 
 #### Tidy-first Stack examples
 
@@ -220,19 +238,19 @@ N────┴─G  default@
 
 This is appropriate when the five payloads are independent and the merge itself records their integration.
 
-**Putting the same five Workspaces onto one deliberate line.** When the desired order is Main, then `J`, `K`, `L`, `M`, and `N`, use Line Stack and state that order explicitly:
+**Putting the same five Workspaces onto one deliberate line.** Human Line Stack has no separate target: every positional Handle is a selected Stack Input, the first selected payload stays on its existing base, and later payloads follow it. If `J` already descends from Main's `T` and the desired input order is `J`, `K`, `L`, `M`, `N`, run:
 
 ```sh
-ajj stack --line default J K L M N --yes
+ajj stack --line J K L M N --yes
 ```
 
 The payload history becomes:
 
 ```text
-A──T──J'──K'──L'──M'──N'
+A──T──J──K'──L'──M'──N'
 ```
 
-Selected Workspace cursors, including `default@`, advance to the resulting line. Line Stack previews the exact plan before mutation and stops at a conflict instead of silently choosing another ordering or falling back to a merge. Omitted Workspaces remain untouched.
+The selected Workspace cursors advance to the resulting line. Do not include `default` merely to express a target: that would select `default` as a Line Stack input. Use machine `integrate` with `strategy: "ordered-line"` when a line must be structurally anchored to the Current Workspace. Human Line Stack previews the exact plan before mutation and stops at a conflict instead of silently choosing another ordering or falling back to a merge. Omitted Workspaces remain untouched.
 
 `move-to-main` is for Workspaces that have no unique content or described commits and are only behind the Main Workspace. The TUI starts movable rows checked so you can quickly uncheck Workspaces to leave alone. Empty undescribed changes are ignored, but empty described merges still count as `ahead`/`behind`. If the Main Workspace head is empty, `ajj` advances each selected Workspace with `jj new main@-`, making the Workspace cursors siblings of the Main Workspace cursor; otherwise it uses `jj new main@`.
 
@@ -246,11 +264,91 @@ ajj stack --line web api docs
 
 This stacks `web`, `api`, and `docs` in that order and intentionally leaves unlisted Workspaces such as `release-notes` untouched. Human-facing preview and progress stay on stderr; stdout remains reserved for path/data protocols.
 
+### Recursive Current-Workspace integration
+
+For a disposable, repeatable A <- A1/A2/A3, then Main <- A walkthrough—including an explicit protocol for a coding agent to conduct the tour interactively—see the [recursive workspace integration tour](docs/recursive-integration-tour.md). Its repository-owned setup script creates an isolated fake Project under `/tmp` and stops before integration effects.
+
+`ajj integrate` is the strict machine counterpart to human Stacking. Its target is always the **Current Workspace** selected by cwd or `--repo`; `target.expectedWorkspace` and `target.expectedHeadCommit` are assertions, never routing instructions. It never falls back to configured Main. Existing human commands remain distinct:
+
+```sh
+# Human provider-default Stack: cwd/--repo resolves A as the target.
+ajj --repo "$A" stack A1 A2 A3 --yes
+
+# Human Line Stack: A1 is the first input/base; A is not an ambient target.
+ajj stack --line A1 A2 A3 --yes
+```
+
+For a recoverable machine operation, capture exact full heads only after committing/materializing every payload. The following request adopts A1/A2/A3 into A using ordinary Stack shape selection:
+
+```sh
+A=/absolute/path/to/workspaces/project/A
+A1=/absolute/path/to/workspaces/project/A1
+A2=/absolute/path/to/workspaces/project/A2
+A3=/absolute/path/to/workspaces/project/A3
+
+A_HEAD=$(jj -R "$A" --ignore-working-copy log -r @ --no-graph -T 'commit_id ++ "\n"')
+A1_HEAD=$(jj -R "$A1" --ignore-working-copy log -r @ --no-graph -T 'commit_id ++ "\n"')
+A2_HEAD=$(jj -R "$A2" --ignore-working-copy log -r @ --no-graph -T 'commit_id ++ "\n"')
+A3_HEAD=$(jj -R "$A3" --ignore-working-copy log -r @ --no-graph -T 'commit_id ++ "\n"')
+
+cat > /tmp/A-children.json <<JSON
+{"schema":"ajj-integrate-request-v1","operationId":"recursive-A-children-001","target":{"expectedWorkspace":"A","expectedHeadCommit":"$A_HEAD"},"strategy":"provider-default","payloads":[{"workspace":"A1","expectedHeadCommit":"$A1_HEAD"},{"workspace":"A2","expectedHeadCommit":"$A2_HEAD"},{"workspace":"A3","expectedHeadCommit":"$A3_HEAD"}]}
+JSON
+ajj --repo "$A" integrate --request-json /tmp/A-children.json
+```
+
+Use `"strategy":"single"` with exactly one payload. Use `"strategy":"ordered-line"` for a target-anchored line: A is the structural base, A1 contributes changes unique to A, A2 contributes changes unique to A1, and A3 contributes changes unique to A2. Request order is authoritative; A must not also appear in `payloads`. This differs from human `stack --line`, whose first selected input stays on its existing base.
+
+A successful command writes exactly one `ajj-integrate-receipt-v1` JSON object to stdout, bounded by the capability field `maxOutputBytes`. The receipt distinguishes `target.beforeHeadCommit`, `target.integratedTipCommit`, and the fresh empty cursor `target.afterHeadCommit`; every landed payload contains exact `changeId`, `inputCommit`, and `landedCommit` mappings. Stable Ajj machine error summaries are bounded and path-free. Child-process diagnostics go to stderr and are not included in `maxOutputBytes`; Ajj does not currently advertise a general stderr byte bound. The one documented-result adapter described below applies its own internal bound before parsing.
+
+After A represents its children, normal Tidy can close them even though their visible `Stacked` labels remain Main-relative:
+
+```sh
+ajj --repo "$A" tidy --yes
+
+MAIN=/absolute/path/to/workspaces/project/default
+MAIN_HEAD=$(jj -R "$MAIN" --ignore-working-copy log -r @ --no-graph -T 'commit_id ++ "\n"')
+A_HEAD=$(jj -R "$A" --ignore-working-copy log -r @ --no-graph -T 'commit_id ++ "\n"')
+cat > /tmp/Main-A.json <<JSON
+{"schema":"ajj-integrate-request-v1","operationId":"recursive-Main-A-001","target":{"expectedWorkspace":"default","expectedHeadCommit":"$MAIN_HEAD"},"strategy":"single","payloads":[{"workspace":"A","expectedHeadCommit":"$A_HEAD"}]}
+JSON
+ajj --repo "$MAIN" integrate --request-json /tmp/Main-A.json
+ajj --repo "$MAIN" tidy --yes
+```
+
+Normal close/tidy computes **Represented Elsewhere** against surviving registered Workspace heads outside the complete closing set, so a batch cannot protect itself. Missing-directory registered survivors still protect reachable work; missing candidates cannot be normally closed. Automatic Tidy never preselects Current, and configured Main is never closable.
+
+Discover the exact schemas, strategies, dispositions, operation-id pattern, jj minimum, and byte/count limits without a repository:
+
+```sh
+ajj capabilities --json
+```
+
+An interrupted operation must be inspected using its original Current Workspace and operation id; recovery never publishes stored prepublication work:
+
+```sh
+ajj --repo "$A" integrate --recover recursive-A-children-001 --json
+```
+
+Before publication, recovery either proves no live effect (`proved-not-landed`) or returns `unknown-effect`; it does not replay or restore. After the exact single publication boundary, recovery proves the detached chain and landed ancestry, then may finish cursor-file reconciliation. Conflicts remain in unpublished detached operations and return `failed` only after two no-effect proofs. Foreign/interleaved Jujutsu state observed before the final operation check returns `unknown-effect` with operator-review guidance. A terminal receipt is historical snapshot evidence linearized at that final full operation-id read; a direct `jj` operation after it is a later event, not something Ajj can atomically fence with its separate journal or output stream.
+
+Integration journals, locks, and terminal receipts live only under configured Main's canonical path:
+
+```text
+<configured-main>/.ajj/integrations/
+```
+
+Add `.ajj/integrations/` to the repository's `.gitignore`; this path-scoped state must not be committed or copied as a portable identity. Ajj intentionally generates no repository ID: canonical configured-Main/target paths plus exact commit assertions bind local recovery. Agentleman owns any separate logical Repo Identity and provenance ledger.
+
+Ajj requires jj 0.41.0 or newer. That release supplies detached `--no-integrate-operation` staging. jj exposes the resulting operation prefix only through its documented result sentence, so Ajj accepts that one bounded, anchored no-color/no-pager line, expands the prefix through machine-templated operation evidence, and fails closed on any wording or proof mismatch. No other human output or Jujutsu operation description is transaction authority.
+
+See [ADR 0010](docs/adr/0010-add-workspace-relative-integration-protocol.md) for the complete schema, commit-point, evidence, recovery, and compatibility contract.
+
 ### Inspect and housekeeping
 
 - `ajj list` — print Workspaces as Handle, markers, ahead, behind, action, path. Terminal output is aligned for reading; redirected output is tab-separated for parsing. Includes Current and Main markers. `ahead` counts Workspace commits not in Main except empty undescribed changes; `behind` counts Main commits not in that Workspace except empty undescribed changes.
 - `ajj list --paths` — print paths only.
-- `ajj tidy` — offer to close active Workspaces with no unique content or described commits, then remove empty leftover directories under the Project layout and report non-empty leftovers. Interactive runs let you uncheck Workspaces to leave alone; use `--yes` to close all tidy Workspaces without confirmation.
+- `ajj tidy` — offer to close normally Closable Workspaces represented by surviving registered Workspace heads, then remove empty leftover directories under the Project layout and report non-empty leftovers. Normally closable non-Current rows start checked; the visible `empty/unstacked/stacked/conflict/missing` labels remain Main-relative context rather than the close-safety predicate. The complete selected closing set is excluded from protection, and missing-directory registered survivors still protect reachable work. Press `f` to enable **Forced Tidying**, select otherwise unsafe or conflicted Workspaces, and explicitly confirm abandoning unique mutable changes. Use `--force` outside the TUI; `--force --yes` force-tidies every non-main, non-missing, non-Current Workspace without confirmation.
 - `ajj shell-init [bash|zsh]` — print shell integration so `create`, `open`, `close`, and `main` can change the current shell's directory.
 
 ## Config
@@ -263,11 +361,12 @@ Local repo override:
 
 - `<repo-root>/.ajj/config.yaml`
 
-Local state file for `next-unused` Handle selection:
+Local state paths:
 
-- `<repo-root>/.ajj/state.json`
+- `<repo-root>/.ajj/state.json` for `next-unused` Handle selection;
+- `<configured-main>/.ajj/integrations/` for path-bound machine integration journals, advisory locks, and terminal receipts.
 
-`state.json` should be ignored; `.ajj/config.yaml` may be committed when a Project wants shared settings.
+`state.json` and `.ajj/integrations/` should be ignored; `.ajj/config.yaml` may be committed when a Project wants shared settings. Integration state always lives under configured Main even when another Current Workspace is the integration target.
 
 Example:
 
@@ -326,7 +425,7 @@ See [`docs/assimilated-folders.md`](docs/assimilated-folders.md) for an agent-fr
 
 ## Interactive UX
 
-When stdin/stderr are terminals, `ajj` prefers in-place TUI interactions: selectors for `open`, `close`, `stack`, and `move-to-main`; yes/no confirmations; and prompts for missing setup values such as `init`'s Workspaces root. If you open a missing Workspace by Handle, `ajj` can offer to create it immediately. TUI footers show available keys and status legends so you can toggle options, for example close force mode or advanced stack options, without re-running with extra flags.
+When stdin/stderr are terminals, `ajj` prefers in-place TUI interactions: selectors for `open`, `close`, `tidy`, `stack`, and `move-to-main`; yes/no confirmations; and prompts for missing setup values such as `init`'s Workspaces root. In every multi-select TUI, Space toggles the current row and advances to the next visible row, so repeatedly pressing Space walks and selects the list; disabled rows are skipped without selection. If you open a missing Workspace by Handle, `ajj` can offer to create it immediately. Close/Tidy footers explain representation-based normal-close safety while retaining Main-relative status labels; Tidy leaves Current unselected. Other footers show available keys and status legends so you can toggle options, for example close force mode or advanced stack options, without re-running with extra flags.
 
 Human-facing output uses color on terminals and respects `NO_COLOR`.
 

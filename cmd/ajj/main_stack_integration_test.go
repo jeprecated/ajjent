@@ -135,13 +135,37 @@ func rebaseDestinations(args []string) []string {
 	return dests
 }
 
-func TestDetachedOperationIDParsesJJOutput(t *testing.T) {
-	got, err := detachedOperationID("Rebased 1 commits to destination\nOperation left uncommitted because --no-integrate-operation was requested: a1b2c3d4e5f6\n")
-	if err != nil {
-		t.Fatal(err)
+func TestDetachedOperationIDParsesOnlyDocumentedBoundedResult(t *testing.T) {
+	valid := "Operation left uncommitted because --no-integrate-operation was requested: a1b2c3d4e5f6"
+	tests := []struct {
+		name  string
+		out   string
+		want  string
+		valid bool
+	}{
+		{name: "exact line", out: valid + "\n", want: "a1b2c3d4e5f6", valid: true},
+		{name: "documented line after ignored progress", out: "Rebased 1 commits to destination\n" + valid + "\n", want: "a1b2c3d4e5f6", valid: true},
+		{name: "missing", out: "Rebased 1 commits\n"},
+		{name: "malformed id", out: "Operation left uncommitted because --no-integrate-operation was requested: xyz\n"},
+		{name: "short prefix", out: "Operation left uncommitted because --no-integrate-operation was requested: abc123\n"},
+		{name: "duplicate candidate", out: valid + "\n" + valid + "\n"},
+		{name: "changed wording", out: "Operation was left uncommitted because --no-integrate-operation was requested: a1b2c3d4e5f6\n"},
+		{name: "extra suffix", out: valid + " trailing\n"},
+		{name: "oversized", out: strings.Repeat("progress\n", detachedOperationResultMaxBytes/8+2) + valid + "\n"},
 	}
-	if got != "a1b2c3d4e5f6" {
-		t.Fatalf("expected detached operation id, got %q", got)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := detachedOperationID(test.out)
+			if test.valid {
+				if err != nil || got != test.want {
+					t.Fatalf("detachedOperationID() = %q, %v; want %q", got, err, test.want)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("detachedOperationID unexpectedly accepted %q as %q", test.out, got)
+			}
+		})
 	}
 }
 
@@ -185,7 +209,7 @@ func TestTidyProbeRejectsConcurrentOperationAfterConflictInspection(t *testing.T
 	})
 	origCombined := commandCombinedCaptureFn
 	commandCombinedCaptureFn = func(name string, args ...string) (string, error) {
-		return "Operation left uncommitted because --no-integrate-operation was requested: abc123\n", nil
+		return "Operation left uncommitted because --no-integrate-operation was requested: abc123def456\n", nil
 	}
 	t.Cleanup(func() { commandCombinedCaptureFn = origCombined })
 	mutations := 0
@@ -625,7 +649,7 @@ func jjRev(t *testing.T, repoPath string, revset string) string {
 
 func jjLog(t *testing.T, repoPath string, revset string) string {
 	t.Helper()
-	cmd := exec.Command("jj", "-R", repoPath, "log", "-r", revset, "--no-graph", "-T", "change_id.short() ++ \"\\n\"")
+	cmd := exec.Command("jj", "-R", repoPath, "--color=never", "--no-pager", "log", "-r", revset, "--no-graph", "-T", "change_id.short() ++ \"\\n\"")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("jj log -r %s failed: %v\n%s", revset, err, out)
@@ -635,7 +659,7 @@ func jjLog(t *testing.T, repoPath string, revset string) string {
 
 func jjDescription(t *testing.T, repoPath string, revset string) string {
 	t.Helper()
-	cmd := exec.Command("jj", "-R", repoPath, "log", "-r", revset, "--no-graph", "-T", "description.first_line() ++ \"\\n\"")
+	cmd := exec.Command("jj", "-R", repoPath, "--color=never", "--no-pager", "log", "-r", revset, "--no-graph", "-T", "description.first_line() ++ \"\\n\"")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("jj description -r %s failed: %v\n%s", revset, err, out)
@@ -759,7 +783,7 @@ func TestForceCloseUnstackedDescendantWorkspaceAbandonsItsChanges(t *testing.T) 
 // not resolve (e.g. the commits were abandoned). It is used by the unstacked-force-close
 // test, where abandoned change ids legitimately no longer exist in the default view.
 func jjLogOrEmpty(repoPath string, revset string) string {
-	cmd := exec.Command("jj", "-R", repoPath, "log", "-r", revset, "--no-graph", "-T", "change_id.short() ++ \"\\n\"")
+	cmd := exec.Command("jj", "-R", repoPath, "--color=never", "--no-pager", "log", "-r", revset, "--no-graph", "-T", "change_id.short() ++ \"\\n\"")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return ""

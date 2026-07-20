@@ -33,7 +33,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          jj_version=0.42.0
+          jj_version=0.41.0
           case "$(uname -m)" in
             x86_64) target=x86_64-unknown-linux-musl ;;
             aarch64|arm64) target=aarch64-unknown-linux-musl ;;
