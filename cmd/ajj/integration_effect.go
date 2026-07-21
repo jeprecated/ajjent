@@ -6,6 +6,7 @@ import (
 	"io"
 	"math"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -17,6 +18,8 @@ var integrationCursorReconcileHook = func(string) error { return nil }
 var integrationDetachedCommandHook = func(string) error { return nil }
 var integrationPublishHook = func(string) error { return nil }
 var integrationNoEffectProofHook = func(string) error { return nil }
+var integrationOmittedRestoreHook = func(string) error { return nil }
+var integrationPayloadCursorHook = func(string) error { return nil }
 var integrationBoundedCaptureFn = runIntegrationCommandCaptureBounded
 
 // Kept as a compatibility test seam while detached-boundary tests migrate.
@@ -156,7 +159,7 @@ func executePreparedIntegrationOperation(repoRoot string, cfg config, project st
 	if request.Strategy == integrationStrategyOrderedLine {
 		authority, err = buildDetachedOrderedLineTransaction(repoRoot, cfg, project, target, binding, &record, request)
 	} else {
-		authority, err = buildDetachedStackTransaction(target.Path, cfg.Stack, binding, &record, request)
+		authority, err = buildDetachedStackTransaction(cfg, project, target, binding, &record, request)
 	}
 	if err != nil {
 		if boundary := new(integrationBoundaryInterruption); errors.As(err, &boundary) {
@@ -174,6 +177,9 @@ func executePreparedIntegrationOperation(repoRoot string, cfg config, project st
 func buildDetachedOrderedLineTransaction(repoRoot string, cfg config, project string, target integrationTargetResolution, binding integrationStateBinding, record *integrationOperationRecord, request integrationRequestV1) (integrationFreshPublicationAuthority, error) {
 	if len(record.PreparedState.Target.FrontierCommits) == 0 || len(record.PreparedState.Payloads) != len(request.Payloads) {
 		return integrationFreshPublicationAuthority{}, errors.New("ordered-line prepared evidence is incomplete")
+	}
+	if record.PreparedState.StackShape != "ordered-line" {
+		return integrationFreshPublicationAuthority{}, errors.New("ordered-line prepared shape is invalid")
 	}
 	operationID := record.BeforeOperationID
 	destination := append([]string(nil), record.PreparedState.Target.FrontierCommits...)
@@ -197,14 +203,19 @@ func buildDetachedOrderedLineTransaction(repoRoot string, cfg config, project st
 			}
 			operationID = record.GraphOperationID
 		}
-		conflicted, err := integrationRevisionMatchesAtOperation(target.Path, operationID, "conflicts() & ("+source+")")
+		destinationTerms := make([]string, 0, len(destination))
+		for _, commit := range destination {
+			destinationTerms = append(destinationTerms, "commit_id("+commit+")")
+		}
+		landedSource := "(" + source + " & (" + strings.Join(destinationTerms, " | ") + ")::)"
+		conflicted, err := integrationRevisionMatchesAtOperation(target.Path, operationID, "conflicts() & ("+landedSource+")")
 		if err != nil {
 			return integrationFreshPublicationAuthority{}, err
 		}
 		if conflicted {
 			return integrationFreshPublicationAuthority{}, newIntegrationProtocolError(integrationErrorConflict, "ordered-line payload is conflicted")
 		}
-		tips, err := integrationCommitIDsAtOperation(target.Path, operationID, "heads("+source+")")
+		tips, err := integrationCommitIDsAtOperation(target.Path, operationID, "heads("+landedSource+")")
 		if err != nil || len(tips) != 1 {
 			return integrationFreshPublicationAuthority{}, errors.New("ordered-line payload does not resolve to one staged tip")
 		}
@@ -215,35 +226,19 @@ func buildDetachedOrderedLineTransaction(repoRoot string, cfg config, project st
 		return integrationFreshPublicationAuthority{}, errors.New("ordered-line has no integrated tip")
 	}
 
-	emptyAncestors := topEmptyMutableAncestorsRevset(request.Target.ExpectedWorkspace + "@")
-	hasEmptyAncestors, err := integrationRevisionMatchesAtOperation(target.Path, operationID, emptyAncestors)
-	if err != nil {
-		return integrationFreshPublicationAuthority{}, err
-	}
-	if hasEmptyAncestors {
-		if err := stageDetachedCommand(target.Path, operationID, binding, record, "abandon", "-r", emptyAncestors); err != nil {
-			return integrationFreshPublicationAuthority{}, err
-		}
-		operationID = record.GraphOperationID
-	}
+	// Never abandon or rewrite the asserted target head, including an empty or
+	// described one. It is the exact base of the ordered child line.
 	if err := stageDetachedCommand(target.Path, operationID, binding, record, "new", finalTip); err != nil {
 		return integrationFreshPublicationAuthority{}, err
 	}
 	operationID = record.GraphOperationID
 
-	workspacePaths, err := integrationSelectedWorkspacePaths(repoRoot, cfg, project, target.Handle, request)
-	if err != nil {
+	if err := stageDetachedPayloadCursors(repoRoot, cfg, project, target, binding, record, request); err != nil {
 		return integrationFreshPublicationAuthority{}, err
 	}
-	for _, payload := range request.Payloads {
-		path, ok := workspacePaths[payload.Workspace]
-		if !ok {
-			return integrationFreshPublicationAuthority{}, errors.New("ordered-line payload Workspace path is unavailable")
-		}
-		if err := stageDetachedCommand(path, operationID, binding, record, "new", finalTip); err != nil {
-			return integrationFreshPublicationAuthority{}, err
-		}
-		operationID = record.GraphOperationID
+	operationID = record.GraphOperationID
+	if err := stageDetachedRestoreOmittedWorkspaceHeads(cfg, project, target, binding, record, request); err != nil {
+		return integrationFreshPublicationAuthority{}, err
 	}
 	if err := cleanupDetachedGeneratedEmptyHeads(target.Path, binding, record); err != nil {
 		return integrationFreshPublicationAuthority{}, err
@@ -284,10 +279,22 @@ func sameIntegrationCommitSet(left, right []string) bool {
 	return reflect.DeepEqual(leftCopy, rightCopy)
 }
 
-func integrationSelectedWorkspacePaths(repoRoot string, cfg config, project, currentHandle string, request integrationRequestV1) (map[string]string, error) {
-	refs, err := listWorkspaceRefs(repoRoot)
+func integrationSelectedWorkspacePaths(repoRoot, operationID string, cfg config, project, currentHandle string, request integrationRequestV1) (map[string]string, error) {
+	out, err := integrationQuery(repoRoot, operationID, "workspace", "list", "-T", "name ++ \"\\t\" ++ root ++ \"\\n\"")
 	if err != nil {
 		return nil, err
+	}
+	refs := []workspaceRef{}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 2)
+		ref := workspaceRef{Handle: strings.TrimSpace(parts[0])}
+		if len(parts) == 2 {
+			ref.Root = cleanWorkspaceRoot(parts[1])
+		}
+		refs = append(refs, ref)
 	}
 	wanted := map[string]struct{}{}
 	for _, payload := range request.Payloads {
@@ -310,27 +317,128 @@ func integrationSelectedWorkspacePaths(repoRoot string, cfg config, project, cur
 	return paths, nil
 }
 
-func buildDetachedStackTransaction(repoPath string, stack stackConfig, binding integrationStateBinding, record *integrationOperationRecord, request integrationRequestV1) (integrationFreshPublicationAuthority, error) {
-	probeChain := append([]string(nil), record.DetachedOperationIDs...)
-	probeGraph := record.GraphOperationID
-	cleanTidy, tidyConflicted, err := tryDetachedSingleTidyStack(repoPath, stack, binding, record, request)
-	if err != nil {
-		return integrationFreshPublicationAuthority{}, err
+// resolvePreparedStackShapeAtOperation freezes provider shape before the
+// operation record is persisted. Every graph query is pinned to beforeOperationId.
+// Divergent immutable contributions cannot be rebased, so they select the exact-
+// parent merge transaction even when provider configuration preferred a line.
+func resolvePreparedStackShapeAtOperation(repoPath, operationID string, prepared integrationPreparedStateV1, requested string) (string, error) {
+	mode := strings.TrimSpace(strings.ToLower(requested))
+	if mode == "" {
+		mode = "auto"
 	}
-	if !cleanTidy {
-		restoreDetachedChain(record, probeChain, probeGraph)
-		forcedShape := ""
-		if tidyConflicted {
-			forcedShape = "merge"
+	if mode != "auto" && mode != "linear" && mode != "merge" {
+		return "", fmt.Errorf("invalid shape %q (expected auto, linear, or merge)", requested)
+	}
+	frontierTerms := []string{}
+	seen := map[string]struct{}{}
+	hasImmutable := false
+	for _, payload := range prepared.Payloads {
+		source := integrationPreparedChangeRevset(payload.Changes)
+		immutable, err := integrationRevisionMatchesAtOperation(repoPath, operationID, "immutable() & ("+source+")")
+		if err != nil {
+			return "", err
 		}
-		if err := stageDetachedGenericStack(repoPath, stack, forcedShape, binding, record, request); err != nil {
+		hasImmutable = hasImmutable || immutable
+		for _, commit := range payload.FrontierCommits {
+			if !integrationCommitIDRE.MatchString(commit) {
+				return "", errors.New("prepared Stack frontier contains an invalid commit id")
+			}
+			if _, duplicate := seen[commit]; duplicate {
+				continue
+			}
+			seen[commit] = struct{}{}
+			frontierTerms = append(frontierTerms, "commit_id("+commit+")")
+		}
+	}
+	if len(frontierTerms) == 0 {
+		return "", errors.New("prepared Stack has no payload frontier evidence")
+	}
+	sort.Strings(frontierTerms)
+	frontier, err := integrationCommitIDsAtOperation(repoPath, operationID, "heads("+strings.Join(frontierTerms, " | ")+")")
+	if err != nil || len(frontier) == 0 {
+		if err == nil {
+			err = errors.New("prepared Stack has no exact frontier heads")
+		}
+		return "", err
+	}
+	if len(prepared.Payloads) == 1 {
+		if hasImmutable {
+			source := integrationPreparedChangeRevset(prepared.Payloads[0].Changes)
+			anchored, err := orderedLineContributionAnchoredAtOperation(repoPath, operationID, source, []string{prepared.Target.HeadCommit})
+			if err != nil {
+				return "", err
+			}
+			if !anchored {
+				return "merge", nil
+			}
+		}
+		return "linear", nil
+	}
+	if hasImmutable {
+		return "merge", nil
+	}
+	if mode == "merge" {
+		return "merge", nil
+	}
+	if mode == "linear" {
+		if len(frontier) != 1 {
+			return "", fmt.Errorf("shape linear requires a single frontier head, found %d", len(frontier))
+		}
+		return "linear", nil
+	}
+	if len(frontier) == 1 {
+		return "linear", nil
+	}
+	return "merge", nil
+}
+
+func buildDetachedStackTransaction(cfg config, project string, target integrationTargetResolution, binding integrationStateBinding, record *integrationOperationRecord, request integrationRequestV1) (integrationFreshPublicationAuthority, error) {
+	repoPath := target.Path
+	shape := record.PreparedState.StackShape
+	if shape != "linear" && shape != "merge" {
+		return integrationFreshPublicationAuthority{}, errors.New("prepared Stack shape is invalid")
+	}
+	operationID := record.BeforeOperationID
+	anchor := record.PreparedState.Target.HeadCommit
+	finalTips := []string{}
+	if shape == "linear" {
+		destination := []string{anchor}
+		for _, payload := range record.PreparedState.Payloads {
+			tip, nextOperation, err := stageDetachedAnchoredContribution(repoPath, operationID, binding, record, payload, destination)
+			if err != nil {
+				return integrationFreshPublicationAuthority{}, err
+			}
+			operationID = nextOperation
+			destination = []string{tip}
+		}
+		finalTips = destination
+	} else {
+		// Merge shape never rebases a contribution. Its exact parents are the
+		// asserted target anchor plus the frozen payload frontier heads, reduced
+		// only by ancestry. This works for mutable, immutable, and mixed batches.
+		terms := []string{"commit_id(" + anchor + ")"}
+		for _, payload := range record.PreparedState.Payloads {
+			for _, tip := range payload.FrontierCommits {
+				terms = append(terms, "commit_id("+tip+")")
+			}
+		}
+		var err error
+		finalTips, err = integrationCommitIDsAtOperation(repoPath, operationID, "heads("+strings.Join(terms, " | ")+")")
+		if err != nil {
 			return integrationFreshPublicationAuthority{}, err
 		}
+		sort.Strings(finalTips)
 	}
-	if err := finalizeDetachedStackTarget(repoPath, binding, record, request); err != nil {
+	if len(finalTips) == 0 {
+		return integrationFreshPublicationAuthority{}, errors.New("detached Stack has no integrated child tip")
+	}
+	if err := stageDetachedFinalTargetCursor(repoPath, operationID, binding, record, finalTips); err != nil {
 		return integrationFreshPublicationAuthority{}, err
 	}
-	if err := stageDetachedPayloadCursors(repoPath, binding, record, request); err != nil {
+	if err := stageDetachedPayloadCursors(target.Path, cfg, project, target, binding, record, request); err != nil {
+		return integrationFreshPublicationAuthority{}, err
+	}
+	if err := stageDetachedRestoreOmittedWorkspaceHeads(cfg, project, target, binding, record, request); err != nil {
 		return integrationFreshPublicationAuthority{}, err
 	}
 	if err := cleanupDetachedGeneratedEmptyHeads(repoPath, binding, record); err != nil {
@@ -339,11 +447,187 @@ func buildDetachedStackTransaction(repoPath string, stack stackConfig, binding i
 	return sealDetachedIntegrationTransaction(repoPath, binding, record, request)
 }
 
+func stageDetachedAnchoredContribution(repoPath, operationID string, binding integrationStateBinding, record *integrationOperationRecord, payload integrationPreparedPayloadV1, destination []string) (string, string, error) {
+	source := integrationPreparedChangeRevset(payload.Changes)
+	if source == "" || len(destination) == 0 {
+		return "", operationID, errors.New("detached Stack contribution evidence is incomplete")
+	}
+	anchored, err := orderedLineContributionAnchoredAtOperation(repoPath, operationID, source, destination)
+	if err != nil {
+		return "", operationID, err
+	}
+	if !anchored {
+		args := []string{"rebase", "-r", source}
+		for _, commit := range destination {
+			args = append(args, "-d", commit)
+		}
+		if err := stageDetachedCommand(repoPath, operationID, binding, record, args...); err != nil {
+			return "", operationID, err
+		}
+		operationID = record.GraphOperationID
+	}
+	destinationTerms := make([]string, 0, len(destination))
+	for _, commit := range destination {
+		destinationTerms = append(destinationTerms, "commit_id("+commit+")")
+	}
+	landedSource := "(" + source + " & (" + strings.Join(destinationTerms, " | ") + ")::)"
+	conflicted, err := integrationRevisionMatchesAtOperation(repoPath, operationID, "conflicts() & ("+landedSource+")")
+	if err != nil || conflicted {
+		if err == nil {
+			err = newIntegrationProtocolError(integrationErrorConflict, "detached Stack contribution is conflicted")
+		}
+		return "", operationID, err
+	}
+	tips, err := integrationCommitIDsAtOperation(repoPath, operationID, "heads("+landedSource+")")
+	if err != nil || len(tips) == 0 {
+		return "", operationID, errors.New("detached Stack contribution has no exact tip")
+	}
+	if len(tips) > 1 {
+		args := append([]string{"new"}, tips...)
+		args = append(args, "-m", "chore: merge")
+		if err := stageDetachedCommand(repoPath, operationID, binding, record, args...); err != nil {
+			return "", operationID, err
+		}
+		operationID = record.GraphOperationID
+		generated, genErr := integrationWorkspaceHeadCommitAtOperation(repoPath, operationID, record.PreparedState.Target.Workspace)
+		if genErr != nil {
+			return "", operationID, genErr
+		}
+		record.GeneratedCommitIDs = append(record.GeneratedCommitIDs, generated)
+		conflicted, err := integrationRevisionMatchesAtOperation(repoPath, operationID, "conflicts() & @")
+		if err != nil || conflicted {
+			if err == nil {
+				err = newIntegrationProtocolError(integrationErrorConflict, "detached Stack contribution merge is conflicted")
+			}
+			return "", operationID, err
+		}
+		tip, err := integrationWorkspaceHeadCommitAtOperation(repoPath, operationID, record.PreparedState.Target.Workspace)
+		return tip, operationID, err
+	}
+	return tips[0], operationID, nil
+}
+
+func stageDetachedFinalTargetCursor(repoPath, operationID string, binding integrationStateBinding, record *integrationOperationRecord, tips []string) error {
+	tips = uniqueNonEmptyStrings(tips)
+	if len(tips) == 0 {
+		return errors.New("detached integration has no final child tip")
+	}
+	args := append([]string{"new"}, tips...)
+	if len(tips) > 1 {
+		args = append(args, "-m", "chore: merge")
+	}
+	if err := stageDetachedCommand(repoPath, operationID, binding, record, args...); err != nil {
+		return err
+	}
+	operationID = record.GraphOperationID
+	if len(tips) > 1 {
+		generated, genErr := integrationWorkspaceHeadCommitAtOperation(repoPath, operationID, record.PreparedState.Target.Workspace)
+		if genErr != nil {
+			return genErr
+		}
+		record.GeneratedCommitIDs = append(record.GeneratedCommitIDs, generated)
+		conflicted, err := integrationRevisionMatchesAtOperation(repoPath, operationID, "conflicts() & @")
+		if err != nil || conflicted {
+			if err == nil {
+				err = newIntegrationProtocolError(integrationErrorConflict, "detached Stack merge result is conflicted")
+			}
+			return err
+		}
+		if err := stageDetachedCommand(repoPath, operationID, binding, record, "new", "@"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func stageDetachedRestoreOmittedWorkspaceHeads(cfg config, project string, target integrationTargetResolution, binding integrationStateBinding, record *integrationOperationRecord, request integrationRequestV1) error {
+	operationID := record.GraphOperationID
+	if operationID == "" {
+		operationID = record.BeforeOperationID
+	}
+	selected := map[string]struct{}{request.Target.ExpectedWorkspace: {}}
+	for _, payload := range request.Payloads {
+		selected[payload.Workspace] = struct{}{}
+	}
+	rootsOut, err := integrationQuery(target.Path, record.BeforeOperationID, "workspace", "list", "-T", `name ++ "\t" ++ root ++ "\n"`)
+	if err != nil {
+		return err
+	}
+	roots := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(rootsOut), "\n") {
+		parts := strings.SplitN(line, "\t", 2)
+		if len(parts) != 2 || validateWorkspaceHandle(parts[0]) != nil {
+			return errors.New("omitted Workspace path evidence is invalid")
+		}
+		roots[parts[0]] = cleanWorkspaceRoot(parts[1])
+	}
+	for _, before := range record.BeforeRepositoryView.Workspaces {
+		if _, isSelected := selected[before.Workspace]; isSelected {
+			continue
+		}
+		after, err := integrationWorkspaceHeadCommitAtOperation(target.Path, operationID, before.Workspace)
+		if err != nil {
+			return err
+		}
+		if after == before.CommitID {
+			continue
+		}
+		if err := integrationOmittedRestoreHook("before-" + before.Workspace); err != nil {
+			return &integrationBoundaryInterruption{err: err}
+		}
+		selectedHeads := []string{request.Target.ExpectedWorkspace + "@"}
+		for _, payload := range request.Payloads {
+			selectedHeads = append(selectedHeads, payload.Workspace+"@")
+		}
+		uniqueOut, err := integrationQuery(target.Path, record.BeforeOperationID, "log", "-r", "(::"+before.Workspace+"@ & ~::("+strings.Join(selectedHeads, " | ")+"))", "--no-graph", "-T", `change_id ++ "\n"`)
+		if err != nil {
+			return err
+		}
+		uniqueChanges := uniqueNonEmptyStrings(strings.Split(uniqueOut, "\n"))
+		for _, changeID := range uniqueChanges {
+			if !integrationFullChangeIDRE.MatchString(changeID) {
+				return errors.New("omitted Workspace change evidence is invalid")
+			}
+		}
+		path := roots[before.Workspace]
+		if path == "" {
+			path = filepath.Join(cfg.WorkspacesRoot, project, before.Workspace)
+		}
+		if !workspacePathExists(path) {
+			return errors.New("omitted Workspace path is unavailable")
+		}
+		if err := stageDetachedCommand(path, operationID, binding, record, "edit", before.CommitID); err != nil {
+			return err
+		}
+		operationID = record.GraphOperationID
+		if len(uniqueChanges) > 0 {
+			terms := make([]string, 0, len(uniqueChanges))
+			for _, changeID := range uniqueChanges {
+				terms = append(terms, "change_id("+changeID+")")
+			}
+			rewritten, err := integrationCommitIDsAtOperation(target.Path, operationID, "("+strings.Join(terms, " | ")+") & ~::commit_id("+before.CommitID+")")
+			if err != nil {
+				return err
+			}
+			if len(rewritten) > 0 {
+				if err := stageDetachedCommand(target.Path, operationID, binding, record, "abandon", "-r", "("+strings.Join(rewritten, " | ")+")"); err != nil {
+					return err
+				}
+				operationID = record.GraphOperationID
+			}
+		}
+		if err := integrationOmittedRestoreHook("after-" + before.Workspace); err != nil {
+			return &integrationBoundaryInterruption{err: err}
+		}
+	}
+	return nil
+}
+
 func cleanupDetachedGeneratedEmptyHeads(repoPath string, binding integrationStateBinding, record *integrationOperationRecord) error {
 	if record.GraphOperationID == "" {
 		return nil
 	}
-	const disposable = `visible_heads() & empty() & description("") & mutable() & ~working_copies()`
+	const disposable = `visible_heads() & empty() & mutable() & ~working_copies()`
 	before, err := integrationChangeCommitPairsAtOperation(repoPath, record.BeforeOperationID, disposable)
 	if err != nil {
 		return err
@@ -353,19 +637,12 @@ func cleanupDetachedGeneratedEmptyHeads(repoPath string, binding integrationStat
 		return err
 	}
 	beforeCommits := make(map[string]struct{}, len(before))
-	beforeChanges := make(map[string]struct{}, len(before))
 	for _, item := range before {
 		beforeCommits[item.CommitID] = struct{}{}
-		beforeChanges[item.ChangeID] = struct{}{}
 	}
 	generated := make([]string, 0, len(staged))
 	for _, item := range staged {
 		if _, existed := beforeCommits[item.CommitID]; existed {
-			continue
-		}
-		if _, evolvedUnrelated := beforeChanges[item.ChangeID]; evolvedUnrelated {
-			// Leave an evolved pre-existing head for the full repository-view proof
-			// to reject rather than concealing an unrelated graph mutation.
 			continue
 		}
 		generated = append(generated, item.CommitID)
@@ -476,234 +753,42 @@ func sealDetachedIntegrationTransaction(repoPath string, binding integrationStat
 	return integrationFreshPublicationAuthority{Record: stored}, nil
 }
 
-func tryDetachedSingleTidyStack(repoPath string, stack stackConfig, binding integrationStateBinding, record *integrationOperationRecord, request integrationRequestV1) (bool, bool, error) {
-	conflictStrategy, err := resolveStackConflictStrategy(stack.ConflictStrategy)
-	if err != nil {
-		return false, false, err
-	}
-	if !eligibleForSingleInputTidyProbe(integrationRequestPayloadHandles(request), stack, conflictStrategy) || len(record.PreparedState.Payloads) != 1 || len(record.PreparedState.Payloads[0].Changes) != 1 {
-		return false, false, nil
-	}
-	change := record.PreparedState.Payloads[0].Changes[0]
-	cannotProbe, err := integrationRevisionMatches(repoPath, "", fmt.Sprintf("(immutable() | conflicts()) & commit_id(%s)", change.CommitID))
-	if err != nil || cannotProbe {
-		return false, false, err
-	}
-	payloadIsAncestor, err := integrationRevisionIsAncestor(repoPath, "", change.CommitID, request.Target.ExpectedWorkspace+"@")
-	if err != nil {
-		return false, false, err
-	}
-	targetIsAncestor, err := integrationRevisionIsAncestor(repoPath, "", request.Target.ExpectedWorkspace+"@", change.CommitID)
-	if err != nil || payloadIsAncestor || targetIsAncestor {
-		return false, false, err
-	}
-	if err := stageDetachedCommand(repoPath, record.BeforeOperationID, binding, record, "rebase", "-r", change.CommitID, "-B", request.Target.ExpectedWorkspace+"@"); err != nil {
-		return false, false, err
-	}
-	conflicted, err := integrationRevisionMatchesAtOperation(repoPath, record.GraphOperationID, "conflicts() & ::"+request.Target.ExpectedWorkspace+"@")
-	if err != nil {
-		return false, false, err
-	}
-	return !conflicted, conflicted, nil
-}
-
-func restoreDetachedChain(record *integrationOperationRecord, operationIDs []string, graphOperationID string) {
-	record.DetachedOperationIDs = append([]string(nil), operationIDs...)
-	record.GraphOperationID = graphOperationID
-	if graphOperationID == "" {
-		record.Phase = integrationPhasePrepared
-	}
-}
-
-func stageDetachedGenericStack(repoPath string, stack stackConfig, forcedShape string, binding integrationStateBinding, record *integrationOperationRecord, request integrationRequestV1) error {
-	baseChain := append([]string(nil), record.DetachedOperationIDs...)
-	baseGraph := record.GraphOperationID
-	mode, modeReason, err := resolveStackRebaseMode(repoPath, stack.RebaseMode)
-	if err != nil {
-		return err
-	}
-	requestedShape := stack.Shape
-	if forcedShape != "" {
-		requestedShape = forcedShape
-	}
-	shape, shapeReason, destinations, err := resolveStackShape(repoPath, integrationRequestPayloadHandles(request), requestedShape)
-	if err != nil {
-		return err
-	}
-	conflicted, err := stageDetachedRebaseAttempt(repoPath, record.BeforeOperationID, binding, record, request, mode, modeReason, shape, shapeReason, destinations)
-	if err != nil {
-		return err
-	}
-	strategy, err := resolveStackConflictStrategy(stack.ConflictStrategy)
-	if err != nil {
-		return err
-	}
-	originalRequested := strings.TrimSpace(strings.ToLower(stack.Shape))
-	if originalRequested == "" {
-		originalRequested = "auto"
-	}
-	if forcedShape == "" && strategy == "prefer-clean" && conflicted && originalRequested == "auto" {
-		alternative := "merge"
-		if shape == "merge" {
-			alternative = "linear"
-		}
-		altShape, altReason, altDestinations, altErr := resolveStackShape(repoPath, integrationRequestPayloadHandles(request), alternative)
-		if altErr == nil {
-			restoreDetachedChain(record, baseChain, baseGraph)
-			altConflicted, stageErr := stageDetachedRebaseAttempt(repoPath, record.BeforeOperationID, binding, record, request, mode, modeReason, altShape, altReason, altDestinations)
-			if stageErr != nil {
-				return stageErr
-			}
-			conflicted = altConflicted
-			if altConflicted && altShape == "linear" {
-				restoreDetachedChain(record, baseChain, baseGraph)
-				mergeShape, mergeReason, mergeDestinations, mergeErr := resolveStackShape(repoPath, integrationRequestPayloadHandles(request), "merge")
-				if mergeErr != nil {
-					return mergeErr
-				}
-				conflicted, err = stageDetachedRebaseAttempt(repoPath, record.BeforeOperationID, binding, record, request, mode, modeReason, mergeShape, mergeReason, mergeDestinations)
-				if err != nil {
-					return err
-				}
-			}
-		}
-	}
-	if conflicted {
-		return newIntegrationProtocolError(integrationErrorConflict, "detached Stack result is conflicted")
-	}
-	return nil
-}
-
-func stageDetachedRebaseAttempt(repoPath, baseOperationID string, binding integrationStateBinding, record *integrationOperationRecord, request integrationRequestV1, mode, _, shape, _ string, baseDestinations []string) (bool, error) {
-	flag := "-b"
-	destinations := append([]string(nil), baseDestinations...)
-	if mode == "revision" {
-		flag = "-r"
-		parents, err := parentChangeIDs(repoPath)
-		if err != nil {
-			return false, err
-		}
-		preserved, err := parentChangeIDsToPreserve(repoPath, parents, baseDestinations)
-		if err != nil {
-			return false, err
-		}
-		destinations = append(preserved, destinations...)
-	}
-	destinations = uniqueNonEmptyStrings(destinations)
-	if shape == "linear" && len(destinations) == 0 {
-		return false, errors.New("detached Stack has no destination")
-	}
-	allDescendants := true
-	for _, destination := range destinations {
-		descendant, err := integrationRevisionIsAncestor(repoPath, "", request.Target.ExpectedWorkspace+"@", destination)
-		if err != nil {
-			return false, err
-		}
-		if !descendant {
-			allDescendants = false
-		}
-	}
-	if !allDescendants {
-		args := []string{"rebase", flag, request.Target.ExpectedWorkspace + "@"}
-		for _, destination := range destinations {
-			args = append(args, "-d", destination)
-		}
-		if err := stageDetachedCommand(repoPath, baseOperationID, binding, record, args...); err != nil {
-			return false, err
-		}
-	}
+func stageDetachedPayloadCursors(repoRoot string, cfg config, project string, target integrationTargetResolution, binding integrationStateBinding, record *integrationOperationRecord, request integrationRequestV1) error {
 	operationID := record.GraphOperationID
-	if operationID == "" {
-		operationID = baseOperationID
+	parents, err := integrationCommitIDsAtOperation(target.Path, operationID, "parents("+request.Target.ExpectedWorkspace+"@)")
+	if err != nil || len(parents) != 1 {
+		return errors.New("integrated target has no exact cursor parent")
 	}
-	return integrationRevisionMatchesAtOperation(repoPath, operationID, "conflicts() & "+request.Target.ExpectedWorkspace+"@")
-}
-
-func finalizeDetachedStackTarget(repoPath string, binding integrationStateBinding, record *integrationOperationRecord, request integrationRequestV1) error {
-	operationID := record.GraphOperationID
-	if operationID == "" {
-		operationID = record.BeforeOperationID
-	}
-	emptyAncestors := topEmptyMutableAncestorsRevset(request.Target.ExpectedWorkspace + "@")
-	hasEmptyAncestors, err := integrationRevisionMatchesAtOperation(repoPath, operationID, emptyAncestors)
+	integratedTip := parents[0]
+	workspacePaths, err := integrationSelectedWorkspacePaths(repoRoot, record.BeforeOperationID, cfg, project, target.Handle, request)
 	if err != nil {
 		return err
 	}
-	if hasEmptyAncestors {
-		if err := stageDetachedCommand(repoPath, operationID, binding, record, "abandon", "-r", emptyAncestors); err != nil {
-			return err
-		}
-		operationID = record.GraphOperationID
-	}
-	landed, err := preparedChangesReachableFromTargetAtOperation(repoPath, operationID, request.Target.ExpectedWorkspace, record.PreparedState)
-	if err != nil {
-		return err
-	}
-	if !landed {
-		tips, err := detachedPreparedFrontier(repoPath, operationID, record.PreparedState)
-		if err != nil {
-			return err
-		}
-		args := append([]string{"new"}, tips...)
-		if err := stageDetachedCommand(repoPath, operationID, binding, record, args...); err != nil {
-			return err
-		}
-		operationID = record.GraphOperationID
-	}
-	parents, err := integrationCommitIDsAtOperation(repoPath, operationID, "parents("+request.Target.ExpectedWorkspace+"@)")
-	if err != nil {
-		return err
-	}
-	if len(parents) > 1 {
-		description, err := integrationQuery(repoPath, operationID, "log", "-r", request.Target.ExpectedWorkspace+"@", "--no-graph", "-T", "description")
-		if err != nil {
-			return err
-		}
-		if strings.TrimSpace(description) == "" {
-			if err := stageDetachedCommand(repoPath, operationID, binding, record, "describe", "-r", request.Target.ExpectedWorkspace+"@", "-m", "chore: merge"); err != nil {
-				return err
-			}
-			operationID = record.GraphOperationID
-		}
-		if err := stageDetachedCommand(repoPath, operationID, binding, record, "new", request.Target.ExpectedWorkspace+"@"); err != nil {
-			return err
-		}
-	}
-	conflicted, err := integrationRevisionMatchesAtOperation(repoPath, record.GraphOperationID, "conflicts() & ::"+request.Target.ExpectedWorkspace+"@")
-	if err != nil {
-		return err
-	}
-	if conflicted {
-		return newIntegrationProtocolError(integrationErrorConflict, "detached Stack target is conflicted")
-	}
-	return nil
-}
-
-func detachedPreparedFrontier(repoPath, operationID string, prepared integrationPreparedStateV1) ([]string, error) {
-	changeTerms := []string{}
-	for _, payload := range prepared.Payloads {
-		for _, change := range payload.Changes {
-			changeTerms = append(changeTerms, "change_id("+change.ChangeID+")")
-		}
-	}
-	if len(changeTerms) == 0 {
-		return nil, errors.New("prepared integration has no changes")
-	}
-	return integrationCommitIDsAtOperation(repoPath, operationID, "heads("+strings.Join(changeTerms, " | ")+")")
-}
-
-func stageDetachedPayloadCursors(repoPath string, binding integrationStateBinding, record *integrationOperationRecord, request integrationRequestV1) error {
 	for _, payload := range request.Payloads {
-		operationID := record.GraphOperationID
-		contains, err := integrationRevisionMatchesAtOperation(repoPath, operationID, request.Target.ExpectedWorkspace+"@ & ::"+payload.Workspace+"@")
+		if err := integrationPayloadCursorHook("before-" + payload.Workspace); err != nil {
+			return &integrationBoundaryInterruption{err: err}
+		}
+		path, ok := workspacePaths[payload.Workspace]
+		if !ok {
+			return errors.New("selected payload Workspace path is unavailable")
+		}
+		// Never rebase the materialized payload cursor itself: doing so can move
+		// the landed change a second time. Create a fresh empty cursor directly on
+		// the already-proved integrated tip instead.
+		if err := stageDetachedCommand(path, operationID, binding, record, "new", integratedTip); err != nil {
+			return err
+		}
+		operationID = record.GraphOperationID
+		head, err := integrationWorkspaceHeadCommitAtOperation(target.Path, operationID, payload.Workspace)
 		if err != nil {
 			return err
 		}
-		if contains {
-			continue
-		}
-		if err := stageDetachedCommand(repoPath, operationID, binding, record, "rebase", "-r", payload.Workspace+"@", "-d", request.Target.ExpectedWorkspace+"@"); err != nil {
+		record.PayloadCursors = append(record.PayloadCursors, integrationPayloadCursorV1{Workspace: payload.Workspace, HeadCommit: head})
+		if err := writeIntegrationOperationRecordAtomic(binding.StateDir, *record); err != nil {
 			return err
+		}
+		if err := integrationPayloadCursorHook("after-" + payload.Workspace); err != nil {
+			return &integrationBoundaryInterruption{err: err}
 		}
 	}
 	return nil
@@ -713,7 +798,10 @@ func stageDetachedCommand(repoPath, baseOperationID string, binding integrationS
 	if err := integrationDetachedCommandHook("before-command"); err != nil {
 		return &integrationBoundaryInterruption{err: err}
 	}
-	args := []string{"-R", repoPath, "--color=never", "--no-pager", "--at-op=" + baseOperationID, "--no-integrate-operation"}
+	// Detached commands operate only on the exact provider operation. Ignoring
+	// working-copy files prevents post-capture filesystem edits from being
+	// snapshotted into either the live or detached graph.
+	args := []string{"-R", repoPath, "--color=never", "--no-pager", "--ignore-working-copy", "--at-op=" + baseOperationID, "--no-integrate-operation"}
 	args = append(args, commandArgs...)
 	out, err := commandCombinedCaptureFn("jj", args...)
 	if err != nil {
@@ -760,6 +848,22 @@ func detachedTargetState(repoPath, operationID, targetHandle string) (integratio
 	}
 	if len(parents) != 1 {
 		return integrationTargetAdvancedStateV1{}, errors.New("staged integration target does not have one integrated tip")
+	}
+	empty, err := integrationRevisionMatchesAtOperation(repoPath, operationID, "empty() & "+targetHandle+"@")
+	if err != nil || !empty {
+		return integrationTargetAdvancedStateV1{}, errors.New("staged integration target cursor is not empty")
+	}
+	conflicted, err := integrationRevisionMatchesAtOperation(repoPath, operationID, "conflicts() & "+targetHandle+"@")
+	if err != nil || conflicted {
+		return integrationTargetAdvancedStateV1{}, errors.New("staged integration target cursor is conflicted")
+	}
+	mutable, err := integrationRevisionMatchesAtOperation(repoPath, operationID, "mutable() & "+targetHandle+"@")
+	if err != nil || !mutable {
+		return integrationTargetAdvancedStateV1{}, errors.New("staged integration target cursor is immutable")
+	}
+	description, err := integrationQuery(repoPath, operationID, "log", "-r", targetHandle+"@", "--no-graph", "-T", "description")
+	if err != nil || description != "" {
+		return integrationTargetAdvancedStateV1{}, errors.New("staged integration target cursor is described")
 	}
 	return integrationTargetAdvancedStateV1{IntegratedTipCommit: parents[0], AfterHeadCommit: head}, nil
 }
@@ -841,14 +945,14 @@ func finishPublishedIntegration(repoRoot string, cfg config, project string, tar
 	if err != nil || current != record.GraphOperationID || record.TargetAdvancedState == nil {
 		return emitIntegrationFailure(record.OperationID, record.RequestDigest, request, newIntegrationProtocolError(integrationErrorUnknownEffect, "published integration graph changed before receipt"), integrationBatchUnknownEffect, integrationNextActionOperatorReview)
 	}
-	if err := updateIntegratedWorkspaceFiles(repoRoot, cfg, project, target.Handle, request); err != nil {
+	if err := updateIntegratedWorkspaceFiles(repoRoot, record.GraphOperationID, cfg, project, target.Handle, request); err != nil {
 		return emitIntegrationFailure(record.OperationID, record.RequestDigest, request, err, integrationBatchUnknownEffect, integrationNextActionRecover)
 	}
 	current, err = currentOperationFullID(target.Path)
 	if err != nil || current != record.GraphOperationID {
 		return emitIntegrationFailure(record.OperationID, record.RequestDigest, request, newIntegrationProtocolError(integrationErrorUnknownEffect, "workspace update changed the published integration operation"), integrationBatchUnknownEffect, integrationNextActionOperatorReview)
 	}
-	mappings, err := proveIntegrationPayloadMappings(target.Path, target.Handle, record.PreparedState)
+	mappings, err := proveIntegrationPayloadMappingsAtOperation(target.Path, current, target.Handle, record.PreparedState)
 	if err != nil || !integrationPayloadMappingsEqual(mappings, record.StagedPayloadMappings) {
 		if err == nil {
 			err = errors.New("published payload mappings differ from the staged detached graph")
@@ -868,14 +972,18 @@ func finishPublishedIntegration(repoRoot string, cfg config, project string, tar
 	return completeSuccessfulIntegration(binding, record, request, mappings)
 }
 
-func updateIntegratedWorkspaceFiles(repoRoot string, cfg config, project, currentHandle string, request integrationRequestV1) error {
-	refs, err := listWorkspaceRefs(repoRoot)
+func updateIntegratedWorkspaceFiles(repoRoot, operationID string, cfg config, project, currentHandle string, request integrationRequestV1) error {
+	out, err := integrationQuery(repoRoot, operationID, "workspace", "list", "-T", `name ++ "\t" ++ root ++ "\n"`)
 	if err != nil {
 		return err
 	}
-	byHandle := make(map[string]workspaceRef, len(refs))
-	for _, ref := range refs {
-		byHandle[ref.Handle] = ref
+	byHandle := map[string]workspaceRef{}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		parts := strings.SplitN(line, "\t", 2)
+		if len(parts) != 2 || validateWorkspaceHandle(parts[0]) != nil {
+			return errors.New("integrated Workspace path evidence is invalid")
+		}
+		byHandle[parts[0]] = workspaceRef{Handle: parts[0], Root: cleanWorkspaceRoot(parts[1])}
 	}
 	handles := []string{request.Target.ExpectedWorkspace}
 	for _, payload := range request.Payloads {
@@ -904,10 +1012,11 @@ func revalidatePreparedIntegrationForEffect(repoRoot string, cfg config, project
 	if err != nil || current != record.BeforeOperationID {
 		return newIntegrationProtocolError(integrationErrorUnknownEffect, "repository operation changed before integration effects")
 	}
-	if err := materializeIntegrationWorkspaceHeads(repoRoot, cfg, project, target.Handle, request); err != nil {
+	if err := validateIntegrationWorkspacePathsAtOperation(repoRoot, record.BeforeOperationID, cfg, project, target.Handle, request); err != nil {
 		return newIntegrationProtocolError(integrationErrorUnknownEffect, "workspace state changed before integration effects")
 	}
-	prepared, err := validateIntegrationAssertions(repoRoot, request)
+	prepared, err := validateIntegrationAssertionsAtOperation(repoRoot, record.BeforeOperationID, request)
+	prepared.StackShape = record.PreparedState.StackShape
 	if err != nil || !integrationPreparedStatesEqual(prepared, record.PreparedState) {
 		return newIntegrationProtocolError(integrationErrorUnknownEffect, "prepared target or payload state changed before integration effects")
 	}
@@ -922,21 +1031,6 @@ func preparedChangesReachableFromTargetAtOperation(repoPath, operationID, target
 	for _, payload := range prepared.Payloads {
 		for _, change := range payload.Changes {
 			commits, err := integrationCommitIDsAtOperation(repoPath, operationID, fmt.Sprintf("(change_id(%s) & ::%s@)", change.ChangeID, targetHandle))
-			if err != nil {
-				return false, err
-			}
-			if len(commits) != 1 {
-				return false, nil
-			}
-		}
-	}
-	return true, nil
-}
-
-func preparedChangesReachableFromTarget(repoPath, targetHandle string, prepared integrationPreparedStateV1) (bool, error) {
-	for _, payload := range prepared.Payloads {
-		for _, change := range payload.Changes {
-			commits, err := integrationCommitIDs(repoPath, fmt.Sprintf("(change_id(%s) & ::%s@)", change.ChangeID, targetHandle))
 			if err != nil {
 				return false, err
 			}
@@ -982,23 +1076,6 @@ func integrationPayloadMappingsEqual(left, right [][]integrationReceiptChangeV1)
 	return true
 }
 
-func proveIntegrationPayloadMappings(repoPath, targetHandle string, prepared integrationPreparedStateV1) ([][]integrationReceiptChangeV1, error) {
-	mappings := make([][]integrationReceiptChangeV1, len(prepared.Payloads))
-	for i, payload := range prepared.Payloads {
-		if len(payload.Changes) == 0 {
-			return nil, errors.New("prepared payload has no exact change evidence")
-		}
-		for _, change := range payload.Changes {
-			commits, err := integrationCommitIDs(repoPath, fmt.Sprintf("(change_id(%s) & ::%s@)", change.ChangeID, targetHandle))
-			if err != nil || len(commits) != 1 {
-				return nil, errors.New("could not prove one landed payload change")
-			}
-			mappings[i] = append(mappings[i], integrationReceiptChangeV1{ChangeID: change.ChangeID, InputCommit: change.CommitID, LandedCommit: commits[0]})
-		}
-	}
-	return mappings, nil
-}
-
 func verifyIntegrationTerminalGraph(repoPath, targetHandle string, record integrationOperationRecord) error {
 	if record.TargetAdvancedState == nil || record.GraphOperationID == "" {
 		return newIntegrationProtocolError(integrationErrorUnknownEffect, "terminal integration graph evidence is incomplete")
@@ -1007,11 +1084,14 @@ func verifyIntegrationTerminalGraph(repoPath, targetHandle string, record integr
 	if err != nil || operationID != record.GraphOperationID || record.CommitPointOperation != record.GraphOperationID {
 		return newIntegrationProtocolError(integrationErrorUnknownEffect, "repository operation changed before terminal integration receipt")
 	}
-	afterHead, err := integrationWorkspaceHeadCommit(repoPath, targetHandle)
+	afterHead, err := integrationWorkspaceHeadCommitAtOperation(repoPath, operationID, targetHandle)
 	if err != nil || afterHead != record.TargetAdvancedState.AfterHeadCommit {
 		return newIntegrationProtocolError(integrationErrorUnknownEffect, "target Workspace changed before terminal integration receipt")
 	}
-	landed, err := preparedChangesReachableFromTarget(repoPath, targetHandle, record.PreparedState)
+	if err := provePreservedIntegrationTargetAtOperation(repoPath, operationID, targetHandle, record.PreparedState.Target); err != nil {
+		return newIntegrationProtocolError(integrationErrorUnknownEffect, "asserted target commit is no longer preserved in result ancestry")
+	}
+	landed, err := preparedChangesReachableFromTargetAtOperation(repoPath, operationID, targetHandle, record.PreparedState)
 	if err != nil || !landed {
 		return newIntegrationProtocolError(integrationErrorUnknownEffect, "payload ancestry changed before terminal integration receipt")
 	}
@@ -1028,7 +1108,12 @@ func completeSuccessfulIntegration(binding integrationStateBinding, record integ
 	receipt := integrationReceiptV1{
 		Schema: integrationReceiptSchemaV1, OperationID: record.OperationID, RequestDigest: record.RequestDigest,
 		Strategy: request.Strategy, BatchDisposition: integrationBatchSucceeded,
-		Target:       integrationReceiptTargetV1{Workspace: request.Target.ExpectedWorkspace, BeforeHeadCommit: request.Target.ExpectedHeadCommit, IntegratedTipCommit: record.TargetAdvancedState.IntegratedTipCommit, AfterHeadCommit: record.TargetAdvancedState.AfterHeadCommit},
+		Target: integrationReceiptTargetV1{
+			Workspace: request.Target.ExpectedWorkspace, BeforeHeadCommit: request.Target.ExpectedHeadCommit,
+			BeforeHeadChangeID: record.PreparedState.Target.HeadChangeID, PreservationDisposition: integrationTargetPreservedExact,
+			PreservedCommit: request.Target.ExpectedHeadCommit, IntegratedTipCommit: record.TargetAdvancedState.IntegratedTipCommit,
+			AfterHeadCommit: record.TargetAdvancedState.AfterHeadCommit,
+		},
 		Payloads:     make([]integrationReceiptPayloadV1, 0, len(request.Payloads)),
 		JJOperations: integrationJJOperationsV1{BeforeEffect: record.BeforeOperationID, CommitPoint: record.CommitPointOperation},
 	}
@@ -1068,10 +1153,11 @@ func proveAndCompleteNoEffect(repoRoot string, cfg config, project string, targe
 		if err != nil || !integrationRepositoryViewsEqual(view, record.BeforeRepositoryView) {
 			return errors.New("live repository view no longer proves no effect")
 		}
-		if err := materializeIntegrationWorkspaceHeads(repoRoot, cfg, project, target.Handle, request); err != nil {
+		if err := validateIntegrationWorkspacePathsAtOperation(repoRoot, current, cfg, project, target.Handle, request); err != nil {
 			return err
 		}
-		prepared, err := validateIntegrationAssertions(repoRoot, request)
+		prepared, err := validateIntegrationAssertionsAtOperation(repoRoot, current, request)
+		prepared.StackShape = record.PreparedState.StackShape
 		if err != nil || !integrationPreparedStatesEqual(prepared, record.PreparedState) {
 			return errors.New("live prepared state no longer proves no effect")
 		}
@@ -1101,7 +1187,11 @@ func completeFailedIntegration(repoPath string, binding integrationStateBinding,
 	receipt := integrationReceiptV1{
 		Schema: integrationReceiptSchemaV1, OperationID: record.OperationID, RequestDigest: record.RequestDigest,
 		Strategy: request.Strategy, BatchDisposition: integrationBatchFailed,
-		Target:   integrationReceiptTargetV1{Workspace: request.Target.ExpectedWorkspace, BeforeHeadCommit: request.Target.ExpectedHeadCommit},
+		Target: integrationReceiptTargetV1{
+			Workspace: request.Target.ExpectedWorkspace, BeforeHeadCommit: request.Target.ExpectedHeadCommit,
+			BeforeHeadChangeID: record.PreparedState.Target.HeadChangeID, PreservationDisposition: integrationTargetProvedUnchanged,
+			PreservedCommit: request.Target.ExpectedHeadCommit,
+		},
 		Payloads: make([]integrationReceiptPayloadV1, 0, len(request.Payloads)), JJOperations: integrationJJOperationsV1{BeforeEffect: record.BeforeOperationID},
 		Error: &integrationReceiptErrorV1{Code: errorCode, Message: message, NextAction: integrationNextActionRetryNewOperation},
 	}

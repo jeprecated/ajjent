@@ -302,6 +302,9 @@ func TestIntegrationRecordRejectsForgedPreparedStateAndTerminalReceipt(t *testin
 			record.Receipt.Payloads[0].EvidenceDigest = integrationPayloadReceiptEvidenceDigest(record.Receipt.Payloads[0])
 		},
 		func(record *integrationOperationRecord) { record.TargetAdvancedState = nil },
+		func(record *integrationOperationRecord) { record.PayloadCursors = nil },
+		func(record *integrationOperationRecord) { record.PayloadCursors[0].Workspace = "charlie" },
+		func(record *integrationOperationRecord) { record.PayloadCursors[0].HeadCommit = "not-a-commit" },
 	} {
 		forged := cloneIntegrationRecord(t, validTerminal)
 		mutate(&forged)
@@ -605,7 +608,7 @@ func TestIntegrationRecoveryFailsClosedAfterForeignJJOperation(t *testing.T) {
 	}
 }
 
-func TestRunIntegrateRejectsDirtyTargetFromRealJJState(t *testing.T) {
+func TestRunIntegrateAcceptsNonEmptyUndescribedTargetFromRealJJState(t *testing.T) {
 	paths := setupRealStackRepo(t)
 	if err := os.WriteFile(filepath.Join(paths.speedPath, "dirty.txt"), []byte("dirty\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -618,11 +621,53 @@ func TestRunIntegrateRejectsDirtyTargetFromRealJJState(t *testing.T) {
 	out, _, err := captureOutput(func() error {
 		return runIntegrate([]string{"--repo", paths.speedPath, "--request-json", "-"})
 	})
-	if err == nil {
-		t.Fatal("dirty target unexpectedly produced a prepared operation")
+	if err != nil {
+		t.Fatalf("non-empty undescribed target integration failed: %v\n%s", err, out)
 	}
-	if receipt := decodeIntegrationReceipt(t, out); receipt.Error == nil || receipt.Error.Code != integrationErrorAssertionFailed {
-		t.Fatalf("dirty target returned the wrong failure: %+v", receipt)
+	receipt := decodeIntegrationReceipt(t, out)
+	if receipt.BatchDisposition != integrationBatchSucceeded || receipt.Target.PreservedCommit != targetCommit || jjRevsetCount(t, paths.defaultPath, targetCommit+" & ::speed@") != 1 {
+		t.Fatalf("non-empty undescribed target was not preserved exactly: %+v", receipt.Target)
+	}
+}
+
+func TestRunIntegrateAcceptsNonEmptyDescribedTargetWithoutExternalCursorMutation(t *testing.T) {
+	paths := setupRealStackRepo(t)
+	ignoreIntegrationStateInFixture(t, paths.defaultPath)
+	runJJ(t, "-R", paths.defaultPath, "commit", "-m", "ignore integration state")
+	updateIntegrationFixtureWorkspaces(t, paths.defaultPath, paths.speedPath, paths.childPath)
+	if err := os.WriteFile(filepath.Join(paths.speedPath, "current-a.txt"), []byte("materialized A work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runJJ(t, "-R", paths.speedPath, "file", "track", "root:current-a.txt")
+	runJJ(t, "-R", paths.speedPath, "describe", "-m", "A materialized current work")
+	mainBefore := jjFullCommitID(t, paths.defaultPath, "default@")
+	targetCommit := jjFullCommitID(t, paths.speedPath, "speed@")
+	payloadCommit := jjFullCommitID(t, paths.defaultPath, "agm-speed-transition@")
+	request := validIntegrationRequestBytes("described-materialized-target", "speed", "agm-speed-transition", targetCommit, payloadCommit)
+	withIntegrationStdin(t, string(request))
+	out, _, err := captureOutput(func() error { return runIntegrate([]string{"--repo", paths.speedPath, "--request-json", "-"}) })
+	if err != nil {
+		t.Fatalf("non-empty described target integration failed: %v\n%s", err, out)
+	}
+	receipt := decodeIntegrationReceipt(t, out)
+	if receipt.BatchDisposition != integrationBatchSucceeded || receipt.Target.PreservedCommit != targetCommit || receipt.Target.BeforeHeadCommit != targetCommit {
+		t.Fatalf("described target receipt lacks exact preservation: %+v", receipt.Target)
+	}
+	if jjRevsetCount(t, paths.defaultPath, targetCommit+" & ::speed@") != 1 {
+		t.Fatalf("asserted target commit is not exact result ancestry: %s", targetCommit)
+	}
+	if got := jjFullCommitID(t, paths.defaultPath, "default@"); got != mainBefore {
+		t.Fatalf("configured Main moved: before=%s after=%s", mainBefore, got)
+	}
+	if got := jjRevsetCount(t, paths.defaultPath, `empty() & description("") & speed@`); got != 1 {
+		t.Fatalf("target did not finish on one fresh empty cursor: %d", got)
+	}
+	replayOut, _, replayErr := captureOutput(func() error {
+		withIntegrationStdin(t, string(request))
+		return runIntegrate([]string{"--repo", paths.speedPath, "--request-json", "-"})
+	})
+	if replayErr != nil || replayOut != out {
+		t.Fatalf("terminal replay changed exact receipt: err=%v\nfirst=%s\nreplay=%s", replayErr, out, replayOut)
 	}
 }
 
@@ -669,7 +714,7 @@ func TestOversizedStoredTerminalReceiptReturnsBoundedMachineError(t *testing.T) 
 	record.Phase = integrationPhaseTerminal
 	setTestSuccessfulOperation(&record, strings.Repeat("2", 128), payloadCommit, targetCommit)
 	record.Receipt = successfulTestIntegrationReceipt(record)
-	changes := make([]integrationReceiptChangeV1, integrationMaxReceiptChanges)
+	changes := make([]integrationReceiptChangeV1, integrationMaxReceiptChanges+1)
 	for i := range changes {
 		changes[i] = integrationReceiptChangeV1{
 			ChangeID: strings.Repeat("a", 32), InputCommit: payloadCommit, LandedCommit: payloadCommit,
@@ -682,8 +727,8 @@ func TestOversizedStoredTerminalReceiptReturnsBoundedMachineError(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(encodedReceipt) <= integrationMaxOutputBytes {
-		t.Fatalf("oversized receipt fixture is only %d bytes", len(encodedReceipt))
+	if len(encodedReceipt) > integrationMaxRecordBytes {
+		t.Fatalf("over-limit receipt fixture exceeds the bounded journal: %d bytes", len(encodedReceipt))
 	}
 	writeForgedIntegrationRecord(t, stateDir, record)
 	recordPath, _ := integrationOperationRecordPath(stateDir, record.OperationID)
@@ -772,11 +817,17 @@ func TestValidateIntegrationAssertionsRejectsConflictedTarget(t *testing.T) {
 	withCommandCapture(t, func(name string, args ...string) (string, error) {
 		joined := strings.Join(args, " ")
 		switch {
+		case strings.Contains(joined, "op log"):
+			return strings.Repeat("f", 128) + "\n", nil
+		case strings.Contains(joined, " -T change_id"):
+			return strings.Repeat("a", 32), nil
 		case strings.Contains(joined, "empty() & alpha@"):
 			return commit + "\n", nil
 		case strings.Contains(joined, " -T description"):
 			return "", nil
 		case strings.Contains(joined, "conflicts() & alpha@"):
+			return commit + "\n", nil
+		case strings.Contains(joined, "mutable() & alpha@"):
 			return commit + "\n", nil
 		case strings.Contains(joined, "commit_id"):
 			return commit + "\n", nil
@@ -798,6 +849,10 @@ func TestValidateIntegrationAssertionsRejectsConflictedHeadsAndOperationChanges(
 	withCommandCapture(t, func(name string, args ...string) (string, error) {
 		joined := strings.Join(args, " ")
 		switch {
+		case strings.Contains(joined, "op log"):
+			return strings.Repeat("f", 128) + "\n", nil
+		case strings.Contains(joined, " -T change_id"):
+			return strings.Repeat("a", 32), nil
 		case strings.Contains(joined, "empty() & alpha@"):
 			return commit + "\n", nil
 		case strings.Contains(joined, " -T description"):
@@ -806,6 +861,8 @@ func TestValidateIntegrationAssertionsRejectsConflictedHeadsAndOperationChanges(
 			return commit + "\n", nil
 		case strings.Contains(joined, "conflicts() & alpha@"):
 			return "", nil
+		case strings.Contains(joined, "mutable() & alpha@"):
+			return commit + "\n", nil
 		case strings.Contains(joined, "commit_id"):
 			return commit + "\n", nil
 		default:
@@ -894,7 +951,8 @@ func cloneIntegrationRecord(t *testing.T, record integrationOperationRecord) int
 
 func integrationTestPreparedState() integrationPreparedStateV1 {
 	return integrationPreparedStateV1{
-		Target: integrationPreparedTargetV1{Workspace: "alpha", HeadCommit: strings.Repeat("a", 40)},
+		Target:     integrationPreparedTargetV1{Workspace: "alpha", HeadCommit: strings.Repeat("a", 40), HeadChangeID: strings.Repeat("a", 32)},
+		StackShape: "linear",
 		Payloads: []integrationPreparedPayloadV1{{
 			Workspace: "bravo", HeadCommit: strings.Repeat("b", 40),
 			Changes:         []integrationPreparedChangeV1{{ChangeID: strings.Repeat("c", 32), CommitID: strings.Repeat("b", 40)}},
@@ -922,10 +980,20 @@ func setTestSuccessfulOperation(record *integrationOperationRecord, operationID,
 	record.CommitPointOperation = operationID
 	record.GraphOperationID = operationID
 	record.DetachedOperationIDs = []string{operationID}
+	record.PreparedState.StackShape = "linear"
 	state := &integrationTargetAdvancedStateV1{IntegratedTipCommit: integratedTip, AfterHeadCommit: afterHead}
 	record.StagedTargetState = state
 	record.StagedRepositoryView = integrationTestRepositoryView(afterHead)
 	record.StagedRepositoryView.Workspaces[0].CommitID = afterHead
+	for i, payload := range record.PreparedState.Payloads {
+		cursorHead := strings.Repeat(string(rune('f'-i)), 40)
+		record.PayloadCursors = append(record.PayloadCursors, integrationPayloadCursorV1{Workspace: payload.Workspace, HeadCommit: cursorHead})
+		for j := range record.StagedRepositoryView.Workspaces {
+			if record.StagedRepositoryView.Workspaces[j].Workspace == payload.Workspace {
+				record.StagedRepositoryView.Workspaces[j].CommitID = cursorHead
+			}
+		}
+	}
 	copyState := *state
 	record.TargetAdvancedState = &copyState
 	record.StagedPayloadMappings = make([][]integrationReceiptChangeV1, len(record.PreparedState.Payloads))
@@ -943,7 +1011,8 @@ func successfulTestIntegrationReceipt(record integrationOperationRecord) *integr
 		Strategy: integrationStrategySingle, BatchDisposition: integrationBatchSucceeded,
 		Target: integrationReceiptTargetV1{
 			Workspace: record.PreparedState.Target.Workspace, BeforeHeadCommit: record.PreparedState.Target.HeadCommit,
-			IntegratedTipCommit: payload.HeadCommit, AfterHeadCommit: strings.Repeat("d", 40),
+			BeforeHeadChangeID: record.PreparedState.Target.HeadChangeID, PreservationDisposition: integrationTargetPreservedExact,
+			PreservedCommit: record.PreparedState.Target.HeadCommit, IntegratedTipCommit: payload.HeadCommit, AfterHeadCommit: strings.Repeat("d", 40),
 		},
 		Payloads: []integrationReceiptPayloadV1{{
 			Workspace: payload.Workspace, InputHeadCommit: payload.HeadCommit, Disposition: integrationPayloadLanded,
@@ -961,7 +1030,11 @@ func failedTestIntegrationReceipt(record integrationOperationRecord) *integratio
 	receipt := &integrationReceiptV1{
 		Schema: integrationReceiptSchemaV1, OperationID: record.OperationID, RequestDigest: record.RequestDigest,
 		Strategy: integrationStrategySingle, BatchDisposition: integrationBatchFailed,
-		Target: integrationReceiptTargetV1{Workspace: record.PreparedState.Target.Workspace, BeforeHeadCommit: record.PreparedState.Target.HeadCommit},
+		Target: integrationReceiptTargetV1{
+			Workspace: record.PreparedState.Target.Workspace, BeforeHeadCommit: record.PreparedState.Target.HeadCommit,
+			BeforeHeadChangeID: record.PreparedState.Target.HeadChangeID, PreservationDisposition: integrationTargetProvedUnchanged,
+			PreservedCommit: record.PreparedState.Target.HeadCommit,
+		},
 		Payloads: []integrationReceiptPayloadV1{{
 			Workspace: payload.Workspace, InputHeadCommit: payload.HeadCommit, Disposition: integrationPayloadProvedNotLanded,
 			Changes: []integrationReceiptChangeV1{{ChangeID: payload.Changes[0].ChangeID, InputCommit: payload.Changes[0].CommitID}},

@@ -7,7 +7,7 @@ A <- A1/A2/A3
 Main <- A
 ```
 
-The fixture intentionally creates A1, A2, and A3 **before** a later commit in A. `ordered-line` can therefore demonstrate that request order is anchored to A's current graph frontier instead of floating on the children’s older base. Independent Workspace B is omitted from every request and must survive unchanged.
+The fixture intentionally creates A1, A2, and A3 **before** a later commit in A. `ordered-line` can therefore demonstrate that request order is anchored after A's exact asserted current commit—preserving that commit unchanged—instead of floating on the children’s older base. Independent Workspace B is omitted from every request and must survive unchanged.
 
 > **Disposable fixture only.** Every command below must resolve beneath the generated `TOUR_ROOT`. Do not substitute a real repository. Integration effects are real Jujutsu operations inside the fixture.
 
@@ -109,8 +109,8 @@ REQUEST=$(tour_make_children_request "$STRATEGY")
 cat "$REQUEST"
 ```
 
-- `ordered-line` places A1, A2, and A3 in exact request order on A's newer frontier.
-- `provider-default` uses ordinary Stack mechanics and lets Ajj choose its clean linear/merge shape.
+- `ordered-line` preserves A's exact newer asserted commit and places A1, A2, and A3 after it in exact request order.
+- `provider-default` uses Ajj's custom detached machine transaction: it freezes a clean linear/merge shape from prepared evidence, preserves A as the exact base, and journals every generated merge and cursor before one publication point.
 
 The generated JSON contains exact full heads read after all fixture commits were materialized. A is absent from `payloads` because it is already the structural target. For example, the helper produced this strict body in one run (all 40-hex heads are run-specific):
 
@@ -192,7 +192,7 @@ default@ edeffc6d (unchanged) ─────────────> 67dad29f 
 B@ 60a21133 -> fff40df9 B: omitted payload ────────┘
 ```
 
-Thus A1 -> A2 -> A3 is anchored above A's newer commit. Main/default and B still point to their original branches. With `provider-default`, the exact linear/merge shape may differ because ordinary Stack mechanics select it; what remains normative is that all exact payload changes are mapped and reachable from A, A advances to a fresh cursor, and Main/B remain unchanged.
+Thus A1 -> A2 -> A3 is anchored above A's newer commit. Main/default and B still point to their original branches. With `provider-default`, the exact linear/merge shape may differ because Ajj applies the configured Stack shape policy inside its custom detached machine transaction; it does not invoke ordinary human Stack mechanics. What remains normative is that all exact payload changes are mapped and reachable from A, A advances to a fresh cursor, and Main/B remain unchanged.
 
 Prove isolation:
 

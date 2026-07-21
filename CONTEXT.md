@@ -33,7 +33,7 @@ An ordered human-facing variant of Stacking that uses CLI argument order or TUI 
 _Avoid_: Rebasing all workspaces, merging everything, target-anchored machine integration
 
 **Machine Integration**:
-A strict, recoverable JSON operation that adopts exact payload changes into the Current Workspace selected by cwd or `--repo`. `single` and `provider-default` reuse ordinary Stack mechanics; machine `ordered-line` is structurally anchored to the Current Workspace and is distinct from human Line Stacking.
+A strict, recoverable JSON operation that preserves the exact non-conflicted Current Workspace head as an unchanged structural base, adopts exact payload changes after it, and creates the final fresh cursor inside Ajj's detached transaction. The target may be empty/non-empty and described/undescribed. `single` and `provider-default` retain provider child-shape choices; machine `ordered-line` follows exact request order and is distinct from human Line Stacking.
 _Avoid_: Main-targeted fallback, human Line Stacking, repository identity
 
 **Machine Creation**:
@@ -104,7 +104,7 @@ _Avoid_: Disposable workspace, empty or Main-stacked workspace
 - Main-targeted **Stacking** targets the **Main Workspace**.
 - **Line Stacking** targets an ordered line determined by **Stack Input** order, not necessarily the **Main Workspace**; a resolved Workspace must not be inserted merely as an anchor because it would become a selected input.
 - **Machine Integration** always targets the **Current Workspace** selected by cwd or `--repo`; request target fields are exact assertions only.
-- Target-anchored machine `ordered-line` starts from the Current Workspace frontier, whereas human **Line Stacking** starts from its first selected payload.
+- Target-anchored machine `ordered-line` starts from the exact asserted Current Workspace commit and preserves it unchanged, whereas human **Line Stacking** starts from its first selected payload.
 - **Stacking** uses one or more **Stack Inputs**.
 - Main-targeted **Stack Inputs** are non-main **Workspaces**.
 - When Main-targeted **Stacking** produces a clean Stack merge, it keeps an **In-progress Workspace Head** in the target Workspace above that merge rather than turning its changes into the merge itself.

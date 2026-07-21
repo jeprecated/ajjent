@@ -157,8 +157,8 @@ func TestRecursiveWorkspaceLifecyclePublicCLI(t *testing.T) {
 			}
 			for _, payload := range mainReceipt.Payloads {
 				for _, mapping := range payload.Changes {
-					if jjRevsetCount(t, paths.main, mapping.LandedCommit+" & ::default@") != 1 {
-						t.Fatalf("closing A lost landed nested change %s", mapping.LandedCommit)
+					if jjRevsetCount(t, paths.main, "change_id("+mapping.ChangeID+") & ::default@") != 1 {
+						t.Fatalf("closing A lost landed nested change %s", mapping.ChangeID)
 					}
 				}
 			}

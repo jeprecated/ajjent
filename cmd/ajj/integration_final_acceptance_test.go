@@ -50,7 +50,7 @@ func TestADRIntegrationJSONExamplesUseStrictProtocolValidators(t *testing.T) {
 		GraphOperationID:     receipt.JJOperations.CommitPoint,
 		DetachedOperationIDs: []string{receipt.JJOperations.CommitPoint},
 		PreparedState: integrationPreparedStateV1{
-			Target: integrationPreparedTargetV1{Workspace: request.Target.ExpectedWorkspace, HeadCommit: request.Target.ExpectedHeadCommit},
+			Target: integrationPreparedTargetV1{Workspace: request.Target.ExpectedWorkspace, HeadCommit: request.Target.ExpectedHeadCommit, HeadChangeID: receipt.Target.BeforeHeadChangeID},
 			Payloads: []integrationPreparedPayloadV1{{
 				Workspace:  request.Payloads[0].Workspace,
 				HeadCommit: request.Payloads[0].ExpectedHeadCommit,

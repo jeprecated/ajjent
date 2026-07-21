@@ -137,7 +137,7 @@ func TestRunIntegrateOrderedLineLaterPayloadMultiCommitPreservesExactOrderAndMap
 	}
 }
 
-func TestRunIntegrateOrderedLineSupportsMultipleTargetFrontierCommits(t *testing.T) {
+func TestRunIntegrateOrderedLineAnchorsExactMultiParentTargetCommit(t *testing.T) {
 	paths := setupRealStackMergeRepo(t, false)
 	ignoreIntegrationStateInFixture(t, paths.defaultPath)
 	runJJ(t, "-R", paths.defaultPath, "commit", "-m", "ignore integration state")
@@ -176,13 +176,11 @@ func TestRunIntegrateOrderedLineSupportsMultipleTargetFrontierCommits(t *testing
 	if err != nil {
 		t.Fatalf("multiple-frontier fixture does not prepare: %v", err)
 	}
-	if len(prepared.Target.FrontierCommits) != 2 || !sameIntegrationCommitSet(prepared.Target.FrontierCommits, []string{left, right}) {
-		t.Fatalf("target frontier is not the exact two deterministic tips: got=%v want=%v", prepared.Target.FrontierCommits, []string{left, right})
+	if len(prepared.Target.FrontierCommits) != 1 || prepared.Target.FrontierCommits[0] != before {
+		t.Fatalf("target anchor is not the exact asserted multi-parent commit: got=%v want=%s", prepared.Target.FrontierCommits, before)
 	}
-	for i := 1; i < len(prepared.Target.FrontierCommits); i++ {
-		if prepared.Target.FrontierCommits[i-1] >= prepared.Target.FrontierCommits[i] {
-			t.Fatalf("target frontier evidence is not canonically ordered: %v", prepared.Target.FrontierCommits)
-		}
+	if jjRevsetCount(t, paths.defaultPath, left+" & ::"+before) != 1 || jjRevsetCount(t, paths.defaultPath, right+" & ::"+before) != 1 {
+		t.Fatal("fixture multi-parent target does not retain both parent tips")
 	}
 
 	withIntegrationStdin(t, string(requestBytes))
@@ -346,10 +344,15 @@ func TestOrderedLineRecoveryRejectsCoherentDescribedTargetCursorForgery(t *testi
 	}
 	record.DetachedOperationIDs = append(record.DetachedOperationIDs, forgedOperation)
 	record.GraphOperationID = forgedOperation
-	stagedState, err := detachedTargetState(repo, forgedOperation, request.Target.ExpectedWorkspace)
+	forgedHead, err := integrationWorkspaceHeadCommitAtOperation(repo, forgedOperation, request.Target.ExpectedWorkspace)
 	if err != nil {
 		t.Fatal(err)
 	}
+	forgedParents, err := integrationCommitIDsAtOperation(repo, forgedOperation, "parents("+request.Target.ExpectedWorkspace+"@)")
+	if err != nil || len(forgedParents) != 1 {
+		t.Fatalf("forged target parent evidence unavailable: %v %v", forgedParents, err)
+	}
+	stagedState := integrationTargetAdvancedStateV1{IntegratedTipCommit: forgedParents[0], AfterHeadCommit: forgedHead}
 	record.StagedTargetState = &stagedState
 	record.StagedRepositoryView, err = integrationRepositoryViewAtOperation(repo, forgedOperation, request.Target.ExpectedWorkspace)
 	if err != nil {
@@ -388,20 +391,17 @@ func TestOrderedLineRecoveryRejectsCoherentDescribedTargetCursorForgery(t *testi
 }
 
 func TestOrderedLinePreparedTargetFrontierIsStrategyExclusiveAndDeeplyValidated(t *testing.T) {
-	commitA := strings.Repeat("1", 40)
+	commitA := strings.Repeat("a", 40)
 	commitB := strings.Repeat("2", 40)
-	ordered := orderedLineSemanticTestRecord("ordered-frontier-semantic", []string{commitA, commitB})
+	ordered := orderedLineSemanticTestRecord("ordered-frontier-semantic", []string{commitA})
 	if err := validateIntegrationOperationRecordSemantic(ordered, ordered.OperationID); err != nil {
 		t.Fatalf("valid ordered-line frontier rejected: %v", err)
 	}
 
 	for name, mutate := range map[string]func(*integrationOperationRecord){
 		"missing": func(record *integrationOperationRecord) { record.PreparedState.Target.FrontierCommits = nil },
-		"duplicate": func(record *integrationOperationRecord) {
-			record.PreparedState.Target.FrontierCommits = []string{commitA, commitA}
-		},
-		"unordered": func(record *integrationOperationRecord) {
-			record.PreparedState.Target.FrontierCommits = []string{commitB, commitA}
+		"wrong-anchor": func(record *integrationOperationRecord) {
+			record.PreparedState.Target.FrontierCommits = []string{commitB}
 		},
 		"malformed": func(record *integrationOperationRecord) {
 			record.PreparedState.Target.FrontierCommits = []string{"not-a-commit"}
@@ -720,6 +720,7 @@ func semanticTestRecordForStrategy(operationID, strategy string) integrationOper
 
 func orderedLineSemanticTestRecord(operationID string, frontier []string) integrationOperationRecord {
 	record := semanticTestRecordForStrategy(operationID, integrationStrategyOrderedLine)
+	record.PreparedState.StackShape = "ordered-line"
 	record.PreparedState.Target.FrontierCommits = append([]string(nil), frontier...)
 	return record
 }

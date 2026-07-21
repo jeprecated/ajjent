@@ -221,6 +221,9 @@ func TestIntegrationCapabilitiesFreezeProtocolSurface(t *testing.T) {
 	if !capabilities.Integrate.ExactHeadAssertions || !capabilities.Integrate.Recovery || capabilities.Integrate.MinimumJJVersion != "0.41.0" {
 		t.Fatalf("expected exact assertions, recovery, and jj 0.41 minimum capability: %+v", capabilities.Integrate)
 	}
+	if capabilities.Integrate.TargetHeadPolicy != "preserve-materialized-current" || !capabilities.Integrate.SupportsNonEmptyTarget || !capabilities.Integrate.SupportsDescribedTarget || !capabilities.Integrate.SupportsImmutableTarget || capabilities.Integrate.SupportsConflictedTarget {
+		t.Fatalf("materialized target capability is not explicit: %+v", capabilities.Integrate)
+	}
 	encoded, err := json.Marshal(capabilities)
 	if err != nil {
 		t.Fatal(err)
@@ -233,6 +236,26 @@ func TestIntegrationCapabilitiesFreezeProtocolSurface(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(text), "repositoryidentity") || strings.Contains(strings.ToLower(text), "repositoryid") {
 		t.Fatalf("capabilities must not introduce repository identity: %s", text)
+	}
+}
+
+func TestPreparedSuccessReceiptAlwaysFitsAdvertisedOutputBound(t *testing.T) {
+	request := integrationRequestV1{Schema: integrationRequestSchemaV1, OperationID: strings.Repeat("x", 128), Strategy: integrationStrategySingle,
+		Target:   integrationTargetAssertionV1{ExpectedWorkspace: "target", ExpectedHeadCommit: strings.Repeat("a", 40)},
+		Payloads: []integrationPayloadAssertionV1{{Workspace: "payload", ExpectedHeadCommit: strings.Repeat("b", 40)}}}
+	prepared := integrationPreparedStateV1{Target: integrationPreparedTargetV1{Workspace: "target", HeadCommit: strings.Repeat("a", 40), HeadChangeID: strings.Repeat("c", 32)},
+		Payloads: []integrationPreparedPayloadV1{{Workspace: "payload", HeadCommit: strings.Repeat("b", 40)}}}
+	for i := 0; i < integrationMaxReceiptChanges; i++ {
+		prepared.Payloads[0].Changes = append(prepared.Payloads[0].Changes, integrationPreparedChangeV1{ChangeID: strings.Repeat("d", 32), CommitID: strings.Repeat("e", 40)})
+	}
+	if err := validatePreparedIntegrationReceiptBound(request, prepared, strings.Repeat("f", 128)); err != nil {
+		t.Fatalf("advertised maximum cannot fit a terminal success receipt: %v", err)
+	}
+	for i := 0; i < integrationMaxReceiptChanges; i++ {
+		prepared.Payloads[0].Changes = append(prepared.Payloads[0].Changes, integrationPreparedChangeV1{ChangeID: strings.Repeat("d", 32), CommitID: strings.Repeat("e", 40)})
+	}
+	if err := validatePreparedIntegrationReceiptBound(request, prepared, strings.Repeat("f", 128)); err == nil {
+		t.Fatal("oversized possible terminal receipt passed pre-effect validation")
 	}
 }
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
 	"sort"
 	"strings"
@@ -214,7 +215,7 @@ func validatePreparedStateAgainstRepositoryView(prepared integrationPreparedStat
 	for _, item := range view.Workspaces {
 		heads[item.Workspace] = item.CommitID
 	}
-	if heads[prepared.Target.Workspace] != prepared.Target.HeadCommit || view.Target.CommitID != prepared.Target.HeadCommit {
+	if heads[prepared.Target.Workspace] != prepared.Target.HeadCommit || view.Target.CommitID != prepared.Target.HeadCommit || view.Target.ChangeID != prepared.Target.HeadChangeID {
 		return errors.New("integration repository evidence does not bind the prepared target")
 	}
 	for _, payload := range prepared.Payloads {
@@ -253,6 +254,22 @@ func proveDetachedIntegrationTransaction(repoPath string, record integrationOper
 	if err := validateModeledIntegrationTransition(before, staged, request); err != nil {
 		return err
 	}
+	if err := proveNoUnmodeledVisibleHeads(repoPath, record.BeforeOperationID, before, staged, record); err != nil {
+		return err
+	}
+	if err := proveNoUnmodeledTargetAncestry(repoPath, record.GraphOperationID, record); err != nil {
+		return err
+	}
+	if err := provePreservedIntegrationTargetAtOperation(repoPath, record.GraphOperationID, request.Target.ExpectedWorkspace, record.PreparedState.Target); err != nil {
+		return err
+	}
+	for _, generated := range record.GeneratedCommitIDs {
+		modeled, err := integrationRevisionMatchesAtOperation(repoPath, record.GraphOperationID, "commit_id("+generated+") & ::"+request.Target.ExpectedWorkspace+"@")
+		description, descriptionErr := integrationQuery(repoPath, record.GraphOperationID, "log", "-r", "commit_id("+generated+")", "--no-graph", "-T", "description")
+		if err != nil || !modeled || descriptionErr != nil || strings.TrimSpace(description) != "chore: merge" {
+			return errors.New("detached integration generated-commit evidence is invalid")
+		}
+	}
 	state, err := detachedTargetState(repoPath, record.GraphOperationID, request.Target.ExpectedWorkspace)
 	if err != nil || record.StagedTargetState == nil || state != *record.StagedTargetState {
 		return errors.New("detached integration staged target evidence is invalid")
@@ -264,6 +281,201 @@ func proveDetachedIntegrationTransaction(repoPath string, record integrationOper
 	if request.Strategy == integrationStrategyOrderedLine {
 		if err := proveOrderedLineAtOperation(repoPath, record.GraphOperationID, record, request); err != nil {
 			return err
+		}
+	} else if err := proveStackIntegrationAtOperation(repoPath, record.GraphOperationID, record, request); err != nil {
+		return err
+	}
+	return nil
+}
+
+func proveNoUnmodeledTargetAncestry(repoPath, operationID string, record integrationOperationRecord) error {
+	if record.StagedTargetState == nil {
+		return errors.New("staged target evidence is missing")
+	}
+	allowed := map[string]struct{}{record.StagedTargetState.AfterHeadCommit: {}}
+	for _, id := range record.GeneratedCommitIDs {
+		allowed[id] = struct{}{}
+	}
+	for _, payload := range record.StagedPayloadMappings {
+		for _, mapping := range payload {
+			allowed[mapping.LandedCommit] = struct{}{}
+		}
+	}
+	ids, err := integrationCommitIDsAtOperation(repoPath, operationID, "(::"+record.PreparedState.Target.Workspace+"@ & ~::commit_id("+record.PreparedState.Target.HeadCommit+"))")
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if _, ok := allowed[id]; !ok {
+			return errors.New("detached integration added an unmodeled target-ancestry commit")
+		}
+	}
+	for id := range allowed {
+		found := false
+		for _, actual := range ids {
+			if actual == id {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return errors.New("detached integration modeled commit is missing from target ancestry")
+		}
+	}
+	return nil
+}
+
+func proveNoUnmodeledVisibleHeads(repoPath, beforeOperation string, before, staged integrationRepositoryViewV1, record integrationOperationRecord) error {
+	allowed := map[string]struct{}{}
+	for _, id := range before.VisibleHeads {
+		allowed[id] = struct{}{}
+	}
+	allowed[record.PreparedState.Target.HeadCommit] = struct{}{}
+	for _, id := range record.GeneratedCommitIDs {
+		allowed[id] = struct{}{}
+	}
+	for _, cursor := range record.PayloadCursors {
+		allowed[cursor.HeadCommit] = struct{}{}
+	}
+	if record.StagedTargetState != nil {
+		allowed[record.StagedTargetState.AfterHeadCommit] = struct{}{}
+		allowed[record.StagedTargetState.IntegratedTipCommit] = struct{}{}
+	}
+	for _, payload := range record.StagedPayloadMappings {
+		for _, mapping := range payload {
+			allowed[mapping.LandedCommit] = struct{}{}
+		}
+	}
+	for _, id := range staged.VisibleHeads {
+		if _, ok := allowed[id]; ok {
+			continue
+		}
+		// An exact commit already present in the frozen before-operation graph may
+		// become visible as selected heads move. Authority is its exact commit id,
+		// never a reused change id that could name a coherent substitution.
+		preexisting, err := integrationRevisionMatchesAtOperation(repoPath, beforeOperation, "commit_id("+id+")")
+		if err != nil || !preexisting {
+			return fmt.Errorf("detached integration added unmodeled visible head %s", id)
+		}
+	}
+	return nil
+}
+
+func provePreservedIntegrationTargetAtOperation(repoPath, operationID, targetHandle string, target integrationPreparedTargetV1) error {
+	commits, err := integrationCommitIDsAtOperation(repoPath, operationID, "commit_id("+target.HeadCommit+") & ::"+targetHandle+"@")
+	if err != nil || len(commits) != 1 || commits[0] != target.HeadCommit {
+		return errors.New("asserted target commit is not preserved exactly in result ancestry")
+	}
+	changeID, err := integrationQuery(repoPath, operationID, "log", "-r", "commit_id("+target.HeadCommit+")", "--no-graph", "-T", "change_id")
+	if err != nil || strings.TrimSpace(changeID) != target.HeadChangeID {
+		return errors.New("asserted target change identity is not preserved exactly")
+	}
+	return nil
+}
+
+func proveStackIntegrationAtOperation(repoPath, operationID string, record integrationOperationRecord, request integrationRequestV1) error {
+	shape := record.PreparedState.StackShape
+	if shape != "linear" && shape != "merge" {
+		return errors.New("detached Stack shape is not frozen")
+	}
+	if len(record.PreparedState.Payloads) != len(request.Payloads) || len(record.StagedPayloadMappings) != len(request.Payloads) {
+		return errors.New("detached Stack contribution evidence is incomplete")
+	}
+	destination := []string{record.PreparedState.Target.HeadCommit}
+	finalTips := []string{}
+	generatedIndex := 0
+	mergeTerms := []string{"commit_id(" + record.PreparedState.Target.HeadCommit + ")"}
+	for i, payload := range record.PreparedState.Payloads {
+		if len(payload.FrontierCommits) == 0 || len(record.StagedPayloadMappings[i]) != len(payload.Changes) {
+			return errors.New("detached Stack contribution is incomplete")
+		}
+		landed := make([]string, 0, len(record.StagedPayloadMappings[i]))
+		frontierMappings := map[string]string{}
+		for _, mapping := range record.StagedPayloadMappings[i] {
+			if shape == "merge" && mapping.InputCommit != mapping.LandedCommit {
+				return errors.New("merge Stack rewrote an exact payload contribution")
+			}
+			landed = append(landed, "commit_id("+mapping.LandedCommit+")")
+			frontierMappings[mapping.InputCommit] = mapping.LandedCommit
+		}
+		landedFrontier := make([]string, 0, len(payload.FrontierCommits))
+		for _, inputTip := range payload.FrontierCommits {
+			landedTip := frontierMappings[inputTip]
+			if landedTip == "" {
+				return errors.New("detached Stack contribution tip mapping is missing")
+			}
+			landedFrontier = append(landedFrontier, landedTip)
+		}
+		if shape == "merge" {
+			for _, tip := range landedFrontier {
+				mergeTerms = append(mergeTerms, "commit_id("+tip+")")
+			}
+			continue
+		}
+		landedRevset := strings.Join(landed, " | ")
+		outside, err := integrationCommitIDsAtOperation(repoPath, operationID, "parents(roots("+landedRevset+")) & ~("+landedRevset+")")
+		if err != nil || !sameIntegrationCommitSet(outside, destination) {
+			return errors.New("linear Stack contribution is not anchored to its exact destination")
+		}
+		contributionTip := ""
+		if len(landedFrontier) == 1 {
+			contributionTip = landedFrontier[0]
+		} else {
+			if generatedIndex >= len(record.GeneratedCommitIDs) {
+				return errors.New("linear Stack contribution merge evidence is missing")
+			}
+			contributionTip = record.GeneratedCommitIDs[generatedIndex]
+			generatedIndex++
+			parents, err := integrationCommitIDsAtOperation(repoPath, operationID, "parents(commit_id("+contributionTip+"))")
+			if err != nil || !sameIntegrationCommitSet(parents, landedFrontier) {
+				return errors.New("linear Stack contribution merge has unexpected parents")
+			}
+		}
+		destination = []string{contributionTip}
+	}
+	if shape == "linear" {
+		finalTips = destination
+	} else {
+		var err error
+		finalTips, err = integrationCommitIDsAtOperation(repoPath, operationID, "heads("+strings.Join(mergeTerms, " | ")+")")
+		if err != nil || len(finalTips) == 0 {
+			return errors.New("merge Stack exact parent frontier is unavailable")
+		}
+		sort.Strings(finalTips)
+	}
+	state, err := detachedTargetState(repoPath, operationID, request.Target.ExpectedWorkspace)
+	if err != nil {
+		return err
+	}
+	if len(finalTips) == 1 {
+		if state.IntegratedTipCommit != finalTips[0] {
+			return errors.New("Stack integrated tip is not exact")
+		}
+	} else {
+		if generatedIndex >= len(record.GeneratedCommitIDs) || state.IntegratedTipCommit != record.GeneratedCommitIDs[generatedIndex] {
+			return errors.New("merge Stack generated-commit evidence is incomplete")
+		}
+		generated := record.GeneratedCommitIDs[generatedIndex]
+		parents, err := integrationCommitIDsAtOperation(repoPath, operationID, "parents(commit_id("+generated+"))")
+		conflicted, conflictErr := integrationRevisionMatchesAtOperation(repoPath, operationID, "conflicts() & commit_id("+generated+")")
+		if err != nil || !sameIntegrationCommitSet(parents, finalTips) || conflictErr != nil || conflicted {
+			return errors.New("merge Stack result does not have the exact clean structure")
+		}
+		generatedIndex++
+	}
+	if generatedIndex != len(record.GeneratedCommitIDs) {
+		return errors.New("detached Stack has extra generated commits")
+	}
+	if err := proveFreshIntegrationCursorAtOperation(repoPath, operationID, request.Target.ExpectedWorkspace, state.AfterHeadCommit, state.IntegratedTipCommit); err != nil {
+		return errors.New("Stack target cursor is not exact")
+	}
+	if len(record.PayloadCursors) != len(request.Payloads) {
+		return errors.New("Stack payload cursor evidence is incomplete")
+	}
+	for i, payload := range request.Payloads {
+		cursor := record.PayloadCursors[i]
+		if cursor.Workspace != payload.Workspace || proveFreshIntegrationCursorAtOperation(repoPath, operationID, payload.Workspace, cursor.HeadCommit, state.IntegratedTipCommit) != nil {
+			return errors.New("Stack payload cursor is not exact")
 		}
 	}
 	return nil
@@ -287,11 +499,12 @@ func proveOrderedLineAtOperation(repoPath, operationID string, record integratio
 		if source == "" || len(payload.FrontierCommits) != 1 {
 			return errors.New("ordered-line payload evidence is not singular")
 		}
-		anchored, err := orderedLineContributionAnchoredAtOperation(repoPath, operationID, source, destination)
+		landedSource := "(" + source + " & ::" + request.Target.ExpectedWorkspace + "@)"
+		anchored, err := orderedLineContributionAnchoredAtOperation(repoPath, operationID, landedSource, destination)
 		if err != nil || !anchored {
 			return errors.New("ordered-line payload is not anchored to its exact ordered predecessor")
 		}
-		tips, err := integrationCommitIDsAtOperation(repoPath, operationID, "heads("+source+")")
+		tips, err := integrationCommitIDsAtOperation(repoPath, operationID, "heads("+landedSource+")")
 		if err != nil || len(tips) != 1 {
 			return errors.New("ordered-line payload has no exact landed tip")
 		}
@@ -316,18 +529,22 @@ func proveOrderedLineAtOperation(repoPath, operationID string, record integratio
 	if err != nil || state.IntegratedTipCommit != finalTip || state.AfterHeadCommit == record.PreparedState.Target.HeadCommit {
 		return errors.New("ordered-line target cursor does not bind the final line tip")
 	}
-	if err := proveFreshOrderedLineCursorAtOperation(repoPath, operationID, request.Target.ExpectedWorkspace, state.AfterHeadCommit, finalTip); err != nil {
+	if err := proveFreshIntegrationCursorAtOperation(repoPath, operationID, request.Target.ExpectedWorkspace, state.AfterHeadCommit, finalTip); err != nil {
 		return errors.New("ordered-line target cursor is not the exact fresh cursor")
 	}
-	for _, payload := range request.Payloads {
-		if err := proveFreshOrderedLineCursorAtOperation(repoPath, operationID, payload.Workspace, "", finalTip); err != nil {
+	if len(record.PayloadCursors) != len(request.Payloads) {
+		return errors.New("ordered-line payload cursor evidence is incomplete")
+	}
+	for i, payload := range request.Payloads {
+		cursor := record.PayloadCursors[i]
+		if cursor.Workspace != payload.Workspace || proveFreshIntegrationCursorAtOperation(repoPath, operationID, payload.Workspace, cursor.HeadCommit, finalTip) != nil {
 			return errors.New("ordered-line selected payload cursor is not exactly reconciled")
 		}
 	}
 	return nil
 }
 
-func proveFreshOrderedLineCursorAtOperation(repoPath, operationID, workspace, expectedHead, expectedParent string) error {
+func proveFreshIntegrationCursorAtOperation(repoPath, operationID, workspace, expectedHead, expectedParent string) error {
 	heads, err := integrationCommitIDsAtOperation(repoPath, operationID, workspace+"@")
 	if err != nil || len(heads) != 1 || (expectedHead != "" && heads[0] != expectedHead) {
 		return errors.New("ordered-line cursor head is not exact")
@@ -356,10 +573,9 @@ func proveFreshOrderedLineCursorAtOperation(repoPath, operationID, workspace, ex
 }
 
 func provePreparedOrderedLineEvidence(repoPath string, record integrationOperationRecord, request integrationRequestV1) error {
-	frontier, err := integrationCommitIDsAtOperation(repoPath, record.BeforeOperationID, "heads(::"+request.Target.ExpectedWorkspace+"@ & ~empty())")
-	sort.Strings(frontier)
-	if err != nil || !reflect.DeepEqual(frontier, record.PreparedState.Target.FrontierCommits) {
-		return errors.New("ordered-line prepared target frontier cannot be reproduced")
+	frontier, err := integrationCommitIDsAtOperation(repoPath, record.BeforeOperationID, request.Target.ExpectedWorkspace+"@")
+	if err != nil || len(frontier) != 1 || frontier[0] != record.PreparedState.Target.HeadCommit || !reflect.DeepEqual(frontier, record.PreparedState.Target.FrontierCommits) {
+		return errors.New("ordered-line prepared target anchor cannot be reproduced")
 	}
 	baseWorkspace := request.Target.ExpectedWorkspace
 	seen := map[string]struct{}{}
@@ -388,6 +604,9 @@ func proveTerminalIntegrationRecord(repoPath string, record integrationOperation
 		return errors.New("terminal integration record has no successful commit point")
 	}
 	if err := proveDetachedIntegrationTransaction(repoPath, record, request); err != nil {
+		return err
+	}
+	if err := provePreservedIntegrationTargetAtOperation(repoPath, record.CommitPointOperation, request.Target.ExpectedWorkspace, record.PreparedState.Target); err != nil {
 		return err
 	}
 	state, err := detachedTargetState(repoPath, record.CommitPointOperation, request.Target.ExpectedWorkspace)
@@ -426,7 +645,6 @@ func validateModeledIntegrationTransition(before, staged integrationRepositoryVi
 		return errors.New("detached integration changed workspace registrations")
 	}
 	oldAllowed := map[string]struct{}{}
-	newAllowed := map[string]struct{}{}
 	for handle, beforeID := range beforeHeads {
 		afterID, ok := stagedHeads[handle]
 		if !ok {
@@ -434,49 +652,18 @@ func validateModeledIntegrationTransition(before, staged integrationRepositoryVi
 		}
 		if _, ok := allowed[handle]; ok {
 			oldAllowed[beforeID] = struct{}{}
-			newAllowed[afterID] = struct{}{}
-		} else if request.Strategy == integrationStrategyOrderedLine && beforeID != afterID {
-			return errors.New("ordered-line integration changed an omitted workspace head")
 		} else if beforeID != afterID {
-			var beforeChange, afterChange string
-			for _, item := range before.Workspaces {
-				if item.Workspace == handle {
-					beforeChange = item.ChangeID
-					break
-				}
-			}
-			for _, item := range staged.Workspaces {
-				if item.Workspace == handle {
-					afterChange = item.ChangeID
-					break
-				}
-			}
-			if beforeChange == "" || beforeChange != afterChange {
-				return errors.New("detached integration changed an unrelated workspace identity")
-			}
-			oldAllowed[beforeID] = struct{}{}
-			newAllowed[afterID] = struct{}{}
+			return errors.New("detached integration changed an omitted workspace head")
 		}
 	}
-	beforeVisible := make(map[string]struct{}, len(before.VisibleHeads))
 	stagedVisible := make(map[string]struct{}, len(staged.VisibleHeads))
-	for _, id := range before.VisibleHeads {
-		beforeVisible[id] = struct{}{}
-	}
 	for _, id := range staged.VisibleHeads {
 		stagedVisible[id] = struct{}{}
 	}
-	for id := range beforeVisible {
+	for _, id := range before.VisibleHeads {
 		if _, kept := stagedVisible[id]; !kept {
 			if _, allowed := oldAllowed[id]; !allowed {
 				return errors.New("detached integration removed an unrelated visible head")
-			}
-		}
-	}
-	for id := range stagedVisible {
-		if _, existed := beforeVisible[id]; !existed {
-			if _, allowed := newAllowed[id]; !allowed {
-				return errors.New("detached integration added an unrelated visible head")
 			}
 		}
 	}

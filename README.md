@@ -278,7 +278,7 @@ ajj --repo "$A" stack A1 A2 A3 --yes
 ajj stack --line A1 A2 A3 --yes
 ```
 
-For a recoverable machine operation, capture exact full heads only after committing/materializing every payload. The following request adopts A1/A2/A3 into A using ordinary Stack shape selection:
+For a recoverable machine operation, capture exact full heads only after committing/materializing every payload. The following request adopts A1/A2/A3 into A using the configured linear/merge shape policy inside Ajj's detached machine transaction:
 
 ```sh
 A=/absolute/path/to/workspaces/project/A
@@ -297,9 +297,9 @@ JSON
 ajj --repo "$A" integrate --request-json /tmp/A-children.json
 ```
 
-Use `"strategy":"single"` with exactly one payload. Use `"strategy":"ordered-line"` for a target-anchored line: A is the structural base, A1 contributes changes unique to A, A2 contributes changes unique to A1, and A3 contributes changes unique to A2. Request order is authoritative; A must not also appear in `payloads`. This differs from human `stack --line`, whose first selected input stays on its existing base.
+Use `"strategy":"single"` with exactly one payload. The asserted Current Workspace head may be mutable or immutable, empty or materialized, described or undescribed, but must be exact and non-conflicted. Ajj preserves that commit unchanged as the structural base and creates the final fresh cursor inside the detached journaled transaction. Configured Main cannot be a payload when another Workspace is Current. Use `"strategy":"ordered-line"` for a target-anchored line: A's exact asserted commit is the base, A1 contributes changes unique to A, A2 contributes changes unique to A1, and A3 contributes changes unique to A2. Request order is authoritative; A must not also appear in `payloads`. This differs from human `stack --line`, whose first selected input stays on its existing base.
 
-A successful command writes exactly one `ajj-integrate-receipt-v1` JSON object to stdout, bounded by the capability field `maxOutputBytes`. The receipt distinguishes `target.beforeHeadCommit`, `target.integratedTipCommit`, and the fresh empty cursor `target.afterHeadCommit`; every landed payload contains exact `changeId`, `inputCommit`, and `landedCommit` mappings. Stable Ajj machine error summaries are bounded and path-free. Child-process diagnostics go to stderr and are not included in `maxOutputBytes`; Ajj does not currently advertise a general stderr byte bound. The one documented-result adapter described below applies its own internal bound before parsing.
+A successful command writes exactly one `ajj-integrate-receipt-v1` JSON object to stdout, bounded by the capability field `maxOutputBytes`. The receipt binds `target.beforeHeadChangeId`, proves `target.preservedCommit` with `preservationDisposition: "preserved-exact-ancestor"`, and distinguishes the child result `target.integratedTipCommit` from the fresh empty cursor `target.afterHeadCommit`; every landed payload contains exact `changeId`, `inputCommit`, and `landedCommit` mappings. Stable Ajj machine error summaries are bounded and path-free. Child-process diagnostics go to stderr and are not included in `maxOutputBytes`; Ajj does not currently advertise a general stderr byte bound. The one documented-result adapter described below applies its own internal bound before parsing.
 
 After A represents its children, normal Tidy can close them even though their visible `Stacked` labels remain Main-relative:
 

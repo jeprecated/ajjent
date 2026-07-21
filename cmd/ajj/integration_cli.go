@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
-	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -28,8 +27,8 @@ const (
 	integrationMaxOutputBytes        = 1024 * 1024
 	integrationMaxRecordBytes        = 4 * integrationMaxOutputBytes
 	integrationMaxPayloads           = 256
-	integrationMaxChangesPerPayload  = 8192
-	integrationMaxReceiptChanges     = 8192
+	integrationMaxChangesPerPayload  = 4096
+	integrationMaxReceiptChanges     = 4096
 	integrationMaxDetachedOperations = 2*integrationMaxPayloads + 16
 	integrationMaxErrorBytes         = 512
 )
@@ -59,6 +58,7 @@ func (l *integrationLock) Close() error {
 type integrationPreparedTargetV1 struct {
 	Workspace       string   `json:"workspace"`
 	HeadCommit      string   `json:"headCommit"`
+	HeadChangeID    string   `json:"headChangeId"`
 	FrontierCommits []string `json:"frontierCommits,omitempty"`
 }
 
@@ -74,6 +74,11 @@ type integrationPreparedPayloadV1 struct {
 	FrontierCommits []string                      `json:"frontierCommits,omitempty"`
 }
 
+type integrationPayloadCursorV1 struct {
+	Workspace  string `json:"workspace"`
+	HeadCommit string `json:"headCommit"`
+}
+
 type integrationTargetAdvancedStateV1 struct {
 	IntegratedTipCommit string `json:"integratedTipCommit"`
 	AfterHeadCommit     string `json:"afterHeadCommit"`
@@ -86,8 +91,9 @@ var (
 )
 
 type integrationPreparedStateV1 struct {
-	Target   integrationPreparedTargetV1    `json:"target"`
-	Payloads []integrationPreparedPayloadV1 `json:"payloads"`
+	Target     integrationPreparedTargetV1    `json:"target"`
+	Payloads   []integrationPreparedPayloadV1 `json:"payloads"`
+	StackShape string                         `json:"stackShape"`
 }
 
 func runCapabilities(args []string) error {
@@ -123,7 +129,7 @@ func runIntegrate(args []string) error {
 	fs.StringVar(&requestSource, "request-json", "", "read one integration request from PATH or - for stdin")
 	fs.StringVar(&recoverOperationID, "recover", "", "inspect an existing operation by id without starting effects")
 	fs.BoolVar(&jsonOutput, "json", false, "write one bounded machine-readable result")
-	if handled, err := parseCommandFlags(fs, args, "ajj integrate (--request-json PATH|- | --recover OPERATION-ID --json) [options]", "Prepare or recover an exact Current-Workspace integration operation. Integration effects are enabled by strategy implementation slices."); handled || err != nil {
+	if handled, err := parseCommandFlags(fs, args, "ajj integrate (--request-json PATH|- | --recover OPERATION-ID --json) [options]", "Integrate payloads after an exact non-conflicted Current Workspace head, preserving that asserted commit and journaling the final fresh cursor."); handled || err != nil {
 		return err
 	}
 	if len(fs.Args()) != 0 {
@@ -276,6 +282,13 @@ func prepareIntegrationOperation(repoRootOverride string, requestBytes []byte, r
 	if target.Handle != request.Target.ExpectedWorkspace {
 		return emitIntegrationFailure(request.OperationID, requestDigest, request, newIntegrationProtocolError(integrationErrorAssertionFailed, "Current Workspace does not match the request target assertion"), integrationBatchFailed, integrationNextActionRetryNewOperation)
 	}
+	if target.Handle != cfg.MainWorkspace {
+		for _, payload := range request.Payloads {
+			if payload.Workspace == cfg.MainWorkspace {
+				return emitIntegrationFailure(request.OperationID, requestDigest, request, newIntegrationProtocolError(integrationErrorAssertionFailed, "configured Main Workspace cannot be a payload of a non-Main target"), integrationBatchFailed, integrationNextActionRetryNewOperation)
+			}
+		}
+	}
 	if err := materializeIntegrationWorkspaceHeads(repoRoot, cfg, project, target.Handle, request); err != nil {
 		return emitIntegrationFailure(request.OperationID, requestDigest, request, err, integrationBatchFailed, integrationNextActionRetryNewOperation)
 	}
@@ -283,8 +296,19 @@ func prepareIntegrationOperation(repoRootOverride string, requestBytes []byte, r
 	if err != nil {
 		return emitIntegrationFailure(request.OperationID, requestDigest, request, err, integrationBatchFailed, integrationNextActionRetryNewOperation)
 	}
-	prepared, err := validateIntegrationAssertions(repoRoot, request)
+	prepared, err := validateIntegrationAssertionsAtOperation(repoRoot, beforeOperationID, request)
 	if err != nil {
+		return emitIntegrationFailure(request.OperationID, requestDigest, request, err, integrationBatchFailed, integrationNextActionRetryNewOperation)
+	}
+	if request.Strategy == integrationStrategyOrderedLine {
+		prepared.StackShape = "ordered-line"
+	} else {
+		prepared.StackShape, err = resolvePreparedStackShapeAtOperation(target.Path, beforeOperationID, prepared, cfg.Stack.Shape)
+		if err != nil {
+			return emitIntegrationFailure(request.OperationID, requestDigest, request, err, integrationBatchFailed, integrationNextActionRetryNewOperation)
+		}
+	}
+	if err := validatePreparedIntegrationReceiptBound(request, prepared, beforeOperationID); err != nil {
 		return emitIntegrationFailure(request.OperationID, requestDigest, request, err, integrationBatchFailed, integrationNextActionRetryNewOperation)
 	}
 	beforeRepositoryView, err := integrationRepositoryViewAtOperation(target.Path, beforeOperationID, request.Target.ExpectedWorkspace)
@@ -439,75 +463,73 @@ func integrationMainWorkspacePath(repoRoot string, cfg config, project string, r
 }
 
 func validateIntegrationAssertions(repoPath string, request integrationRequestV1) (integrationPreparedStateV1, error) {
-	targetCommit, err := integrationWorkspaceHeadCommit(repoPath, request.Target.ExpectedWorkspace)
+	// Compatibility seam for tests and pre-capture callers. Production
+	// integration paths call the exact-operation variant directly.
+	operationID, err := currentOperationFullID(repoPath)
+	if err != nil {
+		return integrationPreparedStateV1{}, err
+	}
+	return validateIntegrationAssertionsAtOperation(repoPath, operationID, request)
+}
+
+func validateIntegrationAssertionsAtOperation(repoPath, operationID string, request integrationRequestV1) (integrationPreparedStateV1, error) {
+	if !integrationFullOperationIDRE.MatchString(operationID) {
+		return integrationPreparedStateV1{}, errors.New("integration assertion operation id is invalid")
+	}
+	targetCommit, err := integrationWorkspaceHeadCommitAtOperation(repoPath, operationID, request.Target.ExpectedWorkspace)
 	if err != nil {
 		return integrationPreparedStateV1{}, err
 	}
 	if targetCommit != request.Target.ExpectedHeadCommit {
 		return integrationPreparedStateV1{}, newIntegrationProtocolError(integrationErrorAssertionFailed, "target Workspace %q head changed", request.Target.ExpectedWorkspace)
 	}
-	targetEmpty, err := integrationRevisionMatches(repoPath, "", "empty() & "+request.Target.ExpectedWorkspace+"@")
+	targetChangeID, err := integrationQuery(repoPath, operationID, "log", "-r", request.Target.ExpectedWorkspace+"@", "--no-graph", "-T", "change_id")
 	if err != nil {
 		return integrationPreparedStateV1{}, err
 	}
-	if !targetEmpty {
-		return integrationPreparedStateV1{}, newIntegrationProtocolError(integrationErrorAssertionFailed, "target Workspace %q head is not empty", request.Target.ExpectedWorkspace)
+	targetChangeID = strings.TrimSpace(targetChangeID)
+	if !integrationFullChangeIDRE.MatchString(targetChangeID) {
+		return integrationPreparedStateV1{}, newIntegrationProtocolError(integrationErrorAssertionFailed, "target Workspace %q change identity is invalid", request.Target.ExpectedWorkspace)
 	}
-	description, err := integrationQuery(repoPath, "", "log", "-r", request.Target.ExpectedWorkspace+"@", "--no-graph", "-T", "description")
-	if err != nil {
-		return integrationPreparedStateV1{}, err
-	}
-	if description != "" {
-		return integrationPreparedStateV1{}, newIntegrationProtocolError(integrationErrorAssertionFailed, "target Workspace %q head is described", request.Target.ExpectedWorkspace)
-	}
-	targetConflict, err := integrationRevisionMatches(repoPath, "", "conflicts() & "+request.Target.ExpectedWorkspace+"@")
+	targetConflict, err := integrationRevisionMatchesAtOperation(repoPath, operationID, "conflicts() & "+request.Target.ExpectedWorkspace+"@")
 	if err != nil {
 		return integrationPreparedStateV1{}, err
 	}
 	if targetConflict {
 		return integrationPreparedStateV1{}, newIntegrationProtocolError(integrationErrorAssertionFailed, "target Workspace %q head is conflicted", request.Target.ExpectedWorkspace)
 	}
-
 	prepared := integrationPreparedStateV1{
-		Target:   integrationPreparedTargetV1{Workspace: request.Target.ExpectedWorkspace, HeadCommit: targetCommit},
+		Target:   integrationPreparedTargetV1{Workspace: request.Target.ExpectedWorkspace, HeadCommit: targetCommit, HeadChangeID: targetChangeID},
 		Payloads: make([]integrationPreparedPayloadV1, 0, len(request.Payloads)),
 	}
 	if request.Strategy == integrationStrategyOrderedLine {
-		prepared.Target.FrontierCommits, err = integrationCommitIDs(repoPath, "heads(::"+request.Target.ExpectedWorkspace+"@ & ~empty())")
-		if err != nil {
-			return integrationPreparedStateV1{}, err
-		}
-		if len(prepared.Target.FrontierCommits) == 0 || len(prepared.Target.FrontierCommits) > integrationMaxChangesPerPayload {
-			return integrationPreparedStateV1{}, newIntegrationProtocolError(integrationErrorAssertionFailed, "ordered-line target has no bounded non-empty frontier")
-		}
-		sort.Strings(prepared.Target.FrontierCommits)
-		for i := 1; i < len(prepared.Target.FrontierCommits); i++ {
-			if prepared.Target.FrontierCommits[i-1] == prepared.Target.FrontierCommits[i] {
-				return integrationPreparedStateV1{}, newIntegrationProtocolError(integrationErrorAssertionFailed, "ordered-line target frontier is not unique")
-			}
-		}
+		// The asserted target commit is the exact structural base. Keeping it in
+		// prepared evidence prevents ordered-line from silently dropping current
+		// target work while landing child contributions in request order.
+		prepared.Target.FrontierCommits = []string{targetCommit}
 	}
 	totalChanges := 0
+	seenChanges := map[string]string{}
 	for _, payload := range request.Payloads {
-		commit, err := integrationWorkspaceHeadCommit(repoPath, payload.Workspace)
+		commit, err := integrationWorkspaceHeadCommitAtOperation(repoPath, operationID, payload.Workspace)
 		if err != nil {
 			return integrationPreparedStateV1{}, err
 		}
 		if commit != payload.ExpectedHeadCommit {
 			return integrationPreparedStateV1{}, newIntegrationProtocolError(integrationErrorAssertionFailed, "payload Workspace %q head changed", payload.Workspace)
 		}
-		conflicted, err := integrationRevisionMatches(repoPath, "", "conflicts() & "+payload.Workspace+"@")
+		conflicted, err := integrationRevisionMatchesAtOperation(repoPath, operationID, "conflicts() & "+payload.Workspace+"@")
 		if err != nil {
 			return integrationPreparedStateV1{}, err
 		}
 		if conflicted {
 			return integrationPreparedStateV1{}, newIntegrationProtocolError(integrationErrorAssertionFailed, "payload Workspace %q head is conflicted", payload.Workspace)
 		}
-		payloadEmpty, err := integrationRevisionMatches(repoPath, "", "empty() & "+payload.Workspace+"@")
+		payloadEmpty, err := integrationRevisionMatchesAtOperation(repoPath, operationID, "empty() & "+payload.Workspace+"@")
 		if err != nil {
 			return integrationPreparedStateV1{}, err
 		}
-		payloadDescription, err := integrationQuery(repoPath, "", "log", "-r", payload.Workspace+"@", "--no-graph", "-T", "description")
+		payloadDescription, err := integrationQuery(repoPath, operationID, "log", "-r", payload.Workspace+"@", "--no-graph", "-T", "description")
 		if err != nil {
 			return integrationPreparedStateV1{}, err
 		}
@@ -518,7 +540,7 @@ func validateIntegrationAssertions(repoPath string, request integrationRequestV1
 		if request.Strategy == integrationStrategyOrderedLine && len(prepared.Payloads) > 0 {
 			baseWorkspace = prepared.Payloads[len(prepared.Payloads)-1].Workspace
 		}
-		changes, frontier, err := materializeIntegrationPayloadChanges(repoPath, baseWorkspace, payload.Workspace)
+		changes, frontier, err := materializeIntegrationPayloadChangesAtOperation(repoPath, operationID, baseWorkspace, payload.Workspace)
 		if err != nil {
 			return integrationPreparedStateV1{}, err
 		}
@@ -531,6 +553,12 @@ func validateIntegrationAssertions(repoPath string, request integrationRequestV1
 		if len(changes) > integrationMaxChangesPerPayload || len(frontier) > integrationMaxChangesPerPayload {
 			return integrationPreparedStateV1{}, newIntegrationProtocolError(integrationErrorInvalidRequest, "payload change evidence exceeds the protocol limit")
 		}
+		for _, change := range changes {
+			if previous, duplicate := seenChanges[change.ChangeID]; duplicate {
+				return integrationPreparedStateV1{}, newIntegrationProtocolError(integrationErrorAssertionFailed, "payload Workspace %q overlaps payload Workspace %q", payload.Workspace, previous)
+			}
+			seenChanges[change.ChangeID] = payload.Workspace
+		}
 		totalChanges += len(changes)
 		if totalChanges > integrationMaxReceiptChanges {
 			return integrationPreparedStateV1{}, newIntegrationProtocolError(integrationErrorInvalidRequest, "integration change evidence exceeds the protocol limit")
@@ -538,6 +566,33 @@ func validateIntegrationAssertions(repoPath string, request integrationRequestV1
 		prepared.Payloads = append(prepared.Payloads, integrationPreparedPayloadV1{Workspace: payload.Workspace, HeadCommit: commit, Changes: changes, FrontierCommits: frontier})
 	}
 	return prepared, nil
+}
+
+func validatePreparedIntegrationReceiptBound(request integrationRequestV1, prepared integrationPreparedStateV1, beforeOperationID string) error {
+	placeholderCommit := strings.Repeat("f", 40)
+	receipt := integrationReceiptV1{
+		Schema: integrationReceiptSchemaV1, OperationID: request.OperationID,
+		RequestDigest: "sha256:" + strings.Repeat("f", 64), Strategy: request.Strategy,
+		BatchDisposition: integrationBatchSucceeded,
+		Target: integrationReceiptTargetV1{Workspace: request.Target.ExpectedWorkspace, BeforeHeadCommit: request.Target.ExpectedHeadCommit,
+			BeforeHeadChangeID: prepared.Target.HeadChangeID, PreservationDisposition: integrationTargetPreservedExact,
+			PreservedCommit: request.Target.ExpectedHeadCommit, IntegratedTipCommit: placeholderCommit, AfterHeadCommit: placeholderCommit},
+		JJOperations: integrationJJOperationsV1{BeforeEffect: beforeOperationID, CommitPoint: strings.Repeat("f", 128)},
+	}
+	for i, payload := range request.Payloads {
+		item := integrationReceiptPayloadV1{Workspace: payload.Workspace, InputHeadCommit: payload.ExpectedHeadCommit, Disposition: integrationPayloadLanded}
+		for _, change := range prepared.Payloads[i].Changes {
+			item.Changes = append(item.Changes, integrationReceiptChangeV1{ChangeID: change.ChangeID, InputCommit: change.CommitID, LandedCommit: placeholderCommit})
+		}
+		item.EvidenceDigest = integrationPayloadReceiptEvidenceDigest(item)
+		receipt.Payloads = append(receipt.Payloads, item)
+	}
+	receipt.EvidenceDigest = integrationReceiptEvidenceDigest(receipt)
+	data, err := encodeIntegrationJSON(receipt)
+	if err != nil || len(data) > integrationMaxOutputBytes {
+		return newIntegrationProtocolError(integrationErrorInvalidRequest, "possible integration receipt exceeds the advertised output limit")
+	}
+	return nil
 }
 
 func materializeIntegrationWorkspaceHeads(repoPath string, cfg config, project, currentHandle string, request integrationRequestV1) error {
@@ -571,8 +626,41 @@ func materializeIntegrationWorkspaceHeads(repoPath string, cfg config, project, 
 	return nil
 }
 
+func validateIntegrationWorkspacePathsAtOperation(repoPath, operationID string, cfg config, project, _ string, request integrationRequestV1) error {
+	out, err := integrationQuery(repoPath, operationID, "workspace", "list", "-T", `name ++ "\t" ++ root ++ "\n"`)
+	if err != nil {
+		return err
+	}
+	roots := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		parts := strings.SplitN(line, "\t", 2)
+		if len(parts) != 2 || validateWorkspaceHandle(parts[0]) != nil {
+			return errors.New("workspace path evidence is invalid")
+		}
+		roots[parts[0]] = cleanWorkspaceRoot(parts[1])
+	}
+	handles := []string{request.Target.ExpectedWorkspace}
+	for _, payload := range request.Payloads {
+		handles = append(handles, payload.Workspace)
+	}
+	for _, handle := range handles {
+		root, ok := roots[handle]
+		if !ok {
+			return newIntegrationProtocolError(integrationErrorAssertionFailed, "requested Workspace is not registered")
+		}
+		path := root
+		if path == "" {
+			path = filepath.Join(cfg.WorkspacesRoot, project, handle)
+		}
+		if !workspacePathExists(path) {
+			return newIntegrationProtocolError(integrationErrorAssertionFailed, "requested Workspace path is missing")
+		}
+	}
+	return nil
+}
+
 func revalidateNonterminalIntegrationRecord(repoPath string, cfg config, project, currentHandle string, record integrationOperationRecord, request integrationRequestV1) error {
-	if err := materializeIntegrationWorkspaceHeads(repoPath, cfg, project, currentHandle, request); err != nil {
+	if err := validateIntegrationWorkspacePathsAtOperation(repoPath, record.BeforeOperationID, cfg, project, currentHandle, request); err != nil {
 		return newIntegrationProtocolError(integrationErrorUnknownEffect, "recorded workspace state could not be materialized")
 	}
 	currentOperationID, err := currentOperationFullID(repoPath)
@@ -582,7 +670,8 @@ func revalidateNonterminalIntegrationRecord(repoPath string, cfg config, project
 	if currentOperationID != record.BeforeOperationID {
 		return newIntegrationProtocolError(integrationErrorUnknownEffect, "recorded repository operation no longer matches current state")
 	}
-	prepared, err := validateIntegrationAssertions(repoPath, request)
+	prepared, err := validateIntegrationAssertionsAtOperation(repoPath, record.BeforeOperationID, request)
+	prepared.StackShape = record.PreparedState.StackShape
 	if err != nil || !integrationPreparedStatesEqual(prepared, record.PreparedState) {
 		return newIntegrationProtocolError(integrationErrorUnknownEffect, "recorded target or payload state no longer matches current state")
 	}
@@ -594,7 +683,7 @@ func revalidateNonterminalIntegrationRecord(repoPath string, cfg config, project
 }
 
 func integrationPreparedStatesEqual(left, right integrationPreparedStateV1) bool {
-	if left.Target.Workspace != right.Target.Workspace || left.Target.HeadCommit != right.Target.HeadCommit || !reflect.DeepEqual(left.Target.FrontierCommits, right.Target.FrontierCommits) || len(left.Payloads) != len(right.Payloads) {
+	if left.StackShape != right.StackShape || left.Target.Workspace != right.Target.Workspace || left.Target.HeadCommit != right.Target.HeadCommit || left.Target.HeadChangeID != right.Target.HeadChangeID || !reflect.DeepEqual(left.Target.FrontierCommits, right.Target.FrontierCommits) || len(left.Payloads) != len(right.Payloads) {
 		return false
 	}
 	for i := range left.Payloads {
@@ -746,18 +835,18 @@ func loadIntegrationOperationRecord(stateDir, operationID string) (integrationOp
 func validateIntegrationOperationRecordJSONKeys(data []byte) error {
 	top, err := decodeExactJSONObject(data, "integration operation record", []string{
 		"schema", "operationId", "requestDigest", "requestBytes", "canonicalProjectPath", "canonicalTargetPath",
-		"phase", "beforeOperationId", "commitPointOperationId", "preparedState", "beforeRepositoryView", "graphOperationId", "detachedOperationIds", "publishPending", "stagedTargetState", "stagedPayloadMappings", "stagedRepositoryView", "targetAdvancedState", "receipt",
+		"phase", "beforeOperationId", "commitPointOperationId", "preparedState", "beforeRepositoryView", "graphOperationId", "detachedOperationIds", "generatedCommitIds", "payloadCursors", "publishPending", "stagedTargetState", "stagedPayloadMappings", "stagedRepositoryView", "targetAdvancedState", "receipt",
 	})
 	if err != nil {
 		return err
 	}
 	if raw := top["preparedState"]; len(raw) > 0 {
-		prepared, err := decodeExactJSONObject(raw, "preparedState", []string{"target", "payloads"})
+		prepared, err := decodeExactJSONObject(raw, "preparedState", []string{"target", "payloads", "stackShape"})
 		if err != nil {
 			return err
 		}
 		if rawTarget := prepared["target"]; len(rawTarget) > 0 {
-			if _, err := decodeExactJSONObject(rawTarget, "preparedState.target", []string{"workspace", "headCommit", "frontierCommits"}); err != nil {
+			if _, err := decodeExactJSONObject(rawTarget, "preparedState.target", []string{"workspace", "headCommit", "headChangeId", "frontierCommits"}); err != nil {
 				return err
 			}
 		}
@@ -795,6 +884,11 @@ func validateIntegrationOperationRecordJSONKeys(data []byte) error {
 			}
 		}
 	}
+	if raw := top["payloadCursors"]; len(raw) > 0 {
+		if err := validateIntegrationJSONObjectArray(raw, "payloadCursors", []string{"workspace", "headCommit"}); err != nil {
+			return err
+		}
+	}
 	for _, field := range []string{"stagedTargetState", "targetAdvancedState"} {
 		if raw := top[field]; len(raw) > 0 && string(raw) != "null" {
 			if _, err := decodeExactJSONObject(raw, field, []string{"integratedTipCommit", "afterHeadCommit"}); err != nil {
@@ -810,7 +904,7 @@ func validateIntegrationOperationRecordJSONKeys(data []byte) error {
 			return err
 		}
 		if rawTarget := receipt["target"]; len(rawTarget) > 0 {
-			if _, err := decodeExactJSONObject(rawTarget, "receipt.target", []string{"workspace", "beforeHeadCommit", "integratedTipCommit", "afterHeadCommit"}); err != nil {
+			if _, err := decodeExactJSONObject(rawTarget, "receipt.target", []string{"workspace", "beforeHeadCommit", "beforeHeadChangeId", "preservationDisposition", "preservedCommit", "integratedTipCommit", "afterHeadCommit"}); err != nil {
 				return err
 			}
 		}
@@ -914,6 +1008,32 @@ func validateIntegrationOperationRecordSemantic(record integrationOperationRecor
 	if len(record.DetachedOperationIDs) > 0 && record.GraphOperationID != record.DetachedOperationIDs[len(record.DetachedOperationIDs)-1] {
 		return errors.New("integration operation record graph-operation chain is inconsistent")
 	}
+	if len(record.GeneratedCommitIDs) > integrationMaxDetachedOperations {
+		return errors.New("integration operation record generated commit evidence exceeds the limit")
+	}
+	seenGenerated := map[string]struct{}{}
+	for _, commit := range record.GeneratedCommitIDs {
+		if !integrationCommitIDRE.MatchString(commit) {
+			return errors.New("integration operation record generated commit evidence is invalid")
+		}
+		if _, duplicate := seenGenerated[commit]; duplicate {
+			return errors.New("integration operation record generated commit evidence contains a duplicate")
+		}
+		seenGenerated[commit] = struct{}{}
+	}
+	if len(record.PayloadCursors) > len(request.Payloads) {
+		return errors.New("integration operation record payload cursor count is invalid")
+	}
+	seenCursorHeads := map[string]struct{}{}
+	for i, cursor := range record.PayloadCursors {
+		if cursor.Workspace != request.Payloads[i].Workspace || !integrationCommitIDRE.MatchString(cursor.HeadCommit) {
+			return errors.New("integration operation record payload cursor evidence is invalid")
+		}
+		if _, duplicate := seenCursorHeads[cursor.HeadCommit]; duplicate {
+			return errors.New("integration operation record payload cursor evidence contains a duplicate")
+		}
+		seenCursorHeads[cursor.HeadCommit] = struct{}{}
+	}
 	for _, state := range []*integrationTargetAdvancedStateV1{record.StagedTargetState, record.TargetAdvancedState} {
 		if state != nil && (!integrationCommitIDRE.MatchString(state.IntegratedTipCommit) || !integrationCommitIDRE.MatchString(state.AfterHeadCommit)) {
 			return errors.New("integration operation record target state is invalid")
@@ -936,7 +1056,7 @@ func validateIntegrationOperationRecordSemantic(record integrationOperationRecor
 			}
 		}
 	}
-	if record.PreparedState.Target.Workspace != request.Target.ExpectedWorkspace || record.PreparedState.Target.HeadCommit != request.Target.ExpectedHeadCommit || len(record.PreparedState.Payloads) != len(request.Payloads) {
+	if record.PreparedState.Target.Workspace != request.Target.ExpectedWorkspace || record.PreparedState.Target.HeadCommit != request.Target.ExpectedHeadCommit || !integrationFullChangeIDRE.MatchString(record.PreparedState.Target.HeadChangeID) || len(record.PreparedState.Payloads) != len(request.Payloads) {
 		return errors.New("integration operation record prepared target is inconsistent with its request")
 	}
 	targetFrontier := record.PreparedState.Target.FrontierCommits
@@ -952,11 +1072,16 @@ func validateIntegrationOperationRecordSemantic(record integrationOperationRecor
 		}
 	}
 	if request.Strategy == integrationStrategyOrderedLine {
-		if len(targetFrontier) == 0 {
-			return errors.New("ordered-line integration operation record target frontier is empty")
+		if len(targetFrontier) != 1 || targetFrontier[0] != record.PreparedState.Target.HeadCommit || record.PreparedState.StackShape != "ordered-line" {
+			return errors.New("ordered-line integration operation record target frontier or shape is invalid")
 		}
-	} else if len(targetFrontier) != 0 {
-		return errors.New("non-ordered integration operation record has ordered-line target frontier evidence")
+	} else {
+		if len(targetFrontier) != 0 {
+			return errors.New("non-ordered integration operation record has ordered-line target frontier evidence")
+		}
+		if record.PreparedState.StackShape != "linear" && record.PreparedState.StackShape != "merge" {
+			return errors.New("integration operation record prepared Stack shape is invalid")
+		}
 	}
 	totalPreparedChanges := 0
 	seenPreparedChanges := map[string]struct{}{}
@@ -982,12 +1107,10 @@ func validateIntegrationOperationRecordSemantic(record integrationOperationRecor
 			if !integrationFullChangeIDRE.MatchString(change.ChangeID) || !integrationCommitIDRE.MatchString(change.CommitID) {
 				return errors.New("integration operation record prepared change evidence is invalid")
 			}
-			if request.Strategy == integrationStrategyOrderedLine {
-				if _, duplicate := seenPreparedChanges[change.ChangeID]; duplicate {
-					return errors.New("ordered-line prepared change evidence overlaps payloads")
-				}
-				seenPreparedChanges[change.ChangeID] = struct{}{}
+			if _, duplicate := seenPreparedChanges[change.ChangeID]; duplicate {
+				return errors.New("prepared change evidence overlaps payloads")
 			}
+			seenPreparedChanges[change.ChangeID] = struct{}{}
 		}
 		for _, commit := range prepared.FrontierCommits {
 			if !integrationCommitIDRE.MatchString(commit) {
@@ -1005,19 +1128,19 @@ func validateIntegrationOperationRecordSemantic(record integrationOperationRecor
 	}
 	switch record.Phase {
 	case integrationPhasePrepared:
-		if record.Receipt != nil || record.GraphOperationID != "" || len(record.DetachedOperationIDs) != 0 || record.PublishPending || record.StagedTargetState != nil || len(record.StagedPayloadMappings) != 0 || record.CommitPointOperation != "" || record.TargetAdvancedState != nil || len(record.StagedRepositoryView.Workspaces) != 0 {
+		if record.Receipt != nil || record.GraphOperationID != "" || len(record.DetachedOperationIDs) != 0 || len(record.GeneratedCommitIDs) != 0 || len(record.PayloadCursors) != 0 || record.PublishPending || record.StagedTargetState != nil || len(record.StagedPayloadMappings) != 0 || record.CommitPointOperation != "" || record.TargetAdvancedState != nil || len(record.StagedRepositoryView.Workspaces) != 0 {
 			return errors.New("prepared integration operation record is inconsistent")
 		}
 	case integrationPhaseGraphRewritten:
-		if record.Receipt != nil || record.GraphOperationID == "" || len(record.DetachedOperationIDs) == 0 || record.CommitPointOperation != "" || record.TargetAdvancedState != nil || (record.PublishPending && (record.StagedTargetState == nil || len(record.StagedPayloadMappings) != len(request.Payloads) || len(record.StagedRepositoryView.Workspaces) == 0)) {
+		if record.Receipt != nil || record.GraphOperationID == "" || len(record.DetachedOperationIDs) == 0 || record.CommitPointOperation != "" || record.TargetAdvancedState != nil || (record.PublishPending && (record.StagedTargetState == nil || len(record.PayloadCursors) != len(request.Payloads) || len(record.StagedPayloadMappings) != len(request.Payloads) || len(record.StagedRepositoryView.Workspaces) == 0)) {
 			return errors.New("graph-rewritten integration operation record is inconsistent")
 		}
 	case integrationPhaseTargetAdvanced, integrationPhaseCursorsReconciled:
-		if record.PublishPending || record.CommitPointOperation == "" || record.TargetAdvancedState == nil || record.StagedTargetState == nil || len(record.StagedPayloadMappings) != len(request.Payloads) || len(record.StagedRepositoryView.Workspaces) == 0 || *record.TargetAdvancedState != *record.StagedTargetState || record.Receipt != nil {
+		if record.PublishPending || record.CommitPointOperation == "" || record.TargetAdvancedState == nil || record.StagedTargetState == nil || len(record.PayloadCursors) != len(request.Payloads) || len(record.StagedPayloadMappings) != len(request.Payloads) || len(record.StagedRepositoryView.Workspaces) == 0 || *record.TargetAdvancedState != *record.StagedTargetState || record.Receipt != nil {
 			return errors.New("post-commit nonterminal integration operation record is inconsistent")
 		}
 	case integrationPhaseTerminal:
-		if record.Receipt == nil || record.PublishPending {
+		if record.Receipt == nil || record.PublishPending || (record.Receipt.BatchDisposition == integrationBatchSucceeded && len(record.PayloadCursors) != len(request.Payloads)) {
 			return errors.New("terminal integration operation record is inconsistent")
 		}
 		if err := validateIntegrationTerminalReceipt(*record.Receipt, record, request); err != nil {
@@ -1033,8 +1156,8 @@ func validateIntegrationTerminalReceipt(receipt integrationReceiptV1, record int
 	if receipt.Schema != integrationReceiptSchemaV1 || receipt.OperationID != record.OperationID || receipt.RequestDigest != record.RequestDigest || receipt.Strategy != request.Strategy {
 		return errors.New("terminal integration receipt identity is invalid")
 	}
-	if receipt.Target.Workspace != request.Target.ExpectedWorkspace || receipt.Target.BeforeHeadCommit != request.Target.ExpectedHeadCommit {
-		return errors.New("terminal integration receipt target is inconsistent with its request")
+	if receipt.Target.Workspace != request.Target.ExpectedWorkspace || receipt.Target.BeforeHeadCommit != request.Target.ExpectedHeadCommit || receipt.Target.BeforeHeadChangeID != record.PreparedState.Target.HeadChangeID || receipt.Target.PreservedCommit != request.Target.ExpectedHeadCommit {
+		return errors.New("terminal integration receipt target preservation is inconsistent with its request")
 	}
 	if len(receipt.Payloads) != len(request.Payloads) || len(receipt.Payloads) > integrationMaxPayloads || receipt.JJOperations.BeforeEffect != record.BeforeOperationID || receipt.JJOperations.CommitPoint != record.CommitPointOperation {
 		return errors.New("terminal integration receipt pre-state is inconsistent with its record")
@@ -1063,11 +1186,11 @@ func validateIntegrationTerminalReceipt(receipt integrationReceiptV1, record int
 	}
 	switch receipt.BatchDisposition {
 	case integrationBatchSucceeded:
-		if receipt.Error != nil || !integrationCommitIDRE.MatchString(receipt.Target.IntegratedTipCommit) || !integrationCommitIDRE.MatchString(receipt.Target.AfterHeadCommit) || record.CommitPointOperation == "" || record.GraphOperationID != record.CommitPointOperation || len(record.DetachedOperationIDs) == 0 || record.DetachedOperationIDs[len(record.DetachedOperationIDs)-1] != record.GraphOperationID || receipt.JJOperations.CommitPoint != record.CommitPointOperation || record.StagedTargetState == nil || record.TargetAdvancedState == nil || *record.StagedTargetState != *record.TargetAdvancedState || receipt.Target.IntegratedTipCommit != record.TargetAdvancedState.IntegratedTipCommit || receipt.Target.AfterHeadCommit != record.TargetAdvancedState.AfterHeadCommit {
+		if receipt.Error != nil || receipt.Target.PreservationDisposition != integrationTargetPreservedExact || !integrationCommitIDRE.MatchString(receipt.Target.IntegratedTipCommit) || !integrationCommitIDRE.MatchString(receipt.Target.AfterHeadCommit) || record.CommitPointOperation == "" || record.GraphOperationID != record.CommitPointOperation || len(record.DetachedOperationIDs) == 0 || record.DetachedOperationIDs[len(record.DetachedOperationIDs)-1] != record.GraphOperationID || receipt.JJOperations.CommitPoint != record.CommitPointOperation || record.StagedTargetState == nil || record.TargetAdvancedState == nil || *record.StagedTargetState != *record.TargetAdvancedState || receipt.Target.IntegratedTipCommit != record.TargetAdvancedState.IntegratedTipCommit || receipt.Target.AfterHeadCommit != record.TargetAdvancedState.AfterHeadCommit {
 			return errors.New("successful terminal integration receipt is incomplete")
 		}
 	case integrationBatchFailed:
-		if receipt.Error == nil || receipt.Target.IntegratedTipCommit != "" || receipt.Target.AfterHeadCommit != "" || receipt.JJOperations.CommitPoint != "" || record.CommitPointOperation != "" || record.TargetAdvancedState != nil {
+		if receipt.Error == nil || receipt.Target.PreservationDisposition != integrationTargetProvedUnchanged || receipt.Target.IntegratedTipCommit != "" || receipt.Target.AfterHeadCommit != "" || receipt.JJOperations.CommitPoint != "" || record.CommitPointOperation != "" || record.TargetAdvancedState != nil {
 			return errors.New("failed terminal integration receipt is inconsistent")
 		}
 		if err := validateStoredFailedIntegrationError(*receipt.Error); err != nil {

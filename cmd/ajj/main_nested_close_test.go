@@ -136,7 +136,7 @@ func TestNestedIntegrationMakesChildThenParentNormallyClosable(t *testing.T) {
 	defaultBefore := jjFullCommitID(t, paths.defaultPath, "default@")
 	speedBefore := jjFullCommitID(t, paths.defaultPath, "speed@")
 	childHead := jjFullCommitID(t, paths.defaultPath, "agm-speed-transition@")
-	childPayload := jjFullCommitID(t, paths.defaultPath, "agm-speed-transition@-")
+	childPayloadChange := jjRev(t, paths.defaultPath, "agm-speed-transition@-")
 	request := validIntegrationRequestBytes("nested-close-child", "speed", "agm-speed-transition", speedBefore, childHead)
 	withIntegrationStdin(t, string(request))
 	if out, errOut, err := captureOutput(func() error {
@@ -168,7 +168,7 @@ func TestNestedIntegrationMakesChildThenParentNormallyClosable(t *testing.T) {
 	if workspacePathExists(paths.childPath) {
 		t.Fatal("integrated child directory survived normal close")
 	}
-	if got := jjRevsetCount(t, paths.defaultPath, childPayload+" & ::speed@"); got != 1 {
+	if got := jjRevsetCount(t, paths.defaultPath, "change_id("+childPayloadChange+") & ::speed@"); got != 1 {
 		t.Fatalf("closing child lost payload protected by A: count=%d", got)
 	}
 	infos, _, err = loadWorkspaceInfos(paths.defaultPath, mustReadConfigForNestedClose(t, paths.defaultPath), "proj")
@@ -197,7 +197,7 @@ func TestNestedIntegrationMakesChildThenParentNormallyClosable(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("normally close A after Main integration: %v", err)
 	}
-	if got := jjRevsetCount(t, paths.defaultPath, childPayload+" & ::default@"); got != 1 {
+	if got := jjRevsetCount(t, paths.defaultPath, "change_id("+childPayloadChange+") & ::default@"); got != 1 {
 		t.Fatalf("closing A lost nested payload protected by Main: count=%d", got)
 	}
 }

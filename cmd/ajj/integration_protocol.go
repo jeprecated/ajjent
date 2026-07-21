@@ -40,6 +40,9 @@ const (
 	integrationPayloadUnknownEffect      = "unknown-effect"
 	integrationPayloadFailedBeforeEffect = "failed-before-effect"
 
+	integrationTargetPreservedExact  = "preserved-exact-ancestor"
+	integrationTargetProvedUnchanged = "proved-unchanged"
+
 	integrationErrorInvalidJSON              = "invalid-json"
 	integrationErrorInvalidRequest           = "invalid-request"
 	integrationErrorOperationIDContradiction = "operation-id-contradiction"
@@ -94,10 +97,13 @@ type integrationReceiptV1 struct {
 }
 
 type integrationReceiptTargetV1 struct {
-	Workspace           string `json:"workspace"`
-	BeforeHeadCommit    string `json:"beforeHeadCommit"`
-	IntegratedTipCommit string `json:"integratedTipCommit,omitempty"`
-	AfterHeadCommit     string `json:"afterHeadCommit,omitempty"`
+	Workspace               string `json:"workspace"`
+	BeforeHeadCommit        string `json:"beforeHeadCommit"`
+	BeforeHeadChangeID      string `json:"beforeHeadChangeId,omitempty"`
+	PreservationDisposition string `json:"preservationDisposition,omitempty"`
+	PreservedCommit         string `json:"preservedCommit,omitempty"`
+	IntegratedTipCommit     string `json:"integratedTipCommit,omitempty"`
+	AfterHeadCommit         string `json:"afterHeadCommit,omitempty"`
 }
 
 type integrationReceiptPayloadV1 struct {
@@ -131,24 +137,29 @@ type ajjCapabilitiesV1 struct {
 }
 
 type integrationCapabilitiesV1 struct {
-	RequestSchema          string   `json:"requestSchema"`
-	ReceiptSchema          string   `json:"receiptSchema"`
-	Strategies             []string `json:"strategies"`
-	ExecutableStrategies   []string `json:"executableStrategies"`
-	PreparationOnly        bool     `json:"preparationOnly"`
-	MinimumJJVersion       string   `json:"minimumJjVersion"`
-	TargetResolution       string   `json:"targetResolution"`
-	ExactHeadAssertions    bool     `json:"exactHeadAssertions"`
-	Recovery               bool     `json:"recovery"`
-	PerPayloadDispositions []string `json:"perPayloadDispositions"`
-	BatchDispositions      []string `json:"batchDispositions"`
-	OperationIDPattern     string   `json:"operationIdPattern"`
-	MaxRequestBytes        int      `json:"maxRequestBytes"`
-	MaxOutputBytes         int      `json:"maxOutputBytes"`
-	MaxPayloads            int      `json:"maxPayloads"`
-	MaxChangesPerPayload   int      `json:"maxChangesPerPayload"`
-	MaxReceiptChanges      int      `json:"maxReceiptChanges"`
-	MaxErrorMessageBytes   int      `json:"maxErrorMessageBytes"`
+	RequestSchema            string   `json:"requestSchema"`
+	ReceiptSchema            string   `json:"receiptSchema"`
+	Strategies               []string `json:"strategies"`
+	ExecutableStrategies     []string `json:"executableStrategies"`
+	PreparationOnly          bool     `json:"preparationOnly"`
+	MinimumJJVersion         string   `json:"minimumJjVersion"`
+	TargetResolution         string   `json:"targetResolution"`
+	ExactHeadAssertions      bool     `json:"exactHeadAssertions"`
+	TargetHeadPolicy         string   `json:"targetHeadPolicy"`
+	SupportsNonEmptyTarget   bool     `json:"supportsNonEmptyTarget"`
+	SupportsDescribedTarget  bool     `json:"supportsDescribedTarget"`
+	SupportsImmutableTarget  bool     `json:"supportsImmutableTarget"`
+	SupportsConflictedTarget bool     `json:"supportsConflictedTarget"`
+	Recovery                 bool     `json:"recovery"`
+	PerPayloadDispositions   []string `json:"perPayloadDispositions"`
+	BatchDispositions        []string `json:"batchDispositions"`
+	OperationIDPattern       string   `json:"operationIdPattern"`
+	MaxRequestBytes          int      `json:"maxRequestBytes"`
+	MaxOutputBytes           int      `json:"maxOutputBytes"`
+	MaxPayloads              int      `json:"maxPayloads"`
+	MaxChangesPerPayload     int      `json:"maxChangesPerPayload"`
+	MaxReceiptChanges        int      `json:"maxReceiptChanges"`
+	MaxErrorMessageBytes     int      `json:"maxErrorMessageBytes"`
 }
 
 type integrationOperationRecord struct {
@@ -165,6 +176,8 @@ type integrationOperationRecord struct {
 	BeforeRepositoryView  integrationRepositoryViewV1       `json:"beforeRepositoryView"`
 	GraphOperationID      string                            `json:"graphOperationId,omitempty"`
 	DetachedOperationIDs  []string                          `json:"detachedOperationIds,omitempty"`
+	GeneratedCommitIDs    []string                          `json:"generatedCommitIds,omitempty"`
+	PayloadCursors        []integrationPayloadCursorV1      `json:"payloadCursors,omitempty"`
 	PublishPending        bool                              `json:"publishPending,omitempty"`
 	StagedTargetState     *integrationTargetAdvancedStateV1 `json:"stagedTargetState,omitempty"`
 	StagedPayloadMappings [][]integrationReceiptChangeV1    `json:"stagedPayloadMappings,omitempty"`
@@ -201,15 +214,20 @@ func integrationCapabilities() ajjCapabilitiesV1 {
 	return ajjCapabilitiesV1{
 		Schema: integrationCapabilitiesSchemaV1,
 		Integrate: integrationCapabilitiesV1{
-			RequestSchema:        integrationRequestSchemaV1,
-			ReceiptSchema:        integrationReceiptSchemaV1,
-			Strategies:           []string{integrationStrategySingle, integrationStrategyProviderDefault, integrationStrategyOrderedLine},
-			ExecutableStrategies: []string{integrationStrategySingle, integrationStrategyProviderDefault, integrationStrategyOrderedLine},
-			PreparationOnly:      false,
-			MinimumJJVersion:     jjMinVersion,
-			TargetResolution:     "current-workspace",
-			ExactHeadAssertions:  true,
-			Recovery:             true,
+			RequestSchema:            integrationRequestSchemaV1,
+			ReceiptSchema:            integrationReceiptSchemaV1,
+			Strategies:               []string{integrationStrategySingle, integrationStrategyProviderDefault, integrationStrategyOrderedLine},
+			ExecutableStrategies:     []string{integrationStrategySingle, integrationStrategyProviderDefault, integrationStrategyOrderedLine},
+			PreparationOnly:          false,
+			MinimumJJVersion:         jjMinVersion,
+			TargetResolution:         "current-workspace",
+			ExactHeadAssertions:      true,
+			TargetHeadPolicy:         "preserve-materialized-current",
+			SupportsNonEmptyTarget:   true,
+			SupportsDescribedTarget:  true,
+			SupportsImmutableTarget:  true,
+			SupportsConflictedTarget: false,
+			Recovery:                 true,
 			PerPayloadDispositions: []string{
 				integrationPayloadLanded,
 				integrationPayloadProvedNotLanded,

@@ -20,6 +20,7 @@ func TestRunIntegrateSingleLandsInCurrentWorkspaceThenMain(t *testing.T) {
 	speedBefore := jjFullCommitID(t, paths.defaultPath, "speed@")
 	childHead := jjFullCommitID(t, paths.defaultPath, "agm-speed-transition@")
 	childPayload := jjFullCommitID(t, paths.defaultPath, "agm-speed-transition@-")
+	childPayloadChange := jjRev(t, paths.defaultPath, "agm-speed-transition@-")
 	request := validIntegrationRequestBytes("single-speed", "speed", "agm-speed-transition", speedBefore, childHead)
 
 	withIntegrationStdin(t, string(request))
@@ -39,11 +40,14 @@ func TestRunIntegrateSingleLandsInCurrentWorkspaceThenMain(t *testing.T) {
 	if got := jjFullCommitID(t, paths.defaultPath, "speed@"); got != receipt.Target.AfterHeadCommit {
 		t.Fatalf("receipt target after head is stale: receipt=%s graph=%s", receipt.Target.AfterHeadCommit, got)
 	}
-	if got := jjRevsetCount(t, paths.defaultPath, childPayload+" & ::speed@"); got != 1 {
-		t.Fatalf("child payload is not represented in speed: count=%d\n%s", got, errOut)
-	}
 	if len(receipt.Payloads[0].Changes) != 1 || receipt.Payloads[0].Changes[0].InputCommit != childPayload || receipt.Payloads[0].Changes[0].LandedCommit == "" {
 		t.Fatalf("receipt did not map exact payload change: %+v", receipt.Payloads[0])
+	}
+	if got := jjRevsetCount(t, paths.defaultPath, receipt.Payloads[0].Changes[0].LandedCommit+" & ::speed@"); got != 1 {
+		t.Fatalf("landed child payload is not represented in speed: count=%d\n%s", got, errOut)
+	}
+	if receipt.Target.PreservedCommit != speedBefore || receipt.Target.PreservationDisposition != integrationTargetPreservedExact || jjRevsetCount(t, paths.defaultPath, speedBefore+" & ::speed@") != 1 {
+		t.Fatalf("receipt did not prove exact target preservation: %+v", receipt.Target)
 	}
 	record, found, loadErr := loadIntegrationOperationRecord(filepath.Join(paths.defaultPath, ".ajj", "integrations"), "single-speed")
 	if loadErr != nil || !found || len(record.DetachedOperationIDs) == 0 || record.GraphOperationID != record.DetachedOperationIDs[len(record.DetachedOperationIDs)-1] || record.CommitPointOperation != record.GraphOperationID || record.PublishPending {
@@ -75,12 +79,268 @@ func TestRunIntegrateSingleLandsInCurrentWorkspaceThenMain(t *testing.T) {
 	if mainErr != nil {
 		t.Fatalf("Main <- A integration failed: %v\nstdout:%s\nstderr:%s", mainErr, mainOut, mainErrOut)
 	}
-	if got := jjRevsetCount(t, paths.defaultPath, childPayload+" & ::default@"); got != 1 {
+	if got := jjRevsetCount(t, paths.defaultPath, "change_id("+childPayloadChange+") & ::default@"); got != 1 {
 		t.Fatalf("Main does not represent the nested child payload: %d", got)
 	}
 }
 
-func TestRunIntegrateProviderDefaultMergePreservesPayloadCommits(t *testing.T) {
+func TestIntegrationPreservesImmutableMaterializedTargetAndRecovers(t *testing.T) {
+	paths := setupRealStackRepo(t)
+	ignoreIntegrationStateInFixture(t, paths.defaultPath)
+	runJJ(t, "-R", paths.defaultPath, "commit", "-m", "project config")
+	if err := os.WriteFile(filepath.Join(paths.speedPath, "immutable-target.txt"), []byte("immutable target\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runJJ(t, "-R", paths.speedPath, "describe", "-m", "materialized immutable target")
+	updateIntegrationFixtureWorkspaces(t, paths.defaultPath, paths.speedPath, paths.childPath)
+	targetBefore := jjFullCommitID(t, paths.defaultPath, "speed@")
+	runJJ(t, "-R", paths.defaultPath, "bookmark", "create", "immutable-target", "-r", targetBefore)
+	runJJ(t, "-R", paths.defaultPath, "config", "set", "--repo", `revset-aliases."immutable_heads()"`, "immutable-target")
+	if jjRevsetCount(t, paths.defaultPath, targetBefore+" & immutable() & ~empty()") != 1 {
+		t.Fatal("target is not immutable and materialized")
+	}
+	payloadHead := jjFullCommitID(t, paths.defaultPath, "agm-speed-transition@")
+	request := validIntegrationRequestBytes("immutable-target", "speed", "agm-speed-transition", targetBefore, payloadHead)
+	withIntegrationStdin(t, string(request))
+	out, stderr, err := captureOutput(func() error { return runIntegrate([]string{"--repo", paths.speedPath, "--request-json", "-"}) })
+	if err != nil {
+		t.Fatalf("immutable target integration failed: %v\n%s\n%s", err, out, stderr)
+	}
+	receipt := decodeIntegrationReceipt(t, out)
+	if receipt.Target.PreservedCommit != targetBefore || jjRevsetCount(t, paths.defaultPath, targetBefore+" & ::speed@") != 1 {
+		t.Fatalf("immutable target not preserved: %+v", receipt.Target)
+	}
+	if jjRevsetCount(t, paths.defaultPath, receipt.Target.AfterHeadCommit+" & mutable() & empty()") != 1 {
+		t.Fatal("generated target cursor is not mutable and empty")
+	}
+	recovered, _, recoverErr := captureOutput(func() error {
+		return runIntegrate([]string{"--repo", paths.speedPath, "--recover", "immutable-target", "--json"})
+	})
+	if recoverErr != nil || recovered != out {
+		t.Fatalf("immutable target recovery mismatch: %v\n%s\n%s", recoverErr, out, recovered)
+	}
+}
+
+func TestIntegrationRejectsConfiguredMainAsNonCurrentPayload(t *testing.T) {
+	for _, tc := range []struct {
+		name, strategy string
+		payloads       []string
+	}{
+		{name: "single", strategy: integrationStrategySingle, payloads: []string{"default"}},
+		{name: "batch", strategy: integrationStrategyProviderDefault, payloads: []string{"agm-speed-transition", "default"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			paths := setupRealStackRepo(t)
+			ignoreIntegrationStateInFixture(t, paths.defaultPath)
+			updateIntegrationFixtureWorkspaces(t, paths.defaultPath, paths.speedPath, paths.childPath)
+			mainBefore := jjFullCommitID(t, paths.defaultPath, "default@")
+			target := jjFullCommitID(t, paths.defaultPath, "speed@")
+			commits := make([]string, len(tc.payloads))
+			for i, handle := range tc.payloads {
+				commits[i] = jjFullCommitID(t, paths.defaultPath, handle+"@")
+			}
+			request := integrationRequestBytesForStrategy("main-payload-"+tc.name, "speed", tc.payloads, target, commits, tc.strategy)
+			withIntegrationStdin(t, string(request))
+			out, _, err := captureOutput(func() error { return runIntegrate([]string{"--repo", paths.speedPath, "--request-json", "-"}) })
+			if err == nil {
+				t.Fatal("configured Main payload unexpectedly accepted")
+			}
+			receipt := decodeIntegrationReceipt(t, out)
+			if receipt.Error == nil || receipt.Error.Code != integrationErrorAssertionFailed {
+				t.Fatalf("unexpected receipt: %+v", receipt)
+			}
+			if got := jjFullCommitID(t, paths.defaultPath, "default@"); got != mainBefore {
+				t.Fatalf("Main moved: %s -> %s", mainBefore, got)
+			}
+			path, _ := integrationOperationRecordPath(filepath.Join(paths.defaultPath, ".ajj", "integrations"), "main-payload-"+tc.name)
+			if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("rejected Main payload persisted journal: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestIntegrationAssertionsAfterCaptureAreOperationPinned(t *testing.T) {
+	paths := setupRealStackRepo(t)
+	updateIntegrationFixtureWorkspaces(t, paths.defaultPath, paths.speedPath, paths.childPath)
+	operationID, err := currentOperationFullID(paths.speedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := integrationRequestV1{Schema: integrationRequestSchemaV1, OperationID: "pinned", Strategy: integrationStrategySingle,
+		Target:   integrationTargetAssertionV1{ExpectedWorkspace: "speed", ExpectedHeadCommit: jjFullCommitID(t, paths.defaultPath, "speed@")},
+		Payloads: []integrationPayloadAssertionV1{{Workspace: "agm-speed-transition", ExpectedHeadCommit: jjFullCommitID(t, paths.defaultPath, "agm-speed-transition@")}}}
+	original := commandCaptureFn
+	commandCaptureFn = func(name string, args ...string) (string, error) {
+		if filepath.Base(name) == "jj" {
+			joined := strings.Join(args, " ")
+			if !strings.Contains(joined, "--at-op="+operationID) || !strings.Contains(joined, "--ignore-working-copy") {
+				return "", fmt.Errorf("post-capture query is not pinned: %s", joined)
+			}
+		}
+		return original(name, args...)
+	}
+	t.Cleanup(func() { commandCaptureFn = original })
+	if _, err := validateIntegrationAssertionsAtOperation(paths.speedPath, operationID, request); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestIntegrationRestoresExactOmittedDescendantHeads(t *testing.T) {
+	for _, strategy := range []string{integrationStrategySingle, integrationStrategyProviderDefault, integrationStrategyOrderedLine} {
+		t.Run(strategy, func(t *testing.T) {
+			paths := setupRealStackRepo(t)
+			ignoreIntegrationStateInFixture(t, paths.defaultPath)
+			runJJ(t, "-R", paths.defaultPath, "commit", "-m", "project config")
+			updateIntegrationFixtureWorkspaces(t, paths.defaultPath, paths.speedPath, paths.childPath)
+			omittedPath := filepath.Join(filepath.Dir(paths.defaultPath), "omitted")
+			runJJ(t, "-R", paths.defaultPath, "workspace", "add", "--name", "omitted", "--revision", "agm-speed-transition@-", omittedPath)
+			if err := os.WriteFile(filepath.Join(omittedPath, "omitted.txt"), []byte("omitted\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_ = exec.Command("jj", "-R", omittedPath, "file", "track", "root:omitted.txt").Run()
+			runJJ(t, "-R", omittedPath, "commit", "-m", "omitted descendant")
+			updateIntegrationFixtureWorkspaces(t, paths.defaultPath, paths.speedPath, paths.childPath, omittedPath)
+			mainBefore := jjFullCommitID(t, paths.defaultPath, "default@")
+			omittedBefore := jjFullCommitID(t, paths.defaultPath, "omitted@")
+			targetBefore := jjFullCommitID(t, paths.defaultPath, "speed@")
+			payloadHead := jjFullCommitID(t, paths.defaultPath, "agm-speed-transition@")
+			request := integrationRequestBytesForStrategy("omitted-"+strategy, "speed", []string{"agm-speed-transition"}, targetBefore, []string{payloadHead}, strategy)
+			withIntegrationStdin(t, string(request))
+			out, stderr, err := captureOutput(func() error { return runIntegrate([]string{"--repo", paths.speedPath, "--request-json", "-"}) })
+			if err != nil {
+				stateDir := filepath.Join(paths.defaultPath, ".ajj", "integrations")
+				record, _, _ := loadIntegrationOperationRecord(stateDir, "omitted-"+strategy)
+				dump, _ := commandCaptureFn("jj", "-R", paths.defaultPath, "--ignore-working-copy", "--at-op="+record.GraphOperationID, "log", "-r", "visible_heads()", "--no-graph", "-T", `commit_id ++ " " ++ change_id ++ " " ++ description.first_line() ++ "\n"`)
+				t.Fatalf("integration failed: %v\n%s\n%s\nvisible:\n%s", err, out, stderr, dump)
+			}
+			if got := jjFullCommitID(t, paths.defaultPath, "omitted@"); got != omittedBefore {
+				t.Fatalf("omitted head moved: %s -> %s", omittedBefore, got)
+			}
+			if got := jjFullCommitID(t, paths.defaultPath, "default@"); got != mainBefore {
+				t.Fatalf("Main moved: %s -> %s", mainBefore, got)
+			}
+		})
+	}
+}
+
+func TestIntegrationLandsDescribedNonemptyPayloadHeadWithFreshCursor(t *testing.T) {
+	paths := setupRealStackRepo(t)
+	ignoreIntegrationStateInFixture(t, paths.defaultPath)
+	runJJ(t, "-R", paths.defaultPath, "commit", "-m", "project config")
+	updateIntegrationFixtureWorkspaces(t, paths.defaultPath, paths.speedPath, paths.childPath)
+	if err := os.WriteFile(filepath.Join(paths.childPath, "head.txt"), []byte("materialized\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = exec.Command("jj", "-R", paths.childPath, "file", "track", "root:head.txt").Run()
+	runJJ(t, "-R", paths.childPath, "describe", "-m", "materialized payload head")
+	payloadHead := jjFullCommitID(t, paths.defaultPath, "agm-speed-transition@")
+	payloadChange := jjRev(t, paths.defaultPath, "agm-speed-transition@")
+	targetBefore := jjFullCommitID(t, paths.defaultPath, "speed@")
+	request := validIntegrationRequestBytes("described-payload", "speed", "agm-speed-transition", targetBefore, payloadHead)
+	withIntegrationStdin(t, string(request))
+	out, stderr, err := captureOutput(func() error { return runIntegrate([]string{"--repo", paths.speedPath, "--request-json", "-"}) })
+	if err != nil {
+		t.Fatalf("integration failed: %v\n%s\n%s", err, out, stderr)
+	}
+	if got := jjRevsetCount(t, paths.defaultPath, "change_id("+payloadChange+") & ::speed@"); got != 1 {
+		t.Fatalf("materialized payload change not landed: %d", got)
+	}
+	if got := jjRevsetCount(t, paths.defaultPath, `agm-speed-transition@ & empty() & description("") & mutable() & ~conflicts()`); got != 1 {
+		t.Fatalf("selected payload did not receive a fresh cursor: %d", got)
+	}
+	record, found, loadErr := loadIntegrationOperationRecord(filepath.Join(paths.defaultPath, ".ajj", "integrations"), "described-payload")
+	if loadErr != nil || !found || len(record.PayloadCursors) != 1 || record.PayloadCursors[0].Workspace != "agm-speed-transition" || record.PayloadCursors[0].HeadCommit != jjFullCommitID(t, paths.defaultPath, "agm-speed-transition@") {
+		t.Fatalf("exact payload cursor evidence missing: found=%v err=%v record=%+v", found, loadErr, record)
+	}
+	parsed, _, parseErr := parseIntegrationRequestV1(request)
+	if parseErr != nil {
+		t.Fatal(parseErr)
+	}
+	forged := cloneIntegrationRecord(t, record)
+	forged.PayloadCursors[0].HeadCommit = payloadHead
+	if err := proveDetachedIntegrationTransaction(paths.speedPath, forged, parsed); err == nil {
+		t.Fatal("old selected payload cursor was accepted as generated cursor evidence")
+	}
+}
+
+func TestVisibleHeadProofRequiresExactModeledCommit(t *testing.T) {
+	beforeID := strings.Repeat("a", 40)
+	substitute := strings.Repeat("b", 40)
+	before := integrationRepositoryViewV1{VisibleHeads: []string{beforeID}}
+	staged := integrationRepositoryViewV1{VisibleHeads: []string{substitute}}
+	record := integrationOperationRecord{PreparedState: integrationPreparedStateV1{Target: integrationPreparedTargetV1{HeadCommit: beforeID}}}
+	if err := proveNoUnmodeledVisibleHeads("/missing", strings.Repeat("1", 128), before, staged, record); err == nil {
+		t.Fatal("unrecorded coherent visible-head substitution was accepted")
+	}
+	record.GeneratedCommitIDs = []string{substitute}
+	if err := proveNoUnmodeledVisibleHeads("/missing", strings.Repeat("1", 128), before, staged, record); err != nil {
+		t.Fatalf("exact generated commit evidence was rejected: %v", err)
+	}
+}
+
+func TestPreparedProviderStackDoesNotSnapshotPostCaptureFilesystem(t *testing.T) {
+	paths := setupRealStackRepo(t)
+	ignoreIntegrationStateInFixture(t, paths.defaultPath)
+	runJJ(t, "-R", paths.defaultPath, "commit", "-m", "ignore integration state")
+	updateIntegrationFixtureWorkspaces(t, paths.defaultPath, paths.speedPath, paths.childPath)
+	targetBefore := jjFullCommitID(t, paths.defaultPath, "speed@")
+	payloadHead := jjFullCommitID(t, paths.defaultPath, "agm-speed-transition@")
+	request := validIntegrationRequestBytes("post-capture-filesystem", "speed", "agm-speed-transition", targetBefore, payloadHead)
+
+	originalPhaseHook := integrationEffectPhaseHook
+	var beforeOperation string
+	graphChecked := false
+	integrationEffectPhaseHook = func(phase string) error {
+		stateDir := filepath.Join(paths.defaultPath, ".ajj", "integrations")
+		record, found, err := loadIntegrationOperationRecord(stateDir, "post-capture-filesystem")
+		if err != nil || !found {
+			return fmt.Errorf("load integration record: found=%v err=%w", found, err)
+		}
+		switch phase {
+		case integrationPhasePrepared:
+			beforeOperation = record.BeforeOperationID
+			if err := os.WriteFile(filepath.Join(paths.speedPath, "late-target.txt"), []byte("must not be snapshotted\n"), 0o644); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(paths.childPath, "late-payload.txt"), []byte("must not be snapshotted\n"), 0o644)
+		case integrationPhaseGraphRewritten:
+			current, err := currentOperationFullID(paths.speedPath)
+			if err != nil {
+				return err
+			}
+			if beforeOperation == "" || current != beforeOperation {
+				return fmt.Errorf("live operation changed during detached planning: before=%s current=%s", beforeOperation, current)
+			}
+			for _, check := range []struct{ workspace, file string }{{"speed", "late-target.txt"}, {"agm-speed-transition", "late-payload.txt"}} {
+				files, queryErr := integrationQuery(paths.speedPath, record.GraphOperationID, "file", "list", "-r", check.workspace+"@")
+				if queryErr != nil {
+					return queryErr
+				}
+				if strings.Contains(files, check.file) {
+					return fmt.Errorf("post-capture file %q was snapshotted into detached graph", check.file)
+				}
+			}
+			graphChecked = true
+			return errors.New("stop after detached planning proof")
+		}
+		return nil
+	}
+	t.Cleanup(func() { integrationEffectPhaseHook = originalPhaseHook })
+
+	withIntegrationStdin(t, string(request))
+	out, errOut, err := captureOutput(func() error {
+		return runIntegrate([]string{"--repo", paths.speedPath, "--request-json", "-"})
+	})
+	if err == nil {
+		t.Fatalf("graph-rewritten interruption did not stop integration\nstdout:%s\nstderr:%s", out, errOut)
+	}
+	if !graphChecked {
+		t.Fatalf("detached graph proof was not reached: err=%v\nstdout:%s\nstderr:%s", err, out, errOut)
+	}
+}
+
+func TestRunIntegrateProviderDefaultMergeMapsPayloadCommits(t *testing.T) {
 	paths := setupRealStackMergeRepo(t, false)
 	ignoreIntegrationStateInFixture(t, paths.defaultPath)
 	runJJ(t, "-R", paths.defaultPath, "commit", "-m", "ignore integration state")
@@ -114,12 +374,15 @@ func TestRunIntegrateProviderDefaultMergePreservesPayloadCommits(t *testing.T) {
 	}
 	wantInputs := []string{alphaPayload, bravoPayload}
 	for i, payload := range receipt.Payloads {
-		if len(payload.Changes) != 1 || payload.Changes[0].InputCommit != wantInputs[i] || payload.Changes[0].LandedCommit != wantInputs[i] {
-			t.Fatalf("merge payload %d was not preserved exactly: %+v", i, payload)
+		if len(payload.Changes) != 1 || payload.Changes[0].InputCommit != wantInputs[i] || payload.Changes[0].LandedCommit == "" {
+			t.Fatalf("merge payload %d has no exact mapping: %+v", i, payload)
 		}
-		if got := jjRevsetCount(t, paths.defaultPath, wantInputs[i]+" & ::default@"); got != 1 {
+		if got := jjRevsetCount(t, paths.defaultPath, payload.Changes[0].LandedCommit+" & ::default@"); got != 1 {
 			t.Fatalf("merge payload %d is not represented in target", i)
 		}
+	}
+	if receipt.Target.PreservedCommit != targetBefore || jjRevsetCount(t, paths.defaultPath, targetBefore+" & ::default@") != 1 {
+		t.Fatalf("provider-default did not preserve exact target anchor: %+v", receipt.Target)
 	}
 }
 
@@ -575,7 +838,121 @@ func TestRunIntegrateAcceptsImmutablePayloadWithoutRewritingIt(t *testing.T) {
 	}
 }
 
-func TestMachineSingleMatchesOrdinaryStackGraphShape(t *testing.T) {
+func TestProviderDefaultIntegratesDivergentImmutableAndMixedPayloads(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		immutableBoth bool
+	}{
+		{name: "two immutable", immutableBoth: true},
+		{name: "mixed mutable and immutable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			paths := setupRealStackMergeRepo(t, false)
+			ignoreIntegrationStateInFixture(t, paths.defaultPath)
+			runJJ(t, "-R", paths.defaultPath, "commit", "-m", "ignore integration state")
+			updateIntegrationFixtureWorkspaces(t, paths.defaultPath, paths.alphaPath, paths.bravoPath)
+			alphaCommit := jjFullCommitID(t, paths.defaultPath, "alpha@-")
+			bravoCommit := jjFullCommitID(t, paths.defaultPath, "bravo@-")
+			runJJ(t, "-R", paths.defaultPath, "bookmark", "create", "immutable-alpha", "-r", alphaCommit)
+			immutableHeads := "immutable-alpha"
+			if tc.immutableBoth {
+				runJJ(t, "-R", paths.defaultPath, "bookmark", "create", "immutable-bravo", "-r", bravoCommit)
+				immutableHeads += " | immutable-bravo"
+			}
+			runJJ(t, "-R", paths.defaultPath, "config", "set", "--repo", `revset-aliases."immutable_heads()"`, immutableHeads)
+			targetBefore := jjFullCommitID(t, paths.defaultPath, "default@")
+			heads := []string{jjFullCommitID(t, paths.defaultPath, "alpha@"), jjFullCommitID(t, paths.defaultPath, "bravo@")}
+			operationID := "immutable-merge-" + strings.ReplaceAll(tc.name, " ", "-")
+			request := integrationRequestBytesForStrategy(operationID, "default", []string{"alpha", "bravo"}, targetBefore, heads, integrationStrategyProviderDefault)
+			withIntegrationStdin(t, string(request))
+			out, stderr, err := captureOutput(func() error { return runIntegrate([]string{"--repo", paths.defaultPath, "--request-json", "-"}) })
+			if err != nil {
+				t.Fatalf("provider-default immutable merge failed: %v\n%s\n%s", err, out, stderr)
+			}
+			receipt := decodeIntegrationReceipt(t, out)
+			if receipt.BatchDisposition != integrationBatchSucceeded || receipt.Target.PreservedCommit != targetBefore {
+				t.Fatalf("unexpected immutable merge receipt: %+v", receipt)
+			}
+			for i, want := range []string{alphaCommit, bravoCommit} {
+				if len(receipt.Payloads[i].Changes) != 1 || receipt.Payloads[i].Changes[0].InputCommit != want || receipt.Payloads[i].Changes[0].LandedCommit != want {
+					t.Fatalf("payload %d was rewritten: %+v", i, receipt.Payloads[i])
+				}
+			}
+			parents := integrationMustCommitIDs(t, paths.defaultPath, "parents(commit_id("+receipt.Target.IntegratedTipCommit+"))")
+			if !sameIntegrationCommitSet(parents, []string{targetBefore, alphaCommit, bravoCommit}) {
+				t.Fatalf("merge parents=%v", parents)
+			}
+			recovered, _, recoverErr := captureOutput(func() error {
+				return runIntegrate([]string{"--repo", paths.defaultPath, "--recover", operationID, "--json"})
+			})
+			if recoverErr != nil || recovered != out {
+				t.Fatalf("terminal immutable merge recovery mismatch: %v\n%s\n%s", recoverErr, out, recovered)
+			}
+			binding, bindErr := integrationStatePaths(paths.defaultPath, paths.defaultPath)
+			if bindErr != nil {
+				t.Fatal(bindErr)
+			}
+			record, found, loadRecordErr := loadIntegrationOperationRecord(binding.StateDir, operationID)
+			if loadRecordErr != nil || !found {
+				t.Fatalf("load record: %v found=%v", loadRecordErr, found)
+			}
+			forged := record
+			forged.GeneratedCommitIDs = append(append([]string(nil), record.GeneratedCommitIDs...), targetBefore)
+			if err := proveTerminalIntegrationRecord(paths.defaultPath, forged, integrationRequestFromRecord(record)); err == nil {
+				t.Fatal("extra generated commit evidence was accepted")
+			}
+		})
+	}
+}
+
+func TestProviderDefaultImmutableConflictProvesNoEffect(t *testing.T) {
+	paths := setupRealStackMergeRepo(t, true)
+	ignoreIntegrationStateInFixture(t, paths.defaultPath)
+	runJJ(t, "-R", paths.defaultPath, "commit", "-m", "ignore integration state")
+	updateIntegrationFixtureWorkspaces(t, paths.defaultPath, paths.alphaPath, paths.bravoPath)
+	alphaCommit := jjFullCommitID(t, paths.defaultPath, "alpha@-")
+	bravoCommit := jjFullCommitID(t, paths.defaultPath, "bravo@-")
+	runJJ(t, "-R", paths.defaultPath, "bookmark", "create", "immutable-alpha-conflict", "-r", alphaCommit)
+	runJJ(t, "-R", paths.defaultPath, "bookmark", "create", "immutable-bravo-conflict", "-r", bravoCommit)
+	runJJ(t, "-R", paths.defaultPath, "config", "set", "--repo", `revset-aliases."immutable_heads()"`, "immutable-alpha-conflict | immutable-bravo-conflict")
+	targetBefore := jjFullCommitID(t, paths.defaultPath, "default@")
+	heads := []string{jjFullCommitID(t, paths.defaultPath, "alpha@"), jjFullCommitID(t, paths.defaultPath, "bravo@")}
+	request := integrationRequestBytesForStrategy("immutable-merge-conflict", "default", []string{"alpha", "bravo"}, targetBefore, heads, integrationStrategyProviderDefault)
+	withIntegrationStdin(t, string(request))
+	out, _, err := captureOutput(func() error { return runIntegrate([]string{"--repo", paths.defaultPath, "--request-json", "-"}) })
+	if err == nil {
+		t.Fatal("conflicted immutable merge unexpectedly succeeded")
+	}
+	receipt := decodeIntegrationReceipt(t, out)
+	if receipt.BatchDisposition != integrationBatchFailed || receipt.Error == nil || receipt.Error.Code != integrationErrorConflict {
+		t.Fatalf("conflict did not prove no effect: %+v", receipt)
+	}
+	for _, payload := range receipt.Payloads {
+		if payload.Disposition != integrationPayloadProvedNotLanded {
+			t.Fatalf("payload disposition: %+v", payload)
+		}
+	}
+	if got := jjFullCommitID(t, paths.defaultPath, "default@"); got != targetBefore {
+		t.Fatalf("target moved on conflict: %s -> %s", targetBefore, got)
+	}
+	recovered, _, _ := captureOutput(func() error {
+		return runIntegrate([]string{"--repo", paths.defaultPath, "--recover", "immutable-merge-conflict", "--json"})
+	})
+	if recovered != out {
+		t.Fatalf("failed receipt recovery mismatch:\n%s\n%s", out, recovered)
+	}
+}
+
+func integrationMustCommitIDs(t *testing.T, repo, revset string) []string {
+	t.Helper()
+	ids, err := integrationCommitIDs(repo, revset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ids
+}
+
+func TestMachineSinglePreservesTargetWhileMatchingOrdinaryStackTree(t *testing.T) {
 	human := setupRealTidySingleStackRepo(t, false)
 	ignoreIntegrationStateInFixture(t, human.defaultPath)
 	runJJ(t, "-R", human.defaultPath, "commit", "-m", "ignore integration state")
@@ -602,8 +979,13 @@ func TestMachineSingleMatchesOrdinaryStackGraphShape(t *testing.T) {
 	}
 	humanGraph := normalizedStackGraph(t, human.defaultPath, "default")
 	machineGraph := normalizedStackGraph(t, machine.defaultPath, "default")
-	if humanGraph != machineGraph {
-		t.Fatalf("ordinary/machine normalized full graph mismatch:\n--- human ---\n%s\n--- machine ---\n%s", humanGraph, machineGraph)
+	humanTree := strings.SplitN(humanGraph, "\nTREE\n", 2)
+	machineTree := strings.SplitN(machineGraph, "\nTREE\n", 2)
+	if len(humanTree) != 2 || len(machineTree) != 2 || humanTree[1] != machineTree[1] {
+		t.Fatalf("ordinary/machine final trees differ:\n--- human ---\n%s\n--- machine ---\n%s", humanGraph, machineGraph)
+	}
+	if got := jjRevsetCount(t, machine.defaultPath, targetBefore+" & ::default@"); got != 1 {
+		t.Fatalf("machine integration rewrote or dropped asserted target commit: %d", got)
 	}
 }
 
@@ -630,7 +1012,7 @@ func normalizedStackGraph(t *testing.T, repoPath, target string) string {
 	return strings.TrimSpace(string(logOut)) + "\nTREE\n" + strings.Join(normalizedDiff, "\n")
 }
 
-func TestMachineIntegrationAbandonsTopEmptyMutableAncestors(t *testing.T) {
+func TestMachineIntegrationPreservesAssertedEmptyTargetAncestors(t *testing.T) {
 	paths := setupRealTidySingleStackRepo(t, false)
 	ignoreIntegrationStateInFixture(t, paths.defaultPath)
 	runJJ(t, "-R", paths.defaultPath, "commit", "-m", "ignore integration state")
@@ -639,9 +1021,10 @@ func TestMachineIntegrationAbandonsTopEmptyMutableAncestors(t *testing.T) {
 	if before := jjRevsetCount(t, paths.defaultPath, topEmptyMutableAncestorsRevset("default@")); before == 0 {
 		t.Fatal("fixture did not create a top empty mutable ancestor")
 	}
+	assertedTarget := jjFullCommitID(t, paths.defaultPath, "default@")
 	request := validIntegrationRequestBytes(
 		"empty-ancestor-cleanup", "default", "alpha",
-		jjFullCommitID(t, paths.defaultPath, "default@"), jjFullCommitID(t, paths.defaultPath, "alpha@"),
+		assertedTarget, jjFullCommitID(t, paths.defaultPath, "alpha@"),
 	)
 	withIntegrationStdin(t, string(request))
 	out, _, err := captureOutput(func() error {
@@ -650,8 +1033,11 @@ func TestMachineIntegrationAbandonsTopEmptyMutableAncestors(t *testing.T) {
 	if err != nil || decodeIntegrationReceipt(t, out).BatchDisposition != integrationBatchSucceeded {
 		t.Fatalf("machine integration with empty ancestors failed: %v\n%s", err, out)
 	}
-	if after := jjRevsetCount(t, paths.defaultPath, topEmptyMutableAncestorsRevset("default@")); after != 0 {
-		t.Fatalf("machine integration left %d top empty mutable ancestors", after)
+	if got := jjRevsetCount(t, paths.defaultPath, assertedTarget+" & ::default@"); got != 1 {
+		t.Fatalf("machine integration did not preserve asserted empty target exactly: %d", got)
+	}
+	if after := jjRevsetCount(t, paths.defaultPath, topEmptyMutableAncestorsRevset("default@")); after < 1 {
+		t.Fatalf("machine integration unexpectedly abandoned asserted empty ancestry: %d", after)
 	}
 }
 

@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Machine integration v1 now accepts exact non-conflicted materialized Current Workspace targets, preserves the asserted target commit unchanged as the structural base, lands children after it, and journals creation of the final fresh cursor. Receipts and capabilities expose exact target-preservation evidence; human Stack/Create and machine Create are unchanged.
 - The minimum supported Jujutsu version is now 0.41.0 for all Ajj commands. This supplies the detached-operation boundary required by crash-safe machine integration; Ajj now fails closed on older versions instead of warning.
 
 ### Fixed
