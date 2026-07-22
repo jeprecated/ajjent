@@ -116,7 +116,7 @@ ajj stack web --workspace default --yes
 - `ajj init --workspaces-root PATH [--local] [--force] [--project PROJECT]` — create config. Global by default; `--local` writes `<repo>/.ajj/config.yaml`.
 - `ajj version` / `ajj --version` — print a single machine-consumable version line on stdout.
 
-Repo-aware commands can target another checkout with either the global form `ajj --repo PATH <command> ...` or the command-local form `ajj <command> --repo PATH ...`; using both in one invocation is rejected.
+Repo-aware commands can target another checkout with either the global form `ajj --repo PATH <command> ...` or the command-local form `ajj <command> --repo PATH ...`; using both in one invocation is rejected. On Linux, an exact inherited `/proc/self/fd/N` directory argument is resolved once to its physical Current Workspace path before Ajj loads local configuration. This lets a local coordinator pass an already-open Workspace without corrupting nested Project/Main discovery. Subsequent work uses Ajj's ordinary path-based lifecycle: the descriptor form is compatibility and diagnostic context, not a lease preventing later pathname replacement.
 
 ### Workspace lifecycle
 
@@ -137,7 +137,7 @@ ajj create --repo "$A" --request-json create-A1.json --json
 ajj capabilities --json --schema ajj-capabilities-v2
 ```
 
-`requestId` is correlation metadata, not durable creator identity. A matching existing Workspace is accepted only after Ajj verifies its configured path, repository, exact parent, fresh cursor, and provider setup. Contradictory state is never deleted or adopted. `ready` is snapshot evidence linearized at the final stable Jujutsu operation read, not a lease against later direct `jj` changes; reconcile again before delayed use. See [ADR 0011](docs/adr/0011-add-state-reconciled-machine-create.md).
+`requestId` is correlation metadata, not durable creator identity. A matching existing Workspace is accepted only after Ajj verifies its configured path, repository, exact parent, fresh cursor, and provider setup. Contradictory state is never deleted or adopted. `ready` is snapshot evidence linearized at the final stable Jujutsu operation read, not a lease against later direct `jj` changes; reconcile again before delayed use. A local coordinator may supply Current Workspace through an inherited Linux `/proc/self/fd/N` directory; Ajj resolves it once before loading the configured Project and Main, and exact request replay remains the recovery action after a missing create response. See [ADR 0011](docs/adr/0011-add-state-reconciled-machine-create.md).
 - `ajj open [handle]` — print an existing Workspace path. With no Handle, opens the built-in selector. Opening never creates. It also repairs configured Assimilated path symlinks.
 - `ajj close [handle...]` — normally close registered, present, non-main, nonconflicted Workspaces whose relevant mutable changes are represented by surviving registered Workspace heads, then print the Main Workspace path for shell wrappers. Each explicit Handle must appear exactly once.
 - `ajj close --all` — close all normally Closable Workspaces that remain safe when the complete selected closing set is excluded from protection.
@@ -324,7 +324,7 @@ Discover the exact schemas, strategies, dispositions, operation-id pattern, jj m
 ajj capabilities --json
 ```
 
-An interrupted operation must be inspected using its original Current Workspace and operation id; recovery never publishes stored prepublication work:
+An interrupted operation must be inspected using its original Current Workspace and operation id; recovery never publishes stored prepublication work. A fresh process may again supply that Workspace through an inherited Linux `/proc/self/fd/N` directory, which Ajj resolves before finding the configured-Main journal:
 
 ```sh
 ajj --repo "$A" integrate --recover recursive-A-children-001 --json

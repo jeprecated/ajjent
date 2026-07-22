@@ -20,6 +20,8 @@ ajj create --repo "$A" --request-json request.json --json
 
 cwd/`--repo` selects the Current Workspace. Request target fields are assertions and never route to configured Main. Ajj configuration remains authoritative for project, Workspace root, destination, assimilation, and setup; callers cannot supply a destination path.
 
+On Linux, an exact inherited `/proc/self/fd/N` directory passed as `--repo` is resolved once to its physical Workspace path before configuration discovery. This prevents lexical path cleaning from collapsing a secondary Workspace's relative `.jj/repo` pointer before the kernel resolves the descriptor, which would lose configured Main/Project context and could produce a post-effect repository mismatch. Ajj then uses the existing path-based lifecycle. This compatibility route is not a durable descriptor binding or a guarantee against later pathname replacement; exact heads, state reconciliation, receipts, and caller-retained diagnostics remain the recovery model.
+
 A request is one strict bounded JSON value:
 
 ```json

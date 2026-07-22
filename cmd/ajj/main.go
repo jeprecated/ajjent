@@ -4229,6 +4229,28 @@ func resolveRepoRoot(override string) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		// Agentleman and other local callers may authenticate the Current
+		// Workspace by inheriting a directory descriptor and passing the exact
+		// Linux proc-fd alias. Resolve that alias once, while the descriptor is
+		// still open, then use Ajj's ordinary path-based lifecycle. In
+		// particular, do not join a secondary Workspace's relative .jj/repo
+		// pointer onto /proc/self/fd/N: filepath cleaning would remove the N
+		// component before the kernel can resolve it and lose the configured
+		// Main Workspace, Project, and local config.
+		if isExactProcSelfFDPath(abs) {
+			canonical, err := filepath.EvalSymlinks(abs)
+			if err != nil {
+				return "", fmt.Errorf("resolve inherited Current Workspace descriptor: %w", err)
+			}
+			info, err := os.Stat(canonical)
+			if err != nil {
+				return "", fmt.Errorf("inspect inherited Current Workspace descriptor: %w", err)
+			}
+			if !info.IsDir() {
+				return "", errors.New("inherited Current Workspace descriptor is not a directory")
+			}
+			return filepath.Clean(canonical), nil
+		}
 		return abs, nil
 	}
 	if out, err := commandCaptureFn("jj", "root"); err == nil {
@@ -4246,6 +4268,15 @@ func resolveRepoRoot(override string) (string, error) {
 		return "", errors.New("resolved empty repo root")
 	}
 	return root, nil
+}
+
+func isExactProcSelfFDPath(path string) bool {
+	const prefix = "/proc/self/fd/"
+	if !strings.HasPrefix(path, prefix) {
+		return false
+	}
+	descriptor := strings.TrimPrefix(path, prefix)
+	return descriptor != "" && strings.Trim(descriptor, "0123456789") == ""
 }
 
 func deriveProject(repoRoot string) string {

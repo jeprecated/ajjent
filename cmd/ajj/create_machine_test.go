@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -88,6 +90,99 @@ func TestMachineCreateTargetsCurrentParentAndLeavesMainUnchanged(t *testing.T) {
 	if got, err := integrationWorkspaceHeadCommit(repo, "default"); err != nil || got != mainHead {
 		t.Fatalf("Main moved: %s err=%v", got, err)
 	}
+}
+
+func TestMachineCreateCanonicalizesInheritedRepoFD(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("inherited /proc/self/fd routing is Linux-specific")
+	}
+	root, repo := setupRealCreateRepo(t)
+	cfg := configForMachineCreateTest(t, repo, root)
+	mainHead, err := integrationWorkspaceHeadCommit(repo, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := createWorkspace(repo, cfg, "proj", "A", mainHead, false, false); err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Join(root, "proj", "A")
+	request := machineCreateRequestForTarget(t, parent, "A", "A1", "nested-fd-A1")
+
+	binary := filepath.Join(t.TempDir(), "ajj")
+	build := exec.Command("go", "build", "-o", binary, ".")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build ajj: %v\n%s", err, output)
+	}
+
+	// A wrong global fallback makes failure to find the configured Main's local
+	// config observable: the child would be created in wrong-project and then
+	// reported as a repository mismatch.
+	xdg := filepath.Join(t.TempDir(), "xdg")
+	if err := os.MkdirAll(filepath.Join(xdg, "ajj"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wrongGlobal := strings.Join([]string{
+		"workspaces_root: " + root,
+		"project: wrong-project",
+		"main_workspace: default",
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(xdg, "ajj", "config.yaml"), []byte(wrongGlobal), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+
+	first := runMachineCreateViaInheritedRepoFD(t, binary, parent, request)
+	if first.Status != createStatusReady || first.Target.Workspace != "A" || first.Child.ParentCommit != first.Target.ExpectedHeadCommit {
+		t.Fatalf("first receipt: %+v", first)
+	}
+	child := filepath.Join(root, "proj", "A1")
+	if !exists(child) || exists(filepath.Join(root, "wrong-project", "A1")) {
+		t.Fatalf("machine create used the wrong Project: child=%t wrong=%t", exists(child), exists(filepath.Join(root, "wrong-project", "A1")))
+	}
+	operation := currentCreateTestOperation(t, repo)
+	second := runMachineCreateViaInheritedRepoFD(t, binary, parent, request)
+	if second.Status != createStatusReady || second.EvidenceDigest != first.EvidenceDigest {
+		t.Fatalf("replay changed ready evidence: first=%+v second=%+v", first, second)
+	}
+	if got := currentCreateTestOperation(t, repo); got != operation {
+		t.Fatalf("FD replay changed repository operation: %s -> %s", operation, got)
+	}
+	if got, err := integrationWorkspaceHeadCommit(repo, "default"); err != nil || got != mainHead {
+		t.Fatalf("Main moved: %s err=%v", got, err)
+	}
+}
+
+func runMachineCreateViaInheritedRepoFD(t *testing.T, binary, repo string, request []byte) createReceiptV1 {
+	t.Helper()
+	dir, err := os.Open(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dir.Close()
+	cmd := exec.Command(binary, "create", "--repo", "/proc/self/fd/3", "--request-json", "-", "--json")
+	cmd.ExtraFiles = []*os.File{dir}
+	cmd.Env = os.Environ()
+	cmd.Stdin = bytes.NewReader(request)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("FD-routed machine create: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("FD-routed machine create wrote diagnostics: %q", stderr.String())
+	}
+	var receipt createReceiptV1
+	if err := json.Unmarshal(stdout.Bytes(), &receipt); err != nil {
+		t.Fatalf("decode FD-routed receipt %q: %v", stdout.String(), err)
+	}
+	if err := validateCreateReceiptV1(receipt); err != nil {
+		t.Fatalf("invalid FD-routed receipt: %v\n%s", err, stdout.String())
+	}
+	if strings.Contains(stdout.String(), repo) || strings.Contains(stdout.String(), "/proc/self/fd") {
+		t.Fatalf("FD-routed receipt leaked a path: %s", stdout.String())
+	}
+	return receipt
 }
 
 func TestMachineCreateSuppressesAssimilationDiagnostics(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -62,7 +63,7 @@ func TestRecursiveWorkspaceLifecyclePublicCLI(t *testing.T) {
 			parentBefore := jjFullCommitID(t, paths.main, "A@")
 			childOperationID := "recursive-" + strategy + "-children"
 			childRequest := lifecycleRequestJSON(t, childOperationID, "A", parentBefore, strategy, childHandles, childHeads)
-			childResult := runLifecycleAJJ(t, binary, paths.parent, env, childRequest, "integrate", "--repo", paths.parent, "--request-json", "-")
+			childResult := runLifecycleAJJWithInheritedRepo(t, binary, paths.parent, paths.parent, env, childRequest, "integrate", "--repo", lifecycleInheritedRepoArg, "--request-json", "-")
 			childReceipt := decodeLifecycleReceipt(t, childResult.stdout)
 			assertLifecycleReceipt(t, paths.main, childReceipt, childOperationID, strategy, "A", childHandles)
 
@@ -91,20 +92,23 @@ func TestRecursiveWorkspaceLifecyclePublicCLI(t *testing.T) {
 			}
 			assertLifecycleJournalLocation(t, paths, childOperationID)
 
-			// Exact request replay is byte-for-byte idempotent.
-			replay := runLifecycleAJJ(t, binary, paths.parent, env, childRequest, "--repo", paths.parent, "integrate", "--request-json", "-")
+			// Exact request replay and fresh-process recovery remain byte-for-byte
+			// idempotent when Current A is supplied through an inherited FD.
+			replay := runLifecycleAJJWithInheritedRepo(t, binary, paths.parent, paths.parent, env, childRequest, "--repo", lifecycleInheritedRepoArg, "integrate", "--request-json", "-")
 			if replay.stdout != childResult.stdout {
 				t.Fatalf("terminal request replay changed receipt:\nfirst=%s\nreplay=%s", childResult.stdout, replay.stdout)
 			}
-			recovered := runLifecycleAJJ(t, binary, paths.parent, env, nil, "integrate", "--repo", paths.parent, "--recover", childOperationID, "--json")
+			recovered := runLifecycleAJJWithInheritedRepo(t, binary, paths.parent, paths.parent, env, nil, "integrate", "--repo", lifecycleInheritedRepoArg, "--recover", childOperationID, "--json")
 			if recovered.stdout != childResult.stdout {
 				t.Fatalf("terminal recovery changed receipt:\nfirst=%s\nrecover=%s", childResult.stdout, recovered.stdout)
 			}
 			teardownLifecycleVisibleGuards(t, paths.main, paths.guardAbandon)
 
-			// Automatic tidy is routed from A. It must leave Current A and the
-			// unique omitted Workspace, while A protects all selected children.
-			tidyChildren := runLifecycleAJJ(t, binary, paths.parent, env, nil, "tidy", "--repo", paths.parent, "--yes")
+			// Automatic tidy is routed from inherited Current A. It must leave A
+			// and the unique omitted Workspace, while A protects all selected
+			// children. This also proves local Project config was not replaced by
+			// an FD-number fallback during normal cleanup.
+			tidyChildren := runLifecycleAJJWithInheritedRepo(t, binary, paths.parent, paths.parent, env, nil, "tidy", "--repo", lifecycleInheritedRepoArg, "--yes")
 			for _, handle := range childHandles {
 				if pathExists(paths.children[handle]) {
 					t.Fatalf("normally Closable child %s survived recursive tidy; stdout=%q stderr=%q", handle, tidyChildren.stdout, tidyChildren.stderr)
@@ -404,9 +408,41 @@ func lifecycleRequestJSON(t *testing.T, operationID, target, targetHead, strateg
 
 func runLifecycleAJJ(t *testing.T, binary, dir string, env []string, stdin []byte, args ...string) lifecycleCLIResult {
 	t.Helper()
+	return runLifecycleAJJCommand(t, binary, dir, env, stdin, nil, args...)
+}
+
+const lifecycleInheritedRepoArg = "{inherited-current-workspace}"
+
+func runLifecycleAJJWithInheritedRepo(t *testing.T, binary, dir, repo string, env []string, stdin []byte, args ...string) lifecycleCLIResult {
+	t.Helper()
+	routedArgs := append([]string(nil), args...)
+	if runtime.GOOS != "linux" {
+		for i, arg := range routedArgs {
+			if arg == lifecycleInheritedRepoArg {
+				routedArgs[i] = repo
+			}
+		}
+		return runLifecycleAJJCommand(t, binary, dir, env, stdin, nil, routedArgs...)
+	}
+	workspace, err := os.Open(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer workspace.Close()
+	for i, arg := range routedArgs {
+		if arg == lifecycleInheritedRepoArg {
+			routedArgs[i] = "/proc/self/fd/3"
+		}
+	}
+	return runLifecycleAJJCommand(t, binary, dir, env, stdin, []*os.File{workspace}, routedArgs...)
+}
+
+func runLifecycleAJJCommand(t *testing.T, binary, dir string, env []string, stdin []byte, extraFiles []*os.File, args ...string) lifecycleCLIResult {
+	t.Helper()
 	cmd := exec.Command(binary, args...)
 	cmd.Dir = dir
 	cmd.Env = env
+	cmd.ExtraFiles = extraFiles
 	cmd.Stdin = bytes.NewReader(stdin)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
