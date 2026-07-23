@@ -18,22 +18,24 @@ var createMachineCommandFn = func(name string, args ...string) error {
 }
 
 type createObservedState struct {
-	checks       createReceiptChecksV1
-	headCommit   string
-	parentCommit string
-	matchingCore bool
-	absent       bool
-	conflictCode string
+	checks        createReceiptChecksV1
+	headCommit    string
+	parentCommit  string
+	workspaceRoot string
+	matchingCore  bool
+	absent        bool
+	conflictCode  string
 }
 
 func runCreateMachine(args []string) error {
 	fs := flag.NewFlagSet("create", flag.ContinueOnError)
-	var repo, source string
+	var repo, source, receiptSchema string
 	var jsonOutput bool
 	fs.StringVar(&repo, "repo", "", "Current Workspace root override")
 	fs.StringVar(&source, "request-json", "", "read one create request from PATH or - for stdin")
+	fs.StringVar(&receiptSchema, "receipt-schema", createReceiptSchemaV1, "machine receipt schema to emit")
 	fs.BoolVar(&jsonOutput, "json", false, "write one bounded machine-readable result")
-	if handled, err := parseCommandFlags(fs, args, "ajj create --repo PATH --request-json PATH|- --json", "Ensure or reconcile a Workspace from exact Current-Workspace state."); handled || err != nil {
+	if handled, err := parseCommandFlags(fs, args, "ajj create --repo PATH --request-json PATH|- --json [--receipt-schema ajj-create-receipt-v1|ajj-create-receipt-v2]", "Ensure or reconcile a Workspace from exact Current-Workspace state."); handled || err != nil {
 		return err
 	}
 	if len(fs.Args()) != 0 {
@@ -41,6 +43,10 @@ func runCreateMachine(args []string) error {
 	}
 	if strings.TrimSpace(source) == "" || !jsonOutput {
 		return errors.New("create machine mode requires --request-json and --json")
+	}
+	receiptSchema = strings.TrimSpace(receiptSchema)
+	if receiptSchema != createReceiptSchemaV1 && receiptSchema != createReceiptSchemaV2 {
+		return fmt.Errorf("unsupported create receipt schema %q", receiptSchema)
 	}
 	data, err := readCreateRequestSource(source)
 	if err != nil {
@@ -50,7 +56,7 @@ func runCreateMachine(args []string) error {
 	if err != nil {
 		return err
 	}
-	return reconcileCreateRequest(repo, request, digest)
+	return reconcileCreateRequest(repo, request, digest, receiptSchema)
 }
 func readCreateRequestSource(source string) ([]byte, error) {
 	var r io.Reader
@@ -77,8 +83,8 @@ func readCreateRequestSource(source string) ([]byte, error) {
 	return data, nil
 }
 
-func reconcileCreateRequest(repoOverride string, req createRequestV1, digest string) error {
-	base := createReceiptV1{Schema: createReceiptSchemaV1, RequestID: req.RequestID, RequestDigest: digest, Target: createReceiptTargetV1{Workspace: req.Target.ExpectedWorkspace, ExpectedHeadCommit: req.Target.ExpectedHeadCommit}, Child: createReceiptChildV1{Workspace: req.Child.Workspace}}
+func reconcileCreateRequest(repoOverride string, req createRequestV1, digest, receiptSchema string) error {
+	base := createReceiptV1{Schema: receiptSchema, RequestID: req.RequestID, RequestDigest: digest, Target: createReceiptTargetV1{Workspace: req.Target.ExpectedWorkspace, ExpectedHeadCommit: req.Target.ExpectedHeadCommit}, Child: createReceiptChildV1{Workspace: req.Child.Workspace}}
 	repo, cfg, project, err := commandContext(repoOverride, "", "")
 	if err != nil {
 		return emitCreateState(base, createStatusConflict, createReceiptChecksV1{}, "target-resolution-failed", "Current Workspace or provider configuration does not match", createNextOperatorReview)
@@ -235,6 +241,7 @@ func inspectCreateState(repo string, cfg config, project string, req createReque
 		s.conflictCode = "registration-root-unavailable"
 		return s
 	}
+	s.workspaceRoot = root
 	canon, err := canonicalExistingDirectory(dest)
 	if err != nil || root != canon {
 		s.conflictCode = "destination-identity-mismatch"
@@ -279,6 +286,9 @@ func reconcileCreateProviderSetup(repo string, cfg config, project, child string
 }
 func emitObservedCreateState(base createReceiptV1, s createObservedState, status, code, message, next string) error {
 	base.Child.HeadCommit, base.Child.ParentCommit = s.headCommit, s.parentCommit
+	if base.Schema == createReceiptSchemaV2 && (status == createStatusReady || status == createStatusPartial) {
+		base.Child.WorkspaceRoot = s.workspaceRoot
+	}
 	return emitCreateState(base, status, s.checks, code, message, next)
 }
 func emitCreateState(r createReceiptV1, status string, checks createReceiptChecksV1, code, message, next string) error {
@@ -287,8 +297,14 @@ func emitCreateState(r createReceiptV1, status string, checks createReceiptCheck
 		r.Error = &createReceiptErrorV1{Code: code, Message: message, NextAction: next}
 	}
 	r = finalizeCreateReceipt(r)
-	if err := validateCreateReceiptV1(r); err != nil {
-		return err
+	var validationErr error
+	if r.Schema == createReceiptSchemaV2 {
+		validationErr = validateCreateReceiptV2(r)
+	} else {
+		validationErr = validateCreateReceiptV1(r)
+	}
+	if validationErr != nil {
+		return validationErr
 	}
 	data, err := encodeIntegrationJSON(r)
 	if err != nil {

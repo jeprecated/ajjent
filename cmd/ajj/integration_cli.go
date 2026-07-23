@@ -102,7 +102,7 @@ func runCapabilities(args []string) error {
 	var schema string
 	fs.BoolVar(&jsonOutput, "json", false, "write the bounded machine-readable capability object")
 	fs.StringVar(&schema, "schema", integrationCapabilitiesSchemaV1, "capability schema to emit")
-	if handled, err := parseCommandFlags(fs, args, "ajj capabilities --json [--schema ajj-capabilities-v1|ajj-capabilities-v2]", "Report Ajj machine protocol capabilities."); handled || err != nil {
+	if handled, err := parseCommandFlags(fs, args, "ajj capabilities --json [--schema ajj-capabilities-v1|ajj-capabilities-v2|ajj-capabilities-v3]", "Report Ajj machine protocol capabilities."); handled || err != nil {
 		return err
 	}
 	if len(fs.Args()) != 0 {
@@ -116,6 +116,8 @@ func runCapabilities(args []string) error {
 		return writeIntegrationJSON(stdoutWriter, integrationCapabilities())
 	case ajjCapabilitiesSchemaV2:
 		return writeIntegrationJSON(stdoutWriter, capabilitiesV2())
+	case ajjCapabilitiesSchemaV3:
+		return writeIntegrationJSON(stdoutWriter, capabilitiesV3())
 	default:
 		return fmt.Errorf("unsupported capabilities schema %q", schema)
 	}

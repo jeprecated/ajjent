@@ -30,12 +30,20 @@ func machineCreateRequestForTarget(t *testing.T, repo, target, child, id string)
 }
 func runMachineCreateForTest(t *testing.T, repo string, request []byte) createReceiptV1 {
 	t.Helper()
+	return runMachineCreateWithReceiptSchemaForTest(t, repo, request, createReceiptSchemaV1)
+}
+func runMachineCreateV2ForTest(t *testing.T, repo string, request []byte) createReceiptV1 {
+	t.Helper()
+	return runMachineCreateWithReceiptSchemaForTest(t, repo, request, createReceiptSchemaV2)
+}
+func runMachineCreateWithReceiptSchemaForTest(t *testing.T, repo string, request []byte, receiptSchema string) createReceiptV1 {
+	t.Helper()
 	oldIn, oldOut, oldErr := stdinReader, stdoutWriter, stderrWriter
 	stdinReader = bytes.NewReader(request)
 	var out, stderr bytes.Buffer
 	stdoutWriter, stderrWriter = &out, &stderr
 	t.Cleanup(func() { stdinReader, stdoutWriter, stderrWriter = oldIn, oldOut, oldErr })
-	if e := runCreate([]string{"--repo", repo, "--request-json", "-", "--json"}); e != nil {
+	if e := runCreate([]string{"--repo", repo, "--request-json", "-", "--json", "--receipt-schema", receiptSchema}); e != nil {
 		t.Fatalf("machine create: %v", e)
 	}
 	if stderr.Len() != 0 {
@@ -45,11 +53,17 @@ func runMachineCreateForTest(t *testing.T, repo string, request []byte) createRe
 	if e := json.Unmarshal(out.Bytes(), &r); e != nil {
 		t.Fatalf("receipt %q: %v", out.String(), e)
 	}
-	if strings.Contains(out.String(), repo) || strings.Contains(out.String(), filepath.Dir(repo)) {
-		t.Fatalf("path leak: %s", out.String())
+	if receiptSchema == createReceiptSchemaV1 && (strings.Contains(out.String(), repo) || strings.Contains(out.String(), filepath.Dir(repo))) {
+		t.Fatalf("v1 path leak: %s", out.String())
 	}
-	if err := validateCreateReceiptV1(r); err != nil {
-		t.Fatalf("invalid receipt: %v\n%s", err, out.String())
+	var validationErr error
+	if receiptSchema == createReceiptSchemaV2 {
+		validationErr = validateCreateReceiptV2(r)
+	} else {
+		validationErr = validateCreateReceiptV1(r)
+	}
+	if validationErr != nil {
+		t.Fatalf("invalid receipt: %v\n%s", validationErr, out.String())
 	}
 	return r
 }
@@ -71,6 +85,71 @@ func TestMachineCreateReadyAndReplayAreStateIdempotent(t *testing.T) {
 		t.Fatalf("operation changed %s -> %s", op, got)
 	}
 }
+func TestMachineCreateV2ReturnsRegisteredRootWithoutChangingV1(t *testing.T) {
+	root, repo := setupRealCreateRepo(t)
+	request := machineCreateRequest(t, repo, "A1", "placement-v2-A1")
+	v1 := runMachineCreateForTest(t, repo, request)
+	if v1.Schema != createReceiptSchemaV1 || v1.Child.WorkspaceRoot != "" {
+		t.Fatalf("v1 changed: %+v", v1)
+	}
+	v2 := runMachineCreateV2ForTest(t, repo, request)
+	want := filepath.Join(root, "proj", "A1")
+	if v2.Schema != createReceiptSchemaV2 || v2.Status != createStatusReady || v2.Child.WorkspaceRoot != want {
+		t.Fatalf("v2 root mismatch: got %+v want %q", v2, want)
+	}
+	refs, err := listWorkspaceRefs(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var registered string
+	for _, ref := range refs {
+		if ref.Handle == "A1" {
+			registered, err = canonicalExistingDirectory(cleanWorkspaceRoot(ref.Root))
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if registered != v2.Child.WorkspaceRoot {
+		t.Fatalf("receipt root %q differs from registration %q", v2.Child.WorkspaceRoot, registered)
+	}
+}
+
+func TestMachineCreateV2ConfigDriftNeverRetargetsExistingChild(t *testing.T) {
+	root, repo := setupRealCreateRepo(t)
+	request := machineCreateRequest(t, repo, "A1", "placement-v2-drift")
+	first := runMachineCreateV2ForTest(t, repo, request)
+	original := filepath.Join(root, "proj", "A1")
+	if first.Child.WorkspaceRoot != original {
+		t.Fatalf("initial root %q", first.Child.WorkspaceRoot)
+	}
+	writeConfig(t, repo, strings.Join([]string{"workspaces_root: " + root, "project: moved", "main_workspace: default", ""}, "\n"))
+	replay := runMachineCreateV2ForTest(t, repo, request)
+	if replay.Status != createStatusConflict || replay.Child.WorkspaceRoot != "" {
+		t.Fatalf("config drift must conflict without a new root: %+v", replay)
+	}
+	if !exists(original) || exists(filepath.Join(root, "moved", "A1")) {
+		t.Fatalf("config drift retargeted child: original=%t moved=%t", exists(original), exists(filepath.Join(root, "moved", "A1")))
+	}
+}
+
+func TestMachineCreateRejectsUnknownReceiptSchemaBeforeEffect(t *testing.T) {
+	root, repo := setupRealCreateRepo(t)
+	request := machineCreateRequest(t, repo, "A1", "placement-unknown-schema")
+	oldIn, oldOut, oldErr := stdinReader, stdoutWriter, stderrWriter
+	stdinReader = bytes.NewReader(request)
+	var out, diagnostics bytes.Buffer
+	stdoutWriter, stderrWriter = &out, &diagnostics
+	t.Cleanup(func() { stdinReader, stdoutWriter, stderrWriter = oldIn, oldOut, oldErr })
+	err := runCreate([]string{"--repo", repo, "--request-json", "-", "--json", "--receipt-schema", "ajj-create-receipt-unknown"})
+	if err == nil || !strings.Contains(err.Error(), "unsupported create receipt schema") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Len() != 0 || exists(filepath.Join(root, "proj", "A1")) {
+		t.Fatalf("unknown schema caused output/effect: output=%q present=%t", out.String(), exists(filepath.Join(root, "proj", "A1")))
+	}
+}
+
 func TestMachineCreateTargetsCurrentParentAndLeavesMainUnchanged(t *testing.T) {
 	root, repo := setupRealCreateRepo(t)
 	cfg := configForMachineCreateTest(t, repo, root)

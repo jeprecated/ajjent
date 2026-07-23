@@ -39,8 +39,19 @@ func TestCapabilitiesV2AddsCreateWithoutChangingV1(t *testing.T) {
 		t.Fatalf("v1 changed: %s", after)
 	}
 	out, _, e := captureOutput(func() error { return runCapabilities([]string{"--json", "--schema", ajjCapabilitiesSchemaV2}) })
-	if e != nil || !strings.Contains(out, `"recoveryModel":"state-reconciliation"`) {
-		t.Fatalf("out=%s err=%v", out, e)
+	if e != nil || !strings.Contains(out, `"receiptSchema":"ajj-create-receipt-v1"`) || strings.Contains(out, `"receiptSchemas"`) || strings.Contains(out, createReceiptSchemaV2) {
+		t.Fatalf("v2 output changed: out=%s err=%v", out, e)
+	}
+}
+
+func TestCapabilitiesV3ExplicitlyNegotiatesCreateReceiptV2(t *testing.T) {
+	v3 := capabilitiesV3()
+	if v3.Schema != ajjCapabilitiesSchemaV3 || strings.Join(v3.Create.ReceiptSchemas, ",") != createReceiptSchemaV1+","+createReceiptSchemaV2 || v3.Create.RequestSchema != createRequestSchemaV1 {
+		t.Fatalf("bad v3: %+v", v3)
+	}
+	out, _, err := captureOutput(func() error { return runCapabilities([]string{"--json", "--schema", ajjCapabilitiesSchemaV3}) })
+	if err != nil || !strings.Contains(out, `"create":{"requestSchema":"ajj-create-request-v1","receiptSchemas":["ajj-create-receipt-v1","ajj-create-receipt-v2"]`) {
+		t.Fatalf("v3 output=%s err=%v", out, err)
 	}
 }
 
@@ -53,6 +64,30 @@ func validReadyCreateReceipt() createReceiptV1 {
 		Checks: createReceiptChecksV1{RegistrationPresent: true, DestinationPresent: true, RepositoryMatches: true, ParentMatches: true, FreshCursor: true, SetupComplete: true},
 	}
 	return finalizeCreateReceipt(r)
+}
+
+func TestValidateCreateReceiptV2RequiresRootAndCoversItInEvidence(t *testing.T) {
+	r := validReadyCreateReceipt()
+	r.Schema = createReceiptSchemaV2
+	r.Child.WorkspaceRoot = "/tmp/workspaces/project/A1"
+	r = finalizeCreateReceipt(r)
+	if err := validateCreateReceiptV2(r); err != nil {
+		t.Fatal(err)
+	}
+	tampered := r
+	tampered.Child.WorkspaceRoot = "/tmp/workspaces/project/A2"
+	if err := validateCreateReceiptV2(tampered); err == nil || !strings.Contains(err.Error(), "evidence digest") {
+		t.Fatalf("tampered root was accepted: %v", err)
+	}
+	missing := r
+	missing.Child.WorkspaceRoot = ""
+	missing = finalizeCreateReceipt(missing)
+	if err := validateCreateReceiptV2(missing); err == nil || !strings.Contains(err.Error(), "Workspace root") {
+		t.Fatalf("missing root was accepted: %v", err)
+	}
+	if err := validateCreateReceiptV1(r); err == nil {
+		t.Fatal("v1 validator accepted v2 receipt")
+	}
 }
 
 func TestValidateCreateReceiptV1RejectsContradictions(t *testing.T) {
