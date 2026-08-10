@@ -237,6 +237,51 @@ func TestResolveStackConflictStrategyDefaultsPreferClean(t *testing.T) {
 	}
 }
 
+func TestRunStackRealRepoProducesSiblingCursorsFromEitherInvokingWorkspace(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		invoker func(realStackRepoPaths) string
+		input   string
+	}{
+		{name: "default selects agentleman", invoker: func(paths realStackRepoPaths) string { return paths.defaultPath }, input: "agentleman"},
+		{name: "agentleman selects default", invoker: func(paths realStackRepoPaths) string { return paths.agentlemanPath }, input: "default"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			paths := setupRealStackInvocationSymmetryRepo(t)
+			invokerPath := tc.invoker(paths)
+			repoRoot, cfg, project, err := commandContext(invokerPath, "", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, infos, _, target, err := resolveStackTargetWorkspace(repoRoot, cfg, project, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			items := mapSelectorItemsByHandle(selectorItemsForStack(infos))
+			item, ok := items[tc.input]
+			if !ok || strings.Contains(item.Markers, "outside-layout") || item.Disabled {
+				t.Fatalf("expected %s to be a selectable Stack Input from %s, got %+v", tc.input, target.Handle, item)
+			}
+
+			payload := jjRev(t, paths.defaultPath, "agentleman@-")
+			_, errOut, err := captureOutput(func() error {
+				return runStack([]string{tc.input, "--repo", invokerPath, "--yes", "--rebase-mode", "branch", "--conflict-strategy", "off"})
+			})
+			if err != nil {
+				t.Fatalf("expected Stack from %s to succeed, got %v\nstderr:%s", target.Handle, err, errOut)
+			}
+			if defaultParent, agentlemanParent := jjRev(t, paths.defaultPath, "default@-"), jjRev(t, paths.defaultPath, "agentleman@-"); defaultParent != agentlemanParent {
+				t.Fatalf("expected sibling Workspace cursors, got default@-=%s agentleman@-=%s\nstderr:%s", defaultParent, agentlemanParent, errOut)
+			}
+			for _, handle := range []string{"default", "agentleman"} {
+				if got := jjRevsetCount(t, paths.defaultPath, payload+" & ::"+handle+"@"); got != 1 {
+					t.Fatalf("expected %s@ to include agentleman payload %s, got %d\nstderr:%s", handle, payload, got, errOut)
+				}
+			}
+		})
+	}
+}
+
 func TestRunStackRealRepoTargetsCurrentNonDefaultWorkspace(t *testing.T) {
 	paths := setupRealStackRepo(t)
 	defaultBefore := jjRev(t, paths.defaultPath, "default@")
@@ -516,11 +561,51 @@ func TestRunStackRealRepoConflictedMergeDescribesMainHeadWithoutAdvancingAboveIt
 }
 
 type realStackRepoPaths struct {
-	defaultPath string
-	speedPath   string
-	childPath   string
-	alphaPath   string
-	bravoPath   string
+	defaultPath    string
+	speedPath      string
+	childPath      string
+	alphaPath      string
+	bravoPath      string
+	agentlemanPath string
+}
+
+func setupRealStackInvocationSymmetryRepo(t *testing.T) realStackRepoPaths {
+	t.Helper()
+	if _, err := exec.LookPath("jj"); err != nil {
+		t.Skip("jj binary not available for integration test")
+	}
+	root := t.TempDir()
+	workspacesRoot := filepath.Join(root, "workspaces")
+	defaultPath := filepath.Join(root, "mono", "proj")
+	agentlemanPath := filepath.Join(workspacesRoot, "proj", "agentleman")
+	for _, dir := range []string{filepath.Dir(defaultPath), filepath.Dir(agentlemanPath)} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runJJ(t, "git", "init", "--colocate", defaultPath)
+	writeConfig(t, defaultPath, strings.Join([]string{
+		"workspaces_root: " + workspacesRoot,
+		"project: proj",
+		"main_workspace: default",
+		"stack:",
+		"  rebase_mode: branch",
+		"  shape: auto",
+		"  conflict_strategy: off",
+		"",
+	}, "\n"))
+	if err := os.WriteFile(filepath.Join(defaultPath, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = exec.Command("jj", "-R", defaultPath, "file", "track", "base.txt").Run()
+	runJJ(t, "-R", defaultPath, "commit", "-m", "base")
+	runJJ(t, "-R", defaultPath, "workspace", "add", "--revision", "@-", "--name", "agentleman", agentlemanPath)
+	if err := os.WriteFile(filepath.Join(agentlemanPath, "payload.txt"), []byte("agentleman payload\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = exec.Command("jj", "-R", agentlemanPath, "file", "track", "payload.txt").Run()
+	runJJ(t, "-R", agentlemanPath, "commit", "-m", "agentleman payload")
+	return realStackRepoPaths{defaultPath: defaultPath, agentlemanPath: agentlemanPath}
 }
 
 func setupRealStackRepo(t *testing.T) realStackRepoPaths {

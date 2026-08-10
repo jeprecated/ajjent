@@ -23,6 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Current-Workspace Stack is now invocation-symmetric: the configured Main Workspace remains a valid selectable cursor-sync input when another Workspace is current, and clean empty Workspace cursors finish as siblings over the same payload instead of being stacked one above another.
 - Main-targeted Stack now treats a non-empty described Workspace head as payload instead of assuming every payload is at `handle@-`. Merge Stacking therefore integrates the selected commits into the target and advances those Workspaces with fresh empty cursors rather than rebasing their payload commits after the target.
 - Repo-aware commands now resolve an exact inherited Linux `/proc/self/fd/N` Current-Workspace argument once before configuration discovery. Nested machine create, integration, recovery, and normal tidy therefore use the intended Workspace's local Project/Main configuration instead of lexically collapsing a relative `.jj/repo` pointer, creating a child under a fallback Project, and reporting a post-effect `repository-mismatch`. The resolved path then follows Ajj's ordinary path-based lifecycle; this is practical caller compatibility, not a filesystem lease against later path replacement.
 - Machine integration and recovery now force deterministic no-color/no-pager settings on every strict Jujutsu template query, including operation expansion and cleanup evidence, so user presentation configuration cannot corrupt parsed transaction evidence.

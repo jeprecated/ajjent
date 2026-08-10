@@ -2576,8 +2576,8 @@ func TestRunStackExplicitWorkspaceStacksPayloadFrontierThenAdvancesWorkspaceHead
 		t.Fatalf("expected teams payload frontier destination, got args=%v dests=%v", rebaseCommands[0], stackDests)
 	}
 	advanceDests := rebaseDestinations(rebaseCommands[1])
-	if !strings.Contains(strings.Join(rebaseCommands[1], " "), "-r teams@") || strings.Join(advanceDests, ",") != "@" {
-		t.Fatalf("expected teams@ to advance onto new Main @, got args=%v dests=%v", rebaseCommands[1], advanceDests)
+	if !strings.Contains(strings.Join(rebaseCommands[1], " "), "-r teams@") || strings.Join(advanceDests, ",") != "default@" {
+		t.Fatalf("expected teams@ to advance onto default@, got args=%v dests=%v", rebaseCommands[1], advanceDests)
 	}
 	if !strings.Contains(errOut.String(), "To undo this run: jj op restore op-before-stack") {
 		t.Fatalf("expected undo restore hint, got stderr %q", errOut.String())
@@ -2681,8 +2681,8 @@ func TestRunStackFromCurrentNonDefaultWorkspaceTargetsCurrentWorkspace(t *testin
 	if strings.Join(rebaseDestinations(rebaseCommands[0]), ",") != "child-payload" {
 		t.Fatalf("expected child payload frontier to be stacked into speed, got %v", rebaseCommands[0])
 	}
-	if !strings.Contains(strings.Join(rebaseCommands[1], " "), "-r agm-speed-transition@") || strings.Join(rebaseDestinations(rebaseCommands[1]), ",") != "@" {
-		t.Fatalf("expected child Workspace head to advance onto new speed@, got %v", rebaseCommands[1])
+	if !strings.Contains(strings.Join(rebaseCommands[1], " "), "-r agm-speed-transition@") || strings.Join(rebaseDestinations(rebaseCommands[1]), ",") != "speed@-" {
+		t.Fatalf("expected child Workspace cursor to become a sibling of empty speed@, got %v", rebaseCommands[1])
 	}
 	if !strings.Contains(errOut, "Stack target workspace: speed ("+speedPath+")") || !strings.Contains(errOut, "Configured main_workspace default was not used") {
 		t.Fatalf("expected target workspace preview and fallback note, got %q", errOut)

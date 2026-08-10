@@ -1372,6 +1372,11 @@ func resolveStackTargetWorkspace(repoRoot string, cfg config, project string, wo
 	if err != nil {
 		return config{}, nil, nil, stackTargetResolution{}, err
 	}
+	for i := range infos {
+		if infos[i].Ref.Handle == configuredMain {
+			infos[i].External = false
+		}
+	}
 	byHandle := mapInfosByHandle(infos)
 	targetInfo, ok := byHandle[targetHandle]
 	if !ok {
@@ -1639,7 +1644,7 @@ func runStack(args []string) (retErr error) {
 		if !canUseTUI() {
 			return errors.New("stack requires Workspace Handles or --all when not running in a terminal")
 		}
-		items := selectorItemsForStackWithTarget(infos, target)
+		items := selectorItemsForStack(infos)
 		selected, opts, err := runSelector(selectorOptions{Title: "Stack Workspaces", Mode: selectorMulti, Items: items, AllDefault: true, StackOptions: cfg.Stack})
 		if err != nil {
 			return err
@@ -1689,7 +1694,7 @@ func runStack(args []string) (retErr error) {
 	if err := finalizeStackTargetHead(mainInfo.Path, cfg.MainWorkspace, inputs, conflicted, preservedTarget); err != nil {
 		return err
 	}
-	if err := advanceStackInputWorkspaces(mainInfo.Path, cfg.MainWorkspace, inputs, byHandle, describedInputHeads); err != nil {
+	if err := advanceStackInputWorkspaces(mainInfo, inputs, byHandle, describedInputHeads); err != nil {
 		return err
 	}
 	if err := commandToStderrFn("jj", "-R", mainInfo.Path, "workspace", "update-stale"); err != nil {
@@ -3533,24 +3538,33 @@ func describedStackInputHeads(repoPath string, inputs []string) (map[string]bool
 	return described, nil
 }
 
-func advanceStackInputWorkspaces(mainPath, targetHandle string, inputs []string, byHandle map[string]workspaceInfo, describedHeads map[string]bool) error {
+func advanceStackInputWorkspaces(target workspaceInfo, inputs []string, byHandle map[string]workspaceInfo, describedHeads map[string]bool) error {
 	inputs = uniqueNonEmptyStrings(inputs)
 	if len(inputs) == 0 {
 		return nil
 	}
+	empty, err := revisionMatches(target.Path, "empty() & "+target.Ref.Handle+"@")
+	if err != nil {
+		return err
+	}
+	target.Empty = empty
+	destination := moveToMainDestinationRevset(target)
 	fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Advance Stack Input Workspaces"))
 	for _, handle := range inputs {
+		info, ok := byHandle[handle]
+		if !ok {
+			return fmt.Errorf("Workspace %q not found while advancing Stack Inputs", handle)
+		}
+		if err := commandToStderrFn("jj", "-R", info.Path, "workspace", "update-stale"); err != nil {
+			return fmt.Errorf("update stale Workspace %q before advancing: %w", handle, err)
+		}
 		if describedHeads[handle] {
-			info, ok := byHandle[handle]
-			if !ok {
-				return fmt.Errorf("Workspace %q not found while advancing Stack Inputs", handle)
-			}
-			if err := commandToStderrFn("jj", "-R", info.Path, "new", targetHandle+"@"); err != nil {
+			if err := commandToStderrFn("jj", "-R", info.Path, "new", destination); err != nil {
 				return fmt.Errorf("advance Workspace %q onto target: %w", handle, err)
 			}
 			continue
 		}
-		if err := commandToStderrFn("jj", "-R", mainPath, "rebase", "-r", handle+"@", "-d", "@"); err != nil {
+		if err := commandToStderrFn("jj", "-R", info.Path, "rebase", "-r", handle+"@", "-d", destination); err != nil {
 			return fmt.Errorf("advance Workspace %q onto target: %w", handle, err)
 		}
 	}
@@ -5212,16 +5226,12 @@ func selectorItemsForClose(infos []workspaceInfo, force bool) []selectorItem {
 }
 
 func selectorItemsForStack(infos []workspaceInfo) []selectorItem {
-	return selectorItemsForStackWithTarget(infos, stackTargetResolution{})
-}
-
-func selectorItemsForStackWithTarget(infos []workspaceInfo, target stackTargetResolution) []selectorItem {
 	items := []selectorItem{{Handle: "All", Status: "default", Markers: "stack-relevant", All: true}}
 	for _, info := range infos {
 		if info.Main {
 			continue
 		}
-		disabled := !isStackRelevant(info) || stackInputProtectedByTarget(info, target)
+		disabled := !isStackRelevant(info) && !isMovableToMain(info)
 		items = append(items, selectorItem{Handle: info.Ref.Handle, Path: info.Path, Status: statusLabel(info), Markers: strings.Join(markers(info), ","), Disabled: disabled})
 	}
 	return items
