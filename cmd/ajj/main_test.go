@@ -2522,7 +2522,7 @@ func TestRunStackAllUsesStackRelevantOnly(t *testing.T) {
 	}
 }
 
-func TestRunStackExplicitWorkspaceStacksPayloadParentThenAdvancesWorkspaceHead(t *testing.T) {
+func TestRunStackExplicitWorkspaceStacksPayloadFrontierThenAdvancesWorkspaceHead(t *testing.T) {
 	workspacesRoot := filepath.Join(t.TempDir(), "workspaces")
 	mainPath := filepath.Join(workspacesRoot, "proj", "default")
 	teamsPath := filepath.Join(workspacesRoot, "proj", "teams")
@@ -2540,7 +2540,10 @@ func TestRunStackExplicitWorkspaceStacksPayloadParentThenAdvancesWorkspaceHead(t
 		if strings.Contains(joined, " op log ") {
 			return "op-before-stack\n", nil
 		}
-		if strings.Contains(joined, "heads(teams@-)") {
+		if strings.Contains(joined, "teams@ & "+stackInputPayloadRevset("teams")) {
+			return "", nil
+		}
+		if strings.Contains(joined, stackInputPayloadRevset("teams")) {
 			return "teams-parent\n", nil
 		}
 		if strings.Contains(joined, workspaceAheadRevset("teams", "default")) {
@@ -2563,14 +2566,14 @@ func TestRunStackExplicitWorkspaceStacksPayloadParentThenAdvancesWorkspaceHead(t
 	stderrWriter = &errOut
 	defer func() { stderrWriter = origErr }()
 	if err := runStack([]string{"teams", "--repo", mainPath, "--yes"}); err != nil {
-		t.Fatalf("expected explicit Workspace to stack through its payload parent and advance its head, got %v", err)
+		t.Fatalf("expected explicit Workspace to stack through its payload frontier and advance its head, got %v", err)
 	}
 	if len(rebaseCommands) != 2 {
 		t.Fatalf("expected stack rebase plus Workspace advance rebase, got %v", rebaseCommands)
 	}
 	stackDests := rebaseDestinations(rebaseCommands[0])
 	if strings.Join(stackDests, ",") != "teams-parent" {
-		t.Fatalf("expected teams@- payload destination, got args=%v dests=%v", rebaseCommands[0], stackDests)
+		t.Fatalf("expected teams payload frontier destination, got args=%v dests=%v", rebaseCommands[0], stackDests)
 	}
 	advanceDests := rebaseDestinations(rebaseCommands[1])
 	if !strings.Contains(strings.Join(rebaseCommands[1], " "), "-r teams@") || strings.Join(advanceDests, ",") != "@" {
@@ -2600,7 +2603,9 @@ func TestRunStackPrintsUndoHintWhenMutationFails(t *testing.T) {
 			return "op-before-stack\n", nil
 		case strings.Contains(joined, "description(\"\") & ~empty() & @"):
 			return "main111\n", nil
-		case strings.Contains(joined, "heads(teams@-)"):
+		case strings.Contains(joined, "teams@ & "+stackInputPayloadRevset("teams")):
+			return "", nil
+		case strings.Contains(joined, stackInputPayloadRevset("teams")):
 			return "teams-parent\n", nil
 		case strings.Contains(joined, workspaceAheadRevset("teams", "default")):
 			return "ahead\n", nil
@@ -2674,7 +2679,7 @@ func TestRunStackFromCurrentNonDefaultWorkspaceTargetsCurrentWorkspace(t *testin
 		t.Fatalf("expected stack rebase plus child head advance, got %v", rebaseCommands)
 	}
 	if strings.Join(rebaseDestinations(rebaseCommands[0]), ",") != "child-payload" {
-		t.Fatalf("expected child payload parent to be stacked into speed, got %v", rebaseCommands[0])
+		t.Fatalf("expected child payload frontier to be stacked into speed, got %v", rebaseCommands[0])
 	}
 	if !strings.Contains(strings.Join(rebaseCommands[1], " "), "-r agm-speed-transition@") || strings.Join(rebaseDestinations(rebaseCommands[1]), ",") != "@" {
 		t.Fatalf("expected child Workspace head to advance onto new speed@, got %v", rebaseCommands[1])
@@ -2857,7 +2862,10 @@ func stackTargetWorkspaceFixture(t *testing.T, workspacesRoot, defaultPath, spee
 		if strings.Contains(joined, " op log ") {
 			return "op-before-stack\n", nil
 		}
-		if strings.Contains(joined, "heads(agm-speed-transition@-)") || strings.Contains(joined, lineStackPayloadDestinationRevset("agm-speed-transition")) {
+		if strings.Contains(joined, "agm-speed-transition@ & "+stackInputPayloadRevset("agm-speed-transition")) {
+			return "", nil
+		}
+		if strings.Contains(joined, stackInputPayloadRevset("agm-speed-transition")) || strings.Contains(joined, lineStackPayloadDestinationRevset("agm-speed-transition")) {
 			return "child-payload\n", nil
 		}
 		if strings.Contains(joined, workspaceAheadRevset("agm-speed-transition", "default")) || strings.Contains(joined, workspaceAheadRevset("agm-speed-transition", "speed")) || strings.Contains(joined, workspaceAheadRevset("speed", "default")) || strings.Contains(joined, workspaceAheadRevset("default", "speed")) {

@@ -1669,6 +1669,10 @@ func runStack(args []string) (retErr error) {
 	if err != nil {
 		return err
 	}
+	describedInputHeads, err := describedStackInputHeads(mainInfo.Path, inputs)
+	if err != nil {
+		return err
+	}
 	undoOpID, err := currentOperationID(mainInfo.Path)
 	if err != nil {
 		return fmt.Errorf("record pre-Stack operation id: %w", err)
@@ -1685,7 +1689,7 @@ func runStack(args []string) (retErr error) {
 	if err := finalizeStackTargetHead(mainInfo.Path, cfg.MainWorkspace, inputs, conflicted, preservedTarget); err != nil {
 		return err
 	}
-	if err := advanceStackInputWorkspaces(mainInfo.Path, inputs); err != nil {
+	if err := advanceStackInputWorkspaces(mainInfo.Path, cfg.MainWorkspace, inputs, byHandle, describedInputHeads); err != nil {
 		return err
 	}
 	if err := commandToStderrFn("jj", "-R", mainInfo.Path, "workspace", "update-stale"); err != nil {
@@ -3514,18 +3518,40 @@ func stackInputPayloadRevsets(inputs []string) []string {
 }
 
 func stackInputPayloadRevset(handle string) string {
-	return handle + "@-"
+	return fmt.Sprintf("heads((::%s@ & ~empty()) & ~%s)", handle, lineStackInProgressHeadRevset(handle))
 }
 
-func advanceStackInputWorkspaces(mainPath string, inputs []string) error {
+func describedStackInputHeads(repoPath string, inputs []string) (map[string]bool, error) {
+	described := make(map[string]bool, len(inputs))
+	for _, handle := range uniqueNonEmptyStrings(inputs) {
+		matches, err := revisionMatches(repoPath, handle+"@ & "+stackInputPayloadRevset(handle))
+		if err != nil {
+			return nil, err
+		}
+		described[handle] = matches
+	}
+	return described, nil
+}
+
+func advanceStackInputWorkspaces(mainPath, targetHandle string, inputs []string, byHandle map[string]workspaceInfo, describedHeads map[string]bool) error {
 	inputs = uniqueNonEmptyStrings(inputs)
 	if len(inputs) == 0 {
 		return nil
 	}
 	fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Advance Stack Input Workspaces"))
 	for _, handle := range inputs {
+		if describedHeads[handle] {
+			info, ok := byHandle[handle]
+			if !ok {
+				return fmt.Errorf("Workspace %q not found while advancing Stack Inputs", handle)
+			}
+			if err := commandToStderrFn("jj", "-R", info.Path, "new", targetHandle+"@"); err != nil {
+				return fmt.Errorf("advance Workspace %q onto target: %w", handle, err)
+			}
+			continue
+		}
 		if err := commandToStderrFn("jj", "-R", mainPath, "rebase", "-r", handle+"@", "-d", "@"); err != nil {
-			return fmt.Errorf("advance Workspace %q onto Main: %w", handle, err)
+			return fmt.Errorf("advance Workspace %q onto target: %w", handle, err)
 		}
 	}
 	return nil
