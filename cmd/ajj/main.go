@@ -81,7 +81,14 @@ type createSetup struct {
 }
 
 type state struct {
-	NextIndex int `json:"next_index"`
+	NextIndex int         `json:"next_index"`
+	Undo      *undoRecord `json:"undo,omitempty"`
+}
+
+type undoRecord struct {
+	Command           string `json:"command"`
+	BeforeOperationID string `json:"before_operation_id"`
+	AfterOperationID  string `json:"after_operation_id"`
 }
 
 type workspaceRef struct {
@@ -175,6 +182,8 @@ func run(args []string) error {
 		return runTidy(commandArgs)
 	case "stack":
 		return runStack(commandArgs)
+	case "undo":
+		return runUndo(commandArgs)
 	case "integrate":
 		return runIntegrate(commandArgs)
 	case "capabilities":
@@ -249,7 +258,7 @@ func countRepoFlags(args []string) int {
 
 func commandAcceptsRepoFlag(command string) bool {
 	switch command {
-	case "init", "create", "open", "list", "main", "workspaces-subdir", "close", "tidy", "stack", "integrate", "move-to-main", "catch-up":
+	case "init", "create", "open", "list", "main", "workspaces-subdir", "close", "tidy", "stack", "undo", "integrate", "move-to-main", "catch-up":
 		return true
 	default:
 		return false
@@ -280,6 +289,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "stack --line [handle...]", 18), "Line Stack selected Workspaces in explicit order")
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "integrate", 18), "Prepare or recover an exact machine integration into the Current Workspace")
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "move-to-main [handle...]", 18), "Move selected tidy Workspace cursors up to the Main Workspace line")
+	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "undo", 18), "Undo the latest recorded Stack, Line Stack, or Move-to-Main")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, s.Section.Render("Inspect and housekeeping:"))
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "list", 18), "List Workspaces with status and markers")
@@ -1405,7 +1415,54 @@ func stackInputProtectedByTarget(info workspaceInfo, target stackTargetResolutio
 	return target.FromCurrent && target.ConfiguredMain != "" && target.ConfiguredMain != target.Handle && info.Ref.Handle == target.ConfiguredMain
 }
 
-func runMoveToMain(args []string) error {
+func runUndo(args []string) error {
+	fs := flag.NewFlagSet("undo", flag.ContinueOnError)
+	var repoRootOverride string
+	fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
+	if handled, err := parseCommandFlags(fs, args, "ajj undo [options]", "Undo the latest recorded Stack, Line Stack, or Move-to-Main, but only when no newer Jujutsu operation exists."); handled || err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("undo accepts no positional arguments")
+	}
+	repoRoot, err := resolveRepoRoot(repoRootOverride)
+	if err != nil {
+		return err
+	}
+	st, err := loadState(repoRoot)
+	if err != nil {
+		return err
+	}
+	if st.Undo == nil {
+		return errors.New("no Ajj operation is recorded for undo")
+	}
+	record := *st.Undo
+	if !integrationFullOperationIDRE.MatchString(record.BeforeOperationID) || !integrationFullOperationIDRE.MatchString(record.AfterOperationID) {
+		return errors.New("stored Ajj undo operation IDs are invalid")
+	}
+	if _, err := commandCaptureFn("jj", "-R", repoRoot, "--no-pager", "status"); err != nil {
+		return fmt.Errorf("snapshot current Workspace before undo: %w", err)
+	}
+	current, err := currentOperationID(repoRoot)
+	if err != nil {
+		return fmt.Errorf("read current operation before undo: %w", err)
+	}
+	if current != record.AfterOperationID {
+		printManualRestoreHint(record.BeforeOperationID)
+		return fmt.Errorf("cannot undo %s: newer Jujutsu operations exist (expected %s, found %s)", record.Command, record.AfterOperationID, current)
+	}
+	if err := commandToStderrFn("jj", "-R", repoRoot, "op", "restore", record.BeforeOperationID); err != nil {
+		return fmt.Errorf("undo %s: %w", record.Command, err)
+	}
+	st.Undo = nil
+	if err := saveState(repoRoot, st); err != nil {
+		return fmt.Errorf("%s was undone, but its undo record could not be consumed: %w", record.Command, err)
+	}
+	fmt.Fprintf(stderrWriter, "Undid %s.\n", record.Command)
+	return nil
+}
+
+func runMoveToMain(args []string) (retErr error) {
 	var err error
 	args, err = normalizePositionalsLast(args, map[string]struct{}{"--repo": {}, "--project": {}, "--workspaces-root": {}})
 	if err != nil {
@@ -1499,6 +1556,13 @@ func runMoveToMain(args []string) error {
 	if err != nil {
 		return fmt.Errorf("record pre-Move operation id: %w", err)
 	}
+	undoFinished := false
+	defer func() {
+		if retErr != nil && !undoFinished {
+			undoFinished = true
+			retErr = errors.Join(retErr, completeUndoableOperation(repoRoot, mainInfo.Path, "move-to-main", undoOpID))
+		}
+	}()
 	fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Move Workspaces to %s", destination))
 	for _, info := range targets {
 		if err := commandToStderrFn("jj", "-R", info.Path, "workspace", "update-stale"); err != nil {
@@ -1511,8 +1575,8 @@ func runMoveToMain(args []string) error {
 	if err := commandToStderrFn("jj", "-R", mainInfo.Path, "workspace", "update-stale"); err != nil {
 		return err
 	}
-	printStackUndoHint(undoOpID)
-	return nil
+	undoFinished = true
+	return completeUndoableOperation(repoRoot, mainInfo.Path, "move-to-main", undoOpID)
 }
 
 func isMovableToMain(info workspaceInfo) bool {
@@ -1610,7 +1674,7 @@ func runStack(args []string) (retErr error) {
 		return err
 	}
 	if lineStack {
-		return runLineStack(cfg, infos, byHandle, target, positionals, yes)
+		return runLineStack(repoRoot, cfg, infos, byHandle, target, positionals, yes)
 	}
 	inputs := []string{}
 	if all {
@@ -1682,9 +1746,11 @@ func runStack(args []string) (retErr error) {
 	if err != nil {
 		return fmt.Errorf("record pre-Stack operation id: %w", err)
 	}
+	undoFinished := false
 	defer func() {
-		if retErr != nil {
-			printStackUndoHint(undoOpID)
+		if retErr != nil && !undoFinished {
+			undoFinished = true
+			retErr = errors.Join(retErr, completeUndoableOperation(repoRoot, mainInfo.Path, "stack", undoOpID))
 		}
 	}()
 	conflicted, err := runStackRebase(mainInfo.Path, inputs, cfg.Stack)
@@ -1727,8 +1793,8 @@ func runStack(args []string) (retErr error) {
 			}
 		}
 	}
-	printStackUndoHint(undoOpID)
-	return nil
+	undoFinished = true
+	return completeUndoableOperation(repoRoot, mainInfo.Path, "stack", undoOpID)
 }
 
 type lineStackInput struct {
@@ -1760,7 +1826,7 @@ type lineStackPlan struct {
 	FinalTip       string
 }
 
-func runLineStack(cfg config, infos []workspaceInfo, byHandle map[string]workspaceInfo, target stackTargetResolution, positionals []string, yes bool) error {
+func runLineStack(stateRoot string, cfg config, infos []workspaceInfo, byHandle map[string]workspaceInfo, target stackTargetResolution, positionals []string, yes bool) error {
 	mainInfo, ok := byHandle[cfg.MainWorkspace]
 	if !ok {
 		return fmt.Errorf("target Workspace %q not found", cfg.MainWorkspace)
@@ -1821,11 +1887,9 @@ func runLineStack(cfg config, infos []workspaceInfo, byHandle map[string]workspa
 		}
 	}
 	if err := executeLineStackPlan(mainInfo.Path, plan); err != nil {
-		printStackUndoHint(undoOpID)
-		return err
+		return errors.Join(err, completeUndoableOperation(stateRoot, mainInfo.Path, "stack --line", undoOpID))
 	}
-	printStackUndoHint(undoOpID)
-	return nil
+	return completeUndoableOperation(stateRoot, mainInfo.Path, "stack --line", undoOpID)
 }
 
 func selectorItemForLineStackInfo(info workspaceInfo) selectorItem {
@@ -2296,7 +2360,7 @@ func lineStackPlanText(plan lineStackPlan, undoOpID string, projectedLog string)
 		}
 	}
 	if strings.TrimSpace(undoOpID) != "" {
-		fmt.Fprintf(&b, "To undo this run: jj op restore %s\n", undoOpID)
+		fmt.Fprintf(&b, "To undo this run after it completes: ajj undo (jj op restore %s)\n", undoOpID)
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
@@ -3547,7 +3611,11 @@ func advanceStackInputWorkspaces(target workspaceInfo, inputs []string, byHandle
 	if err != nil {
 		return err
 	}
-	target.Empty = empty
+	conflicted, err := revisionMatches(target.Path, "conflicts() & "+target.Ref.Handle+"@")
+	if err != nil {
+		return err
+	}
+	target.Empty = empty && !conflicted
 	destination := moveToMainDestinationRevset(target)
 	fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Advance Stack Input Workspaces"))
 	for _, handle := range inputs {
@@ -3783,7 +3851,7 @@ func revsetUnion(revs []string) string {
 }
 
 func currentOperationID(repoPath string) (string, error) {
-	out, err := commandCaptureFn("jj", "-R", repoPath, "--ignore-working-copy", "--at-op=@", "op", "log", "-n", "1", "--no-graph", "-T", "id.short() ++ \"\\n\"")
+	out, err := commandCaptureFn("jj", "-R", repoPath, "--ignore-working-copy", "--at-op=@", "op", "log", "-n", "1", "--no-graph", "-T", "id ++ \"\\n\"")
 	if err != nil {
 		return "", err
 	}
@@ -3794,12 +3862,40 @@ func currentOperationID(repoPath string) (string, error) {
 	return id, nil
 }
 
-func printStackUndoHint(opID string) {
+func completeUndoableOperation(stateRoot, repoPath, command, beforeOperationID string) error {
+	afterOperationID, err := currentOperationID(repoPath)
+	if err != nil {
+		printManualRestoreHint(beforeOperationID)
+		return fmt.Errorf("record post-%s operation id: %w", command, err)
+	}
+	if afterOperationID == beforeOperationID {
+		printManualRestoreHint(beforeOperationID)
+		return nil
+	}
+	if err := ensureStateIgnored(stateRoot); err != nil {
+		printManualRestoreHint(beforeOperationID)
+		return fmt.Errorf("prepare local state ignore for %s undo: %w", command, err)
+	}
+	st, err := loadState(stateRoot)
+	if err != nil {
+		printManualRestoreHint(beforeOperationID)
+		return fmt.Errorf("load state to record %s undo: %w", command, err)
+	}
+	st.Undo = &undoRecord{Command: command, BeforeOperationID: beforeOperationID, AfterOperationID: afterOperationID}
+	if err := saveState(stateRoot, st); err != nil {
+		printManualRestoreHint(beforeOperationID)
+		return fmt.Errorf("record %s undo: %w", command, err)
+	}
+	fmt.Fprintf(stderrWriter, "\n%s ajj undo (jj op restore %s)\n", cliStylesForWriter(stderrWriter).Muted.Render("To undo this run:"), beforeOperationID)
+	return nil
+}
+
+func printManualRestoreHint(opID string) {
 	opID = strings.TrimSpace(opID)
 	if opID == "" {
 		return
 	}
-	fmt.Fprintf(stderrWriter, "\n%s %s\n", cliStylesForWriter(stderrWriter).Muted.Render("To undo this run:"), "jj op restore "+opID)
+	fmt.Fprintf(stderrWriter, "\n%s jj op restore %s\n", cliStylesForWriter(stderrWriter).Muted.Render("Manual restore:"), opID)
 }
 
 func revisionIsAncestor(repoPath, ancestor, descendant string) (bool, error) {
@@ -4460,6 +4556,64 @@ func resolveDefaultWorkspaceRoot(repoRoot string) (string, bool) {
 		return root, true
 	}
 	return "", false
+}
+
+func ensureStateIgnored(repoRoot string) error {
+	repoMetadata := filepath.Join(repoRoot, ".jj", "repo")
+	info, err := os.Stat(repoMetadata)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		data, err := os.ReadFile(repoMetadata)
+		if err != nil {
+			return err
+		}
+		repoMetadata = strings.TrimSpace(string(data))
+		if !filepath.IsAbs(repoMetadata) {
+			repoMetadata = filepath.Join(repoRoot, ".jj", repoMetadata)
+		}
+		repoMetadata = filepath.Clean(repoMetadata)
+	}
+	gitTarget, err := os.ReadFile(filepath.Join(repoMetadata, "store", "git_target"))
+	if err != nil {
+		return errors.New("cannot locate the repository's local Git exclude; add .ajj/state.json to .gitignore")
+	}
+	gitDir := strings.TrimSpace(string(gitTarget))
+	if gitDir == "" {
+		return errors.New("repository Git target is empty")
+	}
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(repoMetadata, "store", gitDir)
+	}
+	gitDir = filepath.Clean(gitDir)
+	if info, err := os.Stat(gitDir); err != nil || !info.IsDir() {
+		return errors.New("cannot locate the repository's Git directory; add .ajj/state.json to .gitignore")
+	}
+	excludePath := filepath.Join(gitDir, "info", "exclude")
+	data, err := os.ReadFile(excludePath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == ".ajj/state.json" {
+			return nil
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(excludePath), 0o755); err != nil {
+		return err
+	}
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		data = append(data, '\n')
+	}
+	data = append(data, []byte(".ajj/state.json\n")...)
+	if err := os.WriteFile(excludePath, data, 0o644); err != nil {
+		return err
+	}
+	return nil
 }
 
 func loadState(repoRoot string) (state, error) {
@@ -5412,7 +5566,7 @@ func versionString() string {
 // shell-init and init do not touch jj and must not trigger the check.
 func commandNeedsJJ(command string) bool {
 	switch command {
-	case "create", "open", "list", "main", "workspaces-subdir", "close", "tidy", "stack", "integrate", "move-to-main", "catch-up":
+	case "create", "open", "list", "main", "workspaces-subdir", "close", "tidy", "stack", "undo", "integrate", "move-to-main", "catch-up":
 		return true
 	default:
 		return false

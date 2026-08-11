@@ -485,6 +485,67 @@ func TestRunStackRealRepoConflictedMergeUsesDescribedWorkspaceHeadsAsPayloads(t 
 	}
 }
 
+func TestRunUndoRestoresLatestStackAndConsumesRecord(t *testing.T) {
+	paths := setupRealStackMergeRepo(t, false)
+	before := map[string]string{}
+	for _, handle := range []string{"default", "alpha", "bravo"} {
+		before[handle] = jjRev(t, paths.defaultPath, handle+"@")
+	}
+
+	if err := runStack([]string{"alpha", "bravo", "--repo", paths.defaultPath, "--workspace", "default", "--yes", "--stack-shape", "merge", "--conflict-strategy", "off"}); err != nil {
+		t.Fatalf("Stack before undo failed: %v", err)
+	}
+	st, err := loadState(paths.defaultPath)
+	if err != nil || st.Undo == nil || st.Undo.Command != "stack" || !integrationFullOperationIDRE.MatchString(st.Undo.BeforeOperationID) || !integrationFullOperationIDRE.MatchString(st.Undo.AfterOperationID) {
+		t.Fatalf("expected full Stack undo record, got state=%+v err=%v", st, err)
+	}
+	exclude, err := os.ReadFile(filepath.Join(paths.defaultPath, ".git", "info", "exclude"))
+	if err != nil || !strings.Contains(string(exclude), ".ajj/state.json") {
+		t.Fatalf("expected local state ignore, got %q err=%v", exclude, err)
+	}
+	if err := runUndo([]string{"--repo", paths.defaultPath}); err != nil {
+		t.Fatalf("undo Stack failed: %v", err)
+	}
+	for handle, want := range before {
+		if got := jjRev(t, paths.defaultPath, handle+"@"); got != want {
+			t.Fatalf("expected %s@ restored to %s, got %s", handle, want, got)
+		}
+	}
+	st, err = loadState(paths.defaultPath)
+	if err != nil || st.Undo != nil {
+		t.Fatalf("expected successful undo to consume record, got state=%+v err=%v", st, err)
+	}
+}
+
+func TestRunUndoRefusesAfterNewerJujutsuOperation(t *testing.T) {
+	paths := setupRealStackMergeRepo(t, false)
+	if err := runStack([]string{"alpha", "bravo", "--repo", paths.defaultPath, "--workspace", "default", "--yes", "--stack-shape", "merge", "--conflict-strategy", "off"}); err != nil {
+		t.Fatalf("Stack before undo refusal failed: %v", err)
+	}
+	st, err := loadState(paths.defaultPath)
+	if err != nil || st.Undo == nil {
+		t.Fatalf("expected Stack undo record, got state=%+v err=%v", st, err)
+	}
+	newerPath := filepath.Join(paths.defaultPath, "newer.txt")
+	if err := os.WriteFile(newerPath, []byte("newer work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, errOut, err := captureOutput(func() error { return runUndo([]string{"--repo", paths.defaultPath}) })
+	if err == nil || !strings.Contains(err.Error(), "newer Jujutsu operations exist") {
+		t.Fatalf("expected undo refusal after newer operation, got %v", err)
+	}
+	if !strings.Contains(errOut, "Manual restore: jj op restore "+st.Undo.BeforeOperationID) {
+		t.Fatalf("expected exact manual restore escape hatch, got %q", errOut)
+	}
+	if data, readErr := os.ReadFile(newerPath); readErr != nil || string(data) != "newer work\n" {
+		t.Fatalf("undo refusal changed newer work: data=%q err=%v", data, readErr)
+	}
+	stillStored, err := loadState(paths.defaultPath)
+	if err != nil || stillStored.Undo == nil {
+		t.Fatalf("expected refused undo to retain record, got state=%+v err=%v", stillStored, err)
+	}
+}
+
 func TestRunStackRealRepoCleanMergeDescribesMergeAndAdvancesMainAboveIt(t *testing.T) {
 	paths := setupRealStackMergeRepo(t, false)
 	_, errOut, err := captureOutput(func() error {
@@ -557,6 +618,12 @@ func TestRunStackRealRepoConflictedMergeDescribesMainHeadWithoutAdvancingAboveIt
 	}
 	if got := jjRevsetCount(t, paths.defaultPath, "conflicts() & default@"); got != 1 {
 		t.Fatalf("expected conflicts to remain at default@ for resolution, got %d", got)
+	}
+	target := jjRev(t, paths.defaultPath, "default@")
+	for _, handle := range []string{"alpha", "bravo"} {
+		if got := jjRevsetCount(t, paths.defaultPath, target+" & parents("+handle+"@)"); got != 1 {
+			t.Fatalf("expected %s@ to advance after the conflicted Stack merge, got %d\nstderr:%s", handle, got, errOut)
+		}
 	}
 }
 

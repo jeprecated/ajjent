@@ -157,6 +157,7 @@ Normal-close safety is called **Represented Elsewhere** and is intentionally dis
 - `ajj stack --line [handle...]` — Line Stack selected Workspaces onto one ordered line while leaving omitted Workspaces untouched.
 - `ajj move-to-main [handle...]` — move selected tidy Workspace cursors up to the Main Workspace line.
 - `ajj move-to-main --all` — non-interactively move every movable Workspace; with no Handles, use the TUI.
+- `ajj undo` — undo the latest recorded Stack, Line Stack, or Move-to-Main when no newer Jujutsu operation exists.
 
 The stack target resolves in this order: explicit `--workspace`, then the current Workspace from `--repo`/cwd, then configured `main_workspace` for compatibility. This means `ajj stack child --repo /path/to/myrepo-workspaces/speed --yes` advances `speed@` by default; use `--workspace default` when you intentionally want to advance `default@`. When the current non-default Workspace becomes the target, `--all` does not silently include the configured `main_workspace`. `ajj` refuses to stack the target Workspace into itself and asks for `--workspace` when the target should be something else.
 
@@ -253,6 +254,8 @@ A──T──J──K'──L'──M'──N'
 The selected Workspace cursors advance to the resulting line. Do not include `default` merely to express a target: that would select `default` as a Line Stack input. Use machine `integrate` with `strategy: "ordered-line"` when a line must be structurally anchored to the Current Workspace. Human Line Stack previews the exact plan before mutation and stops at a conflict instead of silently choosing another ordering or falling back to a merge. Omitted Workspaces remain untouched.
 
 `move-to-main` is for Workspaces that have no unique content or described commits and are only behind the Main Workspace. The TUI starts movable rows checked so you can quickly uncheck Workspaces to leave alone. Empty undescribed changes are ignored, but empty described merges still count as `ahead`/`behind`. If the Main Workspace head is empty, `ajj` advances each selected Workspace with `jj new main@-`, making the Workspace cursors siblings of the Main Workspace cursor; otherwise it uses `jj new main@`.
+
+Stack, Line Stack, and Move-to-Main record their full before/after Jujutsu operation IDs in `.ajj/state.json`, adding that path to the repository's local Git exclude first. `ajj undo` snapshots the current Workspace, then restores the recorded before-operation only when the current operation exactly matches the recorded after-operation. Any newer Jujutsu operation or unsnapshotted working-copy edit makes it refuse and print the explicit `jj op restore <id>` escape hatch. A successful undo consumes the record; there is no time-based expiry or force mode.
 
 Line Stacking is an ordered variant for the common "make these selected Workspaces one line, but leave the others alone" workflow described in ADR 0008. Positional Handles define the line order: the first payload Workspace is the bottom and the last payload Workspace becomes the final tip. With no Handles, the TUI preserves selection order; selected rows show payload (`P`) or **Follow-only** (`F`). A Follow-only Workspace is advanced to the final Line Stacking tip without contributing payload commits, and `a` toggles that role. Empty or already represented Workspaces default to Follow-only. A non-empty Workspace head with no description is treated as in-progress working-copy state: it is excluded from the payload line and rebased on top of the final Line Stack tip. `ajj` always prints a preview to stderr with the projected log, ordered inputs, payload rebases, follow-only advances, in-progress rebases, excluded Workspaces, and the undo command; interactive runs ask for confirmation unless `--yes` is passed. If a Line Stack operation conflicts, `ajj` stops and leaves the conflicted state for manual resolution.
 
@@ -363,10 +366,10 @@ Local repo override:
 
 Local state paths:
 
-- `<repo-root>/.ajj/state.json` for `next-unused` Handle selection;
+- `<repo-root>/.ajj/state.json` for `next-unused` Handle selection and the latest Ajj undo record;
 - `<configured-main>/.ajj/integrations/` for path-bound machine integration journals, advisory locks, and terminal receipts.
 
-`state.json` and `.ajj/integrations/` should be ignored; `.ajj/config.yaml` may be committed when a Project wants shared settings. Integration state always lives under configured Main even when another Current Workspace is the integration target.
+`state.json` and `.ajj/integrations/` must be ignored; Ajj adds `state.json` to the local Git exclude when recording undo. `.ajj/config.yaml` may be committed when a Project wants shared settings. Integration state always lives under configured Main even when another Current Workspace is the integration target.
 
 Example:
 

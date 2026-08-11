@@ -455,7 +455,7 @@ func TestHelpMentionsLineStacking(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"stack --line [handle...]", "move-to-main [handle...]", "workspaces-subdir"} {
+	for _, want := range []string{"stack --line [handle...]", "move-to-main [handle...]", "undo", "workspaces-subdir"} {
 		if !strings.Contains(topOut, want) {
 			t.Fatalf("expected top-level help to mention %q, got %q", want, topOut)
 		}
@@ -1264,13 +1264,18 @@ func TestRunMoveToMainAllMovesOnlyBehindTidyWorkspaces(t *testing.T) {
 		}
 	}
 	writeConfig(t, mainPath, "workspaces_root: "+workspacesRoot+"\nproject: proj\nmain_workspace: default\n")
+	opLogCalls := 0
 	withCommandCapture(t, func(name string, args ...string) (string, error) {
 		joined := strings.Join(args, " ")
 		if strings.Contains(joined, "workspace list") {
 			return "default\tmain111\t" + mainPath + "\nalpha\talpha111\t" + alphaPath + "\nbilling\tmeme111\t" + memePath + "\n", nil
 		}
 		if strings.Contains(joined, "op log") {
-			return "op123\n", nil
+			opLogCalls++
+			if opLogCalls == 1 {
+				return "op-before-move\n", nil
+			}
+			return "op-after-move\n", nil
 		}
 		if strings.Contains(joined, "log -r @") {
 			return "main111\n", nil
@@ -1307,6 +1312,10 @@ func TestRunMoveToMainAllMovesOnlyBehindTidyWorkspaces(t *testing.T) {
 	}
 	if strings.Contains(joinedCommands, memePath+" new") {
 		t.Fatalf("billing has unique commits and should not move, got commands:\n%s", joinedCommands)
+	}
+	st, err := loadState(mainPath)
+	if err != nil || st.Undo == nil || st.Undo.Command != "move-to-main" || st.Undo.AfterOperationID != "op-after-move" {
+		t.Fatalf("expected recorded Move-to-Main undo, got state=%+v err=%v", st, err)
 	}
 }
 
@@ -2532,13 +2541,18 @@ func TestRunStackExplicitWorkspaceStacksPayloadFrontierThenAdvancesWorkspaceHead
 		}
 	}
 	writeConfig(t, mainPath, "workspaces_root: "+workspacesRoot+"\nproject: proj\nmain_workspace: default\n")
+	opLogCalls := 0
 	withCommandCapture(t, func(name string, args ...string) (string, error) {
 		joined := strings.Join(args, " ")
 		if strings.Contains(joined, "workspace list") {
 			return "default\tmain111\t" + mainPath + "\nteams\tteams111\t" + teamsPath + "\n", nil
 		}
 		if strings.Contains(joined, " op log ") {
-			return "op-before-stack\n", nil
+			opLogCalls++
+			if opLogCalls == 1 {
+				return "op-before-stack\n", nil
+			}
+			return "op-after-stack\n", nil
 		}
 		if strings.Contains(joined, "teams@ & "+stackInputPayloadRevset("teams")) {
 			return "", nil
@@ -2579,8 +2593,12 @@ func TestRunStackExplicitWorkspaceStacksPayloadFrontierThenAdvancesWorkspaceHead
 	if !strings.Contains(strings.Join(rebaseCommands[1], " "), "-r teams@") || strings.Join(advanceDests, ",") != "default@" {
 		t.Fatalf("expected teams@ to advance onto default@, got args=%v dests=%v", rebaseCommands[1], advanceDests)
 	}
-	if !strings.Contains(errOut.String(), "To undo this run: jj op restore op-before-stack") {
-		t.Fatalf("expected undo restore hint, got stderr %q", errOut.String())
+	if !strings.Contains(errOut.String(), "To undo this run: ajj undo (jj op restore op-before-stack)") {
+		t.Fatalf("expected Ajj undo hint, got stderr %q", errOut.String())
+	}
+	st, err := loadState(mainPath)
+	if err != nil || st.Undo == nil || st.Undo.AfterOperationID != "op-after-stack" {
+		t.Fatalf("expected recorded Stack undo, got state=%+v err=%v", st, err)
 	}
 }
 
@@ -2627,8 +2645,8 @@ func TestRunStackPrintsUndoHintWhenMutationFails(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "injected rebase failure") {
 		t.Fatalf("expected injected Stack mutation failure, got %v", err)
 	}
-	if !strings.Contains(errOut, "To undo this run: jj op restore op-before-stack") {
-		t.Fatalf("expected failure path to print restore guidance, got %q", errOut)
+	if !strings.Contains(errOut, "Manual restore: jj op restore op-before-stack") {
+		t.Fatalf("expected failure path to print manual restore guidance, got %q", errOut)
 	}
 }
 
@@ -3454,7 +3472,7 @@ func TestLineStackPreviewListsInputsRebasesFollowExcludedOptionsAndUndo(t *testi
 	}
 	projected := "@  alpha@ (planned empty cursor)\n│ ○  bravo@ (planned empty cursor)\n├─╯\n│ ○  charlie@ (planned empty cursor)\n├─╯\n○  bravo-tip bravo top\n○  alpha-tip alpha base"
 	preview := lineStackPlanText(plan, "op-preview", projected)
-	for _, want := range []string{"Line Stack preview", "Projected jj log after Line Stack:", "@  alpha@ (planned empty cursor)", "│ ○  bravo@ (planned empty cursor)", "○  bravo-tip bravo top", "Options:", "mode: line", "1. alpha (payload)", "2. charlie (follow-only)", "3. bravo (payload)", "bravo payload:", "Follow-only advances:", "charlie@ -> " + lineStackPayloadDestinationRevset("bravo"), "Payload Workspace head advances:", "alpha@ -> " + lineStackPayloadDestinationRevset("bravo"), "bravo@ -> " + lineStackPayloadDestinationRevset("bravo"), "Excluded:", "default", "omitted", "To undo this run: jj op restore op-preview"} {
+	for _, want := range []string{"Line Stack preview", "Projected jj log after Line Stack:", "@  alpha@ (planned empty cursor)", "│ ○  bravo@ (planned empty cursor)", "○  bravo-tip bravo top", "Options:", "mode: line", "1. alpha (payload)", "2. charlie (follow-only)", "3. bravo (payload)", "bravo payload:", "Follow-only advances:", "charlie@ -> " + lineStackPayloadDestinationRevset("bravo"), "Payload Workspace head advances:", "alpha@ -> " + lineStackPayloadDestinationRevset("bravo"), "bravo@ -> " + lineStackPayloadDestinationRevset("bravo"), "Excluded:", "default", "omitted", "To undo this run after it completes: ajj undo (jj op restore op-preview)"} {
 		if !strings.Contains(preview, want) {
 			t.Fatalf("expected preview to contain %q, got %q", want, preview)
 		}
@@ -3511,6 +3529,7 @@ func TestRunStackLineUsesOrderedPayloadRebasesAndAdvancesSelectedHeadsOnly(t *te
 		}
 	}
 	writeConfig(t, mainPath, "workspaces_root: "+workspacesRoot+"\nproject: proj\nmain_workspace: default\n")
+	opLogCalls := 0
 	withCommandCapture(t, func(name string, args ...string) (string, error) {
 		joined := strings.Join(args, " ")
 		if strings.Contains(joined, "workspace list") {
@@ -3521,7 +3540,11 @@ func TestRunStackLineUsesOrderedPayloadRebasesAndAdvancesSelectedHeadsOnly(t *te
 			return strings.Join(lines, "\n") + "\n", nil
 		}
 		if strings.Contains(joined, " op log ") {
-			return "op-before-line\n", nil
+			opLogCalls++
+			if opLogCalls == 1 {
+				return "op-before-line\n", nil
+			}
+			return "op-after-line\n", nil
 		}
 		if strings.Contains(joined, workspaceAheadRevset("helper", "default")) || strings.Contains(joined, workspaceAheadRevset("ingest", "default")) || strings.Contains(joined, workspaceAheadRevset("worker", "default")) || strings.Contains(joined, workspaceAheadRevset("mobile-docs", "default")) {
 			return "ahead\n", nil
@@ -3594,10 +3617,14 @@ func TestRunStackLineUsesOrderedPayloadRebasesAndAdvancesSelectedHeadsOnly(t *te
 	if !updateStale {
 		t.Fatal("expected workspace update-stale after line stack")
 	}
-	for _, want := range []string{"Line Stack preview", "helper", "ingest", "worker", "loop", "mobile-docs", "To undo this run: jj op restore op-before-line"} {
+	for _, want := range []string{"Line Stack preview", "helper", "ingest", "worker", "loop", "mobile-docs", "To undo this run after it completes: ajj undo (jj op restore op-before-line)"} {
 		if !strings.Contains(errOut, want) {
 			t.Fatalf("expected stderr preview/undo to contain %q, got %q", want, errOut)
 		}
+	}
+	st, err := loadState(mainPath)
+	if err != nil || st.Undo == nil || st.Undo.Command != "stack --line" || st.Undo.AfterOperationID != "op-after-line" {
+		t.Fatalf("expected recorded Line Stack undo, got state=%+v err=%v", st, err)
 	}
 }
 
@@ -3668,7 +3695,7 @@ func TestRunStackLineStopsOnConflictBeforeAdvances(t *testing.T) {
 	if updateStale {
 		t.Fatal("did not expect update-stale after conflict")
 	}
-	if !strings.Contains(errOut, "To undo this run: jj op restore op-before-conflict") {
+	if !strings.Contains(errOut, "To undo this run after it completes: ajj undo (jj op restore op-before-conflict)") {
 		t.Fatalf("expected undo hint in preview, got %q", errOut)
 	}
 }
@@ -3682,10 +3709,24 @@ func TestRunStackLineRejectsIncompatibleModes(t *testing.T) {
 	}
 }
 
+func TestRunUndoRejectsInvalidStoredOperationIDs(t *testing.T) {
+	repoRoot := t.TempDir()
+	if err := saveState(repoRoot, state{Undo: &undoRecord{Command: "stack", BeforeOperationID: "not-an-operation", AfterOperationID: strings.Repeat("a", 128)}}); err != nil {
+		t.Fatal(err)
+	}
+	withCommandCapture(t, func(name string, args ...string) (string, error) {
+		t.Fatalf("invalid undo state must fail before running %s %s", name, strings.Join(args, " "))
+		return "", nil
+	})
+	if err := runUndo([]string{"--repo", repoRoot}); err == nil || !strings.Contains(err.Error(), "operation IDs are invalid") {
+		t.Fatalf("expected invalid undo state rejection, got %v", err)
+	}
+}
+
 func TestCurrentOperationIDReadsCurrentOperationWithoutSnapshot(t *testing.T) {
 	withCommandCapture(t, func(name string, args ...string) (string, error) {
 		joined := strings.Join(args, " ")
-		if name != "jj" || !strings.Contains(joined, "--ignore-working-copy --at-op=@ op log") || !strings.Contains(joined, "id.short()") {
+		if name != "jj" || !strings.Contains(joined, "--ignore-working-copy --at-op=@ op log") || !strings.Contains(joined, "id ++") {
 			t.Fatalf("expected current op log probe without snapshot, got %s %s", name, joined)
 		}
 		return "abc123\n", nil

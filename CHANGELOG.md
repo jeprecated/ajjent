@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- `ajj undo` safely restores the latest recorded Stack, Line Stack, or Move-to-Main operation. It snapshots the current Workspace, refuses when the exact Jujutsu operation has advanced, prints the manual `jj op restore <id>` escape hatch, and consumes a successful undo record.
 - `ajj create --request-json ... --json` adds a strict Current-Workspace machine ensure/reconcile boundary with path-free `ready`, `partial`, `not-created`, and `conflict` receipts. Explicit `ajj-capabilities-v2` negotiation advertises state reconciliation without claiming exactly-once creator provenance or operation-ID recovery; human create behavior remains unchanged.
 - `ajj integrate` now executes `single`, `provider-default`, and target-anchored `ordered-line` machine requests as exact detached Jujutsu transactions rooted at the recorded pre-effect operation, publishes one validated operation as the landing commit point, and returns durable per-payload receipts with recovery support. Ordered lines preserve request order while allowing independent siblings, dependent child chains, and targets newer than child creation.
 - The complete recursive Current-Workspace lifecycle is documented and covered through public-CLI tests: create A1/A2/A3 from A, integrate and automatically Tidy them through normal close safety while Main stays unchanged, then integrate A into Main and automatically Tidy A while Current/Main and omitted Workspaces remain untouched.
