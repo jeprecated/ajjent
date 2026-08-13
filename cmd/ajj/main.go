@@ -1115,7 +1115,7 @@ func tidyWorkspaces(repoRoot string, cfg config, project string, infos []workspa
 		targets = targets[:0]
 		for _, item := range selected {
 			info, ok := byHandle[item.Handle]
-			if !ok || info.Main || info.Missing || (!force && !isClosable(info)) {
+			if !ok || info.Main || info.Current || (!info.Missing && !force && !isClosable(info)) {
 				continue
 			}
 			targets = append(targets, info)
@@ -1199,10 +1199,10 @@ func tidyWorkspaces(repoRoot string, cfg config, project string, infos []workspa
 func tidyTargets(infos []workspaceInfo, force bool) []workspaceInfo {
 	targets := []workspaceInfo{}
 	for _, info := range infos {
-		if info.Main || info.Missing || info.Current {
+		if info.Main || info.Current {
 			continue
 		}
-		if force || isClosable(info) {
+		if info.Missing || force || isClosable(info) {
 			targets = append(targets, info)
 		}
 	}
@@ -3154,7 +3154,10 @@ func normallyUnclosableTargets(repoPath string, targets []workspaceInfo) ([]work
 func normallyUnclosableTargetsWithProtection(repoPath string, targets []workspaceInfo, protection closeProtectionContext) ([]workspaceInfo, error) {
 	unsafe := make([]workspaceInfo, 0)
 	for _, target := range targets {
-		if target.Main || target.Missing || !workspacePathExists(target.Path) {
+		if target.Missing {
+			continue
+		}
+		if target.Main || !workspacePathExists(target.Path) {
 			unsafe = append(unsafe, target)
 			continue
 		}
@@ -3212,7 +3215,7 @@ func closeWorkspacesWithProtection(repoPath string, targets []workspaceInfo, for
 		}
 	}
 	for _, info := range targets {
-		if force {
+		if force && !info.Missing {
 			if err := abandonUniqueMutableChanges(repoPath, info.Ref.Handle, protection.protectorHandles); err != nil {
 				return closed, err
 			}
@@ -4973,13 +4976,16 @@ func (m selectorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.opts.AllowForceToggle {
 				m.opts.ForceEnabled = !m.opts.ForceEnabled
 				for i := range m.opts.Items {
-					if m.opts.Items[i].All {
+					item := &m.opts.Items[i]
+					if item.All {
 						continue
 					}
-					if m.opts.ForceEnabled {
-						m.opts.Items[i].Disabled = m.opts.Items[i].Status == "missing"
+					if m.opts.Tidy {
+						item.Disabled = itemHasMarker(*item, "current") || (!m.opts.ForceEnabled && item.Status != "empty" && item.Status != "stacked" && item.Status != "missing")
+					} else if m.opts.ForceEnabled {
+						item.Disabled = item.Status == "missing"
 					} else {
-						m.opts.Items[i].Disabled = m.opts.Items[i].Status != "empty" && m.opts.Items[i].Status != "stacked"
+						item.Disabled = item.Status != "empty" && item.Status != "stacked"
 					}
 				}
 			}
@@ -5315,7 +5321,7 @@ func selectorLegend(opts selectorOptions) string {
 		return "status: only Workspaces with no unique commits and behind Main are selected by default; uncheck any to leave alone"
 	}
 	if opts.Tidy {
-		return "status: Represented Elsewhere non-Current Workspaces start selected; labels remain Main-relative; f enables Forced Tidying"
+		return "status: Represented Elsewhere non-Current Workspaces and missing registrations start selected; labels remain Main-relative; f enables Forced Tidying"
 	}
 	if opts.AllDefault {
 		return "status: unstacked/conflict = stack-relevant; stacked/empty/missing = shown for context"
@@ -5337,7 +5343,7 @@ func selectorHint(opts selectorOptions) string {
 		return "Choose Workspaces to move to the Main Workspace line. Movable rows start checked; press space to leave one alone."
 	}
 	if opts.Tidy {
-		return "Choose represented Workspaces to tidy. Safe non-Current rows start checked; the complete closing set cannot protect itself. Press f for Forced Tidying."
+		return "Choose represented Workspaces and missing registrations to tidy. Safe non-Current rows start checked; the complete closing set cannot protect itself. Press f for Forced Tidying."
 	}
 	if opts.AllDefault {
 		return "Choose Stack Inputs. The All row submits every stack-relevant Workspace only when no boxes are checked. Disabled rows are shown for context."
@@ -5409,8 +5415,8 @@ func selectorItemsForTidy(infos []workspaceInfo, force bool) []selectorItem {
 		if info.Main {
 			continue
 		}
-		tidy := isClosable(info)
-		disabled := info.Missing || (!force && !tidy)
+		tidy := isClosable(info) || info.Missing
+		disabled := info.Current || (!force && !tidy)
 		items = append(items, selectorItem{Handle: info.Ref.Handle, Path: info.Path, Status: statusLabel(info), Markers: strings.Join(markers(info), ","), Disabled: disabled, Selected: tidy && !info.Current})
 	}
 	return items

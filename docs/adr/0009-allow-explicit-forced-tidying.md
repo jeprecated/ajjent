@@ -9,4 +9,5 @@
 - Forced Tidying uses the same abandonment boundary as Forced Closing: unique mutable changes not reachable from another Workspace are abandoned before the Workspace is closed.
 - A destructive confirmation names the selected Workspaces that require Forced Tidying.
 - `ajj tidy --force` exposes the same behavior outside the selector. `--force --yes` applies it to every non-main, non-missing Workspace without confirmation.
-- The Main Workspace and missing Workspaces remain unavailable.
+- The Main and Current Workspaces remain unavailable.
+- Missing Workspace registrations start selected and may be forgotten by ordinary Tidying. `jj workspace forget` preserves their commits as visible heads, so this cleanup does not require Forced Tidying.

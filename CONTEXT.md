@@ -73,7 +73,7 @@ Closing a Workspace while also abandoning its unique mutable changes.
 _Avoid_: Discarding
 
 **Tidying**:
-Batch-closing selected normally Closable Workspaces and cleaning up empty leftovers that no longer represent active Workspaces. Automatic Tidying selects normally Closable non-Current Workspaces; visible empty/unstacked/stacked status remains Main-relative and is not itself the close-safety decision.
+Batch-closing selected normally Closable Workspaces, forgetting stale registrations whose Workspace paths are missing, and cleaning up empty leftovers that no longer represent active Workspaces. Automatic Tidying selects normally Closable non-Current Workspaces and missing registrations; the Current Workspace remains unavailable. Visible empty/unstacked/stacked status remains Main-relative and is not itself the close-safety decision.
 _Avoid_: Implicitly abandoning unique changes
 
 **Forced Tidying**:
@@ -119,8 +119,8 @@ _Avoid_: Disposable workspace, empty or Main-stacked workspace
 - A **Stacked Workspace** is represented specifically in the configured **Main Workspace**; this status is not redefined by nested integration.
 - **Closing** without force applies to a **Closable Workspace** whose relevant mutable changes are **Represented Elsewhere**.
 - Batch **Closing** excludes every selected Workspace from the protection set, so selected Workspaces cannot mutually authorize their own removal.
-- Missing-directory but registered surviving Workspaces still protect reachable work; a missing candidate cannot be normally Closed.
-- **Tidying** automatically selects normally **Closable Workspaces** except the **Current Workspace**, then cleans up empty leftovers.
+- Missing-directory but registered surviving Workspaces still protect reachable work. **Tidying** may forget a selected missing registration without Closing or abandoning its surviving visible changes.
+- **Tidying** automatically selects normally **Closable Workspaces** except the **Current Workspace**, plus missing registrations, then cleans up empty leftovers.
 - **Forced Tidying** may also close selected unstacked or conflicted **Workspaces** by abandoning their unique mutable changes.
 - Machine integration journals live under the configured **Main Workspace** as local path-bound state, but configured Main is not an implicit integration target.
 - A Jujutsu repository may have many **Workspaces**.

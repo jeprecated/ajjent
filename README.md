@@ -319,7 +319,7 @@ ajj --repo "$MAIN" integrate --request-json /tmp/Main-A.json
 ajj --repo "$MAIN" tidy --yes
 ```
 
-Normal close/tidy computes **Represented Elsewhere** against surviving registered Workspace heads outside the complete closing set, so a batch cannot protect itself. Missing-directory registered survivors still protect reachable work; missing candidates cannot be normally closed. Automatic Tidy never preselects Current, and configured Main is never closable.
+Normal close/tidy computes **Represented Elsewhere** against surviving registered Workspace heads outside the complete closing set, so a batch cannot protect itself. Missing-directory registered survivors still protect reachable work. Tidy may forget selected missing registrations without abandoning their visible changes. Automatic Tidy never selects Current, and configured Main is never closable.
 
 Discover the exact schemas, strategies, dispositions, operation-id pattern, jj minimum, and byte/count limits without a repository:
 
@@ -351,7 +351,7 @@ See [ADR 0010](docs/adr/0010-add-workspace-relative-integration-protocol.md) for
 
 - `ajj list` — print Workspaces as Handle, markers, ahead, behind, action, path. Terminal output is aligned for reading; redirected output is tab-separated for parsing. Includes Current and Main markers. `ahead` counts Workspace commits not in Main except empty undescribed changes; `behind` counts Main commits not in that Workspace except empty undescribed changes.
 - `ajj list --paths` — print paths only.
-- `ajj tidy` — offer to close normally Closable Workspaces represented by surviving registered Workspace heads, then remove empty leftover directories under the Project layout and report non-empty leftovers. Normally closable non-Current rows start checked; the visible `empty/unstacked/stacked/conflict/missing` labels remain Main-relative context rather than the close-safety predicate. The complete selected closing set is excluded from protection, and missing-directory registered survivors still protect reachable work. Press `f` to enable **Forced Tidying**, select otherwise unsafe or conflicted Workspaces, and explicitly confirm abandoning unique mutable changes. Use `--force` outside the TUI; `--force --yes` force-tidies every non-main, non-missing, non-Current Workspace without confirmation.
+- `ajj tidy` — offer to close normally Closable Workspaces represented by surviving registered Workspace heads, forget stale missing Workspace registrations, then remove empty leftover directories under the Project layout and report non-empty leftovers. Normally closable non-Current rows and missing registrations start checked; Current is disabled. The visible `empty/unstacked/stacked/conflict/missing` labels remain Main-relative context rather than the close-safety predicate. The complete selected closing set is excluded from protection, and missing-directory registered survivors still protect reachable work. Press `f` to enable **Forced Tidying**, select otherwise unsafe or conflicted Workspaces, and explicitly confirm abandoning unique mutable changes. Use `--force` outside the TUI; `--force --yes` force-tidies every non-main, non-Current Workspace without confirmation.
 - `ajj shell-init [bash|zsh]` — print shell integration so `create`, `open`, `close`, and `main` can change the current shell's directory.
 
 ## Config

@@ -384,8 +384,8 @@ func TestAutomaticTidyDoesNotPreselectCurrentWorkspace(t *testing.T) {
 		t.Fatalf("automatic tidy targets included Current Workspace: %+v", targets)
 	}
 	items := mapSelectorItemsByHandle(selectorItemsForTidy(infos, false))
-	if items["current"].Selected || items["current"].Disabled {
-		t.Fatalf("Current Workspace should be available but not preselected: %+v", items["current"])
+	if items["current"].Selected || !items["current"].Disabled {
+		t.Fatalf("Current Workspace should be disabled and not preselected: %+v", items["current"])
 	}
 }
 
