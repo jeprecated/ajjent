@@ -1180,20 +1180,32 @@ func tidyWorkspaces(repoRoot string, cfg config, project string, infos []workspa
 	if err != nil {
 		return err
 	}
-	if err := abandonEmptyWorkspaceHeads(mainInfo.Path, targets); err != nil {
+	// All prompts must precede the first mutation, including empty-cursor cleanup.
+	confirmed, err := confirmExternalDeletes(targets, yes)
+	if err != nil || !confirmed {
 		return err
 	}
-	closed, closeErr := closeWorkspacesWithProtection(mainInfo.Path, targets, len(forcedTargets) > 0, yes, protection)
+	emptyAbandoned, err := abandonEmptyWorkspaceHeads(mainInfo.Path, targets)
+	if err != nil {
+		return fmt.Errorf("empty Workspace head cleanup failed (may be partially applied); no Workspace directory closing attempted: %w", err)
+	}
+	closed, closeErr := closeWorkspacesWithProtection(mainInfo.Path, targets, len(forcedTargets) > 0, true, protection)
 	for _, path := range closed {
 		fmt.Fprintln(stdoutWriter, path)
 	}
 	if closeErr != nil {
+		if emptyAbandoned {
+			return fmt.Errorf("empty undescribed Workspace heads were already abandoned for closing set %s (see jj output above); %w", workspaceHandleList(targets), closeErr)
+		}
 		return closeErr
 	}
 	if err := abandonTopEmptyMutableAncestors(mainInfo.Path); err != nil {
-		return err
+		return fmt.Errorf("closed: %s; earlier abandonments remain applied (see jj output); final empty-ancestor cleanup failed and may be partially applied: %w", workspaceHandleList(targets), err)
 	}
-	return commandToStderrFn("jj", "-R", mainInfo.Path, "workspace", "update-stale")
+	if err := commandToStderrFn("jj", "-R", mainInfo.Path, "workspace", "update-stale"); err != nil {
+		return fmt.Errorf("closed: %s; earlier abandonments remain applied (see jj output); updating Main Workspace failed: %w", workspaceHandleList(targets), err)
+	}
+	return nil
 }
 
 func tidyTargets(infos []workspaceInfo, force bool) []workspaceInfo {
@@ -1329,16 +1341,17 @@ func runClose(args []string) error {
 		}
 	}
 	if !force && !yes {
-		ok, err := confirm(fmt.Sprintf("Close %s? [y/N]: ", workspaceSummary(targets)))
+		ok, err := confirm(normalClosePrompt(targets))
 		if err != nil || !ok {
 			return err
 		}
 	}
-	if _, err := closeWorkspaces(mainInfo.Path, targets, force, yes); err != nil {
+	closed, err := closeWorkspaces(mainInfo.Path, targets, force, yes)
+	if err != nil || len(closed) == 0 {
 		return err
 	}
 	if err := abandonTopEmptyMutableAncestors(mainInfo.Path); err != nil {
-		return err
+		return fmt.Errorf("closed: %s; earlier abandonments remain applied (see jj output); final empty-ancestor cleanup failed and may be partially applied: %w", workspaceHandleList(targets), err)
 	}
 	printNavigationPath(mainInfo.Path, "close")
 	return nil
@@ -3202,33 +3215,60 @@ func closeWorkspacesWithProtection(repoPath string, targets []workspaceInfo, for
 			return closed, fmt.Errorf("%s not normally closable against surviving Workspaces", workspaceSummary(unsafe))
 		}
 	}
-	externalTargets := []workspaceInfo{}
-	for _, info := range targets {
-		if info.External {
-			externalTargets = append(externalTargets, info)
-		}
+	confirmed, err := confirmExternalDeletes(targets, yes)
+	if err != nil || !confirmed {
+		return closed, err
 	}
-	if len(externalTargets) > 0 && !yes {
-		ok, err := confirm(externalDeletePrompt(externalTargets))
-		if err != nil || !ok {
-			return closed, err
-		}
+	closedHandles, abandoned := []string{}, []string{}
+	failure := func(index int, cause error) ([]string, error) {
+		return closed, fmt.Errorf("Closing stopped (not atomic): closed: %s; abandoned unique mutable changes: %s; failed: %s; not attempted: %s; failing command may be partially applied: %w",
+			emptyDefault(strings.Join(closedHandles, ", "), "none"), emptyDefault(strings.Join(abandoned, ", "), "none"), targets[index].Ref.Handle, workspaceHandleList(targets[index+1:]), cause)
 	}
-	for _, info := range targets {
+	for index, info := range targets {
 		if force && !info.Missing {
-			if err := abandonUniqueMutableChanges(repoPath, info.Ref.Handle, protection.protectorHandles); err != nil {
-				return closed, err
+			didAbandon, err := abandonUniqueMutableChanges(repoPath, info.Ref.Handle, protection.protectorHandles)
+			if err != nil {
+				return failure(index, err)
+			}
+			if didAbandon {
+				abandoned = append(abandoned, info.Ref.Handle)
 			}
 		}
-		if err := os.RemoveAll(info.Path); err != nil {
-			return closed, fmt.Errorf("cannot remove Workspace %q directory %s: %w; the Workspace remains registered in jj — fix the filesystem issue and retry", info.Ref.Handle, info.Path, err)
+		if err := removeWorkspaceDirectory(info.Path); err != nil {
+			return failure(index, fmt.Errorf("cannot remove Workspace %q directory %s: %w; the Workspace remains registered in jj — fix the filesystem issue and retry", info.Ref.Handle, info.Path, err))
 		}
 		if err := commandToStderrFn("jj", "-R", repoPath, "workspace", "forget", info.Ref.Handle); err != nil {
-			return closed, fmt.Errorf("removed Workspace %q directory %s, but could not forget it in jj: %w; finish cleanup with `jj -R %s workspace forget %s`", info.Ref.Handle, info.Path, err, repoPath, info.Ref.Handle)
+			return failure(index, fmt.Errorf("removed Workspace %q directory %s, but could not forget it in jj: %w; finish cleanup with `jj -R %s workspace forget %s`", info.Ref.Handle, info.Path, err, repoPath, info.Ref.Handle))
 		}
 		closed = append(closed, info.Path)
+		closedHandles = append(closedHandles, info.Ref.Handle)
 	}
 	return closed, nil
+}
+
+func workspaceHandleList(targets []workspaceInfo) string {
+	handles := make([]string, 0, len(targets))
+	for _, target := range targets {
+		handles = append(handles, target.Ref.Handle)
+	}
+	return emptyDefault(strings.Join(handles, ", "), "none")
+}
+
+func normalClosePrompt(targets []workspaceInfo) string {
+	return fmt.Sprintf("Close %s? Relevant changes are represented in surviving Workspaces outside the complete closing set; no unique work will be lost. [y/N]: ", workspaceSummary(targets))
+}
+
+func confirmExternalDeletes(targets []workspaceInfo, yes bool) (bool, error) {
+	external := []workspaceInfo{}
+	for _, target := range targets {
+		if target.External {
+			external = append(external, target)
+		}
+	}
+	if len(external) > 0 && !yes {
+		return confirm(externalDeletePrompt(external))
+	}
+	return true, nil
 }
 
 func externalDeletePrompt(targets []workspaceInfo) string {
@@ -3243,7 +3283,7 @@ func externalDeletePrompt(targets []workspaceInfo) string {
 	return fmt.Sprintf("%d Workspaces are outside the canonical Project layout: %s. Delete these directories? [y/N]: ", len(targets), strings.Join(handles, ", "))
 }
 
-func abandonUniqueMutableChanges(repoRoot, handle string, protectorHandles []string) error {
+func abandonUniqueMutableChanges(repoRoot, handle string, protectorHandles []string) (bool, error) {
 	// The immutable protector set is computed once for the complete closing batch. Members
 	// of that batch can never protect each other; every surviving registered Workspace can,
 	// including one whose directory is missing but whose jj Workspace ref still exists.
@@ -3257,13 +3297,14 @@ func abandonUniqueMutableChanges(repoRoot, handle string, protectorHandles []str
 	}
 	has, err := revisionMatches(repoRoot, revset)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !has {
-		return nil
+		return false, nil
 	}
 	fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Forced Closing: abandon unique mutable changes for %s", handle))
-	return commandToStderrFn("jj", "-R", repoRoot, "abandon", "-r", revset)
+	err = commandToStderrFn("jj", "-R", repoRoot, "abandon", "-r", revset)
+	return err == nil, err
 }
 
 type inProgressStackTarget struct {
@@ -3952,27 +3993,28 @@ func isAncestorOfAny(repoPath string, ancestor string, descendants []string) (bo
 	return revisionMatches(repoPath, revset)
 }
 
-func abandonEmptyWorkspaceHeads(repoPath string, infos []workspaceInfo) error {
+func abandonEmptyWorkspaceHeads(repoPath string, infos []workspaceInfo) (bool, error) {
 	revs := make([]string, 0, len(infos))
 	for _, info := range infos {
 		revs = append(revs, info.Ref.Handle+"@")
 	}
 	revs = uniqueNonEmptyStrings(revs)
 	if len(revs) == 0 {
-		return nil
+		return false, nil
 	}
 	// Only the conventional empty, undescribed working-copy cursor is disposable. A
 	// described empty merge is relevant history and must survive normal close/tidy.
 	revset := "empty() & description(\"\") & mutable() & (" + strings.Join(revs, " | ") + ")"
 	hasEmpty, err := revisionMatches(repoPath, revset)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !hasEmpty {
-		return nil
+		return false, nil
 	}
 	fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Abandon empty Workspace heads"))
-	return commandToStderrFn("jj", "-R", repoPath, "abandon", "-r", revset)
+	err = commandToStderrFn("jj", "-R", repoPath, "abandon", "-r", revset)
+	return err == nil, err
 }
 
 func topEmptyMutableAncestorsRevset(target string) string {
@@ -4865,6 +4907,7 @@ const (
 )
 
 type selectorItem struct {
+	Safety   string
 	Handle   string
 	Path     string
 	Status   string
@@ -5280,6 +5323,7 @@ func selectorViewport(visible []int, cursor int, limit int) ([]int, int) {
 }
 
 type selectorColumnWidths struct {
+	Safety  int
 	Handle  int
 	Status  int
 	Markers int
@@ -5301,12 +5345,16 @@ func selectorColumnWidthsForItems(items []selectorItem, visible []int) selectorC
 		widths.Handle = max(widths.Handle, lipgloss.Width(item.Handle))
 		widths.Status = max(widths.Status, lipgloss.Width(item.Status))
 		widths.Markers = max(widths.Markers, lipgloss.Width(item.Markers))
+		widths.Safety = max(widths.Safety, lipgloss.Width(item.Safety))
 	}
 	return widths
 }
 
 func formatSelectorItemLine(pointer string, mark string, item selectorItem, widths selectorColumnWidths) string {
 	line := pointer + mark + padVisible(item.Handle, widths.Handle) + " " + padVisible(item.Status, widths.Status) + " " + padVisible(item.Markers, widths.Markers)
+	if widths.Safety > 0 {
+		line += " " + padVisible(item.Safety, widths.Safety)
+	}
 	if item.Path != "" {
 		line += " " + item.Path
 	}
@@ -5321,7 +5369,7 @@ func selectorLegend(opts selectorOptions) string {
 		return "status: only Workspaces with no unique commits and behind Main are selected by default; uncheck any to leave alone"
 	}
 	if opts.Tidy {
-		return "status: Represented Elsewhere non-Current Workspaces and missing registrations start selected; labels remain Main-relative; f enables Forced Tidying"
+		return "status: Main-relative; safety: individually Represented Elsewhere = safe-to-close; complete closing set rechecked on submit; non-Current and missing registrations start selected; f enables Forced Tidying"
 	}
 	if opts.AllDefault {
 		return "status: unstacked/conflict = stack-relevant; stacked/empty/missing = shown for context"
@@ -5358,7 +5406,7 @@ func (m selectorModel) visibleItems() []int {
 	needle := strings.ToLower(strings.TrimSpace(m.filter))
 	var out []int
 	for i, item := range m.opts.Items {
-		if needle == "" || strings.Contains(strings.ToLower(item.Handle+" "+item.Path+" "+item.Status+" "+item.Markers), needle) {
+		if needle == "" || strings.Contains(strings.ToLower(item.Handle+" "+item.Path+" "+item.Status+" "+item.Markers+" "+item.Safety), needle) {
 			out = append(out, i)
 		}
 	}
@@ -5373,6 +5421,16 @@ func selectorItemsForOpen(infos []workspaceInfo) []selectorItem {
 	return items
 }
 
+func workspaceCloseSafetyLabel(info workspaceInfo) string {
+	if info.Missing {
+		return "forget-registration"
+	}
+	if isClosable(info) {
+		return "safe-to-close"
+	}
+	return "requires-force"
+}
+
 func selectorItemsForClose(infos []workspaceInfo, force bool) []selectorItem {
 	items := []selectorItem{}
 	for _, info := range infos {
@@ -5380,7 +5438,7 @@ func selectorItemsForClose(infos []workspaceInfo, force bool) []selectorItem {
 			continue
 		}
 		disabled := info.Missing || (!force && !isClosable(info))
-		items = append(items, selectorItem{Handle: info.Ref.Handle, Path: info.Path, Status: statusLabel(info), Markers: strings.Join(markers(info), ","), Disabled: disabled})
+		items = append(items, selectorItem{Handle: info.Ref.Handle, Path: info.Path, Status: statusLabel(info), Safety: workspaceCloseSafetyLabel(info), Markers: strings.Join(markers(info), ","), Disabled: disabled})
 	}
 	return items
 }
@@ -5417,7 +5475,7 @@ func selectorItemsForTidy(infos []workspaceInfo, force bool) []selectorItem {
 		}
 		tidy := isClosable(info) || info.Missing
 		disabled := info.Current || (!force && !tidy)
-		items = append(items, selectorItem{Handle: info.Ref.Handle, Path: info.Path, Status: statusLabel(info), Markers: strings.Join(markers(info), ","), Disabled: disabled, Selected: tidy && !info.Current})
+		items = append(items, selectorItem{Handle: info.Ref.Handle, Path: info.Path, Status: statusLabel(info), Safety: workspaceCloseSafetyLabel(info), Markers: strings.Join(markers(info), ","), Disabled: disabled, Selected: tidy && !info.Current})
 	}
 	return items
 }

@@ -1571,20 +1571,18 @@ func TestForcedTidyAbandonsAndClosesUnstackedWorkspace(t *testing.T) {
 }
 
 func TestCloseWorkspacesKeepsJJRegistrationWhenDirectoryRemovalFails(t *testing.T) {
-	workspacePath := filepath.Join(t.TempDir(), "delta")
-	lockedDir := filepath.Join(workspacePath, ".devenv", "state")
-	if err := os.MkdirAll(lockedDir, 0o755); err != nil {
+	if os.Getuid() == 0 {
+		t.Skip("permission test requires non-root user")
+	}
+	parent := t.TempDir()
+	workspacePath := filepath.Join(parent, "delta")
+	if err := os.Mkdir(workspacePath, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(lockedDir, "root-owned-file"), []byte("locked"), 0o644); err != nil {
+	if err := os.Chmod(parent, 0o555); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(lockedDir, 0o555); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = os.Chmod(lockedDir, 0o755)
-	})
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
 
 	forgot := false
 	withCommandToStderr(t, func(name string, args ...string) error {
