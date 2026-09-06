@@ -159,6 +159,84 @@ func TestCreateWithoutRevisionUnchanged(t *testing.T) {
 	}
 }
 
+func TestCreateFromWorkspaceInheritsCurrentContent(t *testing.T) {
+	for _, source := range []string{"default", "external"} {
+		t.Run(source, func(t *testing.T) {
+			workspacesRoot, defaultPath := setupRealCreateRepo(t)
+			sourcePath := defaultPath
+			if source == "external" {
+				// Resolve registered roots, not a guessed path under workspaces_root.
+				sourcePath = filepath.Join(t.TempDir(), "source")
+				runJJ(t, "-R", defaultPath, "workspace", "add", "--name", source, sourcePath)
+			}
+			mainBefore := jjCommitID(t, defaultPath, "@")
+			sourceChange := lifecycleJJOutput(t, sourcePath, "log", "-r", "@", "--no-graph", "-T", "change_id")
+			if err := os.WriteFile(filepath.Join(sourcePath, "dirty.txt"), []byte("source edits\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			// Do not snapshot source before create: create must capture these edits itself.
+			out, _, err := captureOutput(func() error {
+				return runCreate([]string{source, "--repo", defaultPath, "child", "--envrc"})
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			childPath := filepath.Join(workspacesRoot, "proj", "child")
+			if strings.TrimSpace(out) != childPath {
+				t.Fatalf("expected only child navigation path, got %q", out)
+			}
+			if got, err := os.ReadFile(filepath.Join(childPath, "dirty.txt")); err != nil || string(got) != "source edits\n" {
+				t.Fatalf("expected inherited source edits, got %q err=%v", got, err)
+			}
+			if parent, head := jjCommitID(t, childPath, "@-"), jjCommitID(t, sourcePath, "@"); parent != head {
+				t.Fatalf("child parent %s != source head %s", parent, head)
+			}
+			if now := lifecycleJJOutput(t, sourcePath, "log", "-r", "@", "--no-graph", "-T", "change_id"); now != sourceChange {
+				t.Fatal("source Workspace was retargeted")
+			}
+			if source != "default" && jjCommitID(t, defaultPath, "@") != mainBefore {
+				t.Fatal("Current/Main Workspace was changed")
+			}
+			if !exists(filepath.Join(childPath, ".envrc")) {
+				t.Fatal("expected create setup flags to apply to child")
+			}
+		})
+	}
+}
+
+func TestCreateFromWorkspaceRejectsInvalidRequests(t *testing.T) {
+	workspacesRoot, defaultPath := setupRealCreateRepo(t)
+	missingPath := filepath.Join(workspacesRoot, "proj", "missing")
+	runJJ(t, "-R", defaultPath, "workspace", "add", "--name", "missing", missingPath)
+	if err := os.RemoveAll(missingPath); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"unknown", "child"}, "not found"},
+		{[]string{"missing", "child"}, "path not found"},
+		{[]string{"../default", "child"}, "invalid"},
+		{[]string{"default", "../child"}, "invalid"},
+		{[]string{"default", "child", "extra"}, "at most two"},
+		{[]string{"default", "child", "--revision", jjCommitID(t, defaultPath, "@")}, "cannot be combined"},
+	} {
+		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
+			err := runCreate(append(tc.args, "--repo", defaultPath))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected %q error, got %v", tc.want, err)
+			}
+			if exists(filepath.Join(workspacesRoot, "proj", "child")) {
+				t.Fatal("invalid request created a directory")
+			}
+			if names := jjWorkspaceNames(t, defaultPath); names != "default,missing" {
+				t.Fatalf("invalid request changed registrations: %s", names)
+			}
+		})
+	}
+}
+
 // jjWorkspaceNames returns the sorted, comma-joined workspace names registered
 // in repoPath.
 func jjWorkspaceNames(t *testing.T, repoPath string) string {

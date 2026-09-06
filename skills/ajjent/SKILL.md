@@ -28,9 +28,10 @@ ajj --repo /path/to/current-workspace open <handle>
 ```sh
 ajj --repo /path/to/current-workspace create
 ajj --repo /path/to/current-workspace create <handle>
+ajj --repo /path/to/current-workspace create <source> <handle>
 ```
 
-Creating starts a child Workspace from the Current Workspace's working-copy commit. That commit may normally contain content; do not impose a Git-style clean-working-tree requirement. The returned Workspace Handle is reusable after Closing.
+With two Handles, Creating starts a child Workspace from the source Workspace's current working-copy commit, including uncommitted edits, without Opening the source first. Do not combine this form with `--revision`. With zero or one Handle, Creating retains jj's default base (the Current Workspace's parent commits). No Git-style clean-working-tree requirement applies. The returned Workspace Handle is reusable after Closing.
 
 ## Stack and undo
 

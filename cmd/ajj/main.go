@@ -280,7 +280,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "init", 18), "Create ajj config")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, s.Section.Render("Workspace lifecycle:"))
-	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "create [handle]", 18), "Create a Workspace, or reconcile strict machine state with --request-json")
+	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "create [source] [handle]", 18), "Create a Workspace, or reconcile strict machine state with --request-json")
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "open [handle]", 18), "Open an existing Workspace; with no handle, use the selector")
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "close [handle...]", 18), "Close Workspaces represented by surviving registered Workspace heads")
 	fmt.Fprintln(w)
@@ -523,7 +523,7 @@ func runCreate(args []string) error {
 	fs.BoolVar(&direnvAllow, "direnv-allow", false, "run direnv allow for the new Workspace")
 	fs.StringVar(&machineRequestHelp, "request-json", "", "machine mode: read a strict create request from PATH or -")
 	fs.BoolVar(&machineJSONHelp, "json", false, "machine mode: write one bounded state receipt")
-	if handled, err := parseCommandFlags(fs, args, "ajj create [handle] [options]", "Create a new Workspace and print its path."); handled || err != nil {
+	if handled, err := parseCommandFlags(fs, args, "ajj create [source] [handle] [options]", "Create a new Workspace and print its path. With two Handles, inherit the source Workspace's current content."); handled || err != nil {
 		return err
 	}
 	if machineRequestHelp != "" || machineJSONHelp {
@@ -534,20 +534,43 @@ func runCreate(args []string) error {
 		return err
 	}
 	positionals := fs.Args()
-	if len(positionals) > 1 {
-		return errors.New("create accepts at most one Workspace Handle")
+	if len(positionals) > 2 {
+		return errors.New("create accepts at most two Workspace Handles: [source] [handle]")
+	}
+	source := ""
+	if len(positionals) == 2 {
+		if hasArgumentFlag(args, "--revision") {
+			return errors.New("create source Handle cannot be combined with --revision")
+		}
+		source = strings.TrimSpace(positionals[0])
+		if err := validateWorkspaceHandle(source); err != nil {
+			return err
+		}
+		positionals = positionals[1:]
 	}
 	repoRoot, cfg, project, err := commandContext(repoRootOverride, projectOverride, rootOverride)
 	if err != nil {
 		return err
 	}
-	handles, err := listWorkspaceHandles(repoRoot)
+	refs, err := listWorkspaceRefs(repoRoot)
 	if err != nil {
 		return err
 	}
-	inUse := make(map[string]struct{}, len(handles))
-	for _, h := range handles {
-		inUse[h] = struct{}{}
+	inUse := make(map[string]struct{}, len(refs))
+	sourcePath := ""
+	for _, ref := range refs {
+		inUse[ref.Handle] = struct{}{}
+		if source != "" && ref.Handle == source {
+			sourcePath = workspacePathForRef(repoRoot, cfg.WorkspacesRoot, project, ref, "")
+		}
+	}
+	if source != "" {
+		if sourcePath == "" {
+			return workspaceNotFoundError(source)
+		}
+		if !workspacePathExists(sourcePath) {
+			return fmt.Errorf("Workspace %q path not found: %s", source, sourcePath)
+		}
 	}
 	handle := ""
 	if len(positionals) == 1 {
@@ -570,6 +593,18 @@ func runCreate(args []string) error {
 		if err != nil {
 			return err
 		}
+	}
+	if source != "" {
+		// Snapshot from the source root so edits not yet observed by jj are inherited.
+		out, err := commandCaptureFn("jj", "-R", sourcePath, "log", "-r", "@", "--no-graph", "-T", "commit_id")
+		if err != nil {
+			return fmt.Errorf("snapshot source Workspace %q: %w", source, err)
+		}
+		revision = strings.TrimSpace(out)
+		if !revisionCommitIDRE.MatchString(revision) {
+			return fmt.Errorf("source Workspace %q returned an invalid commit id %q", source, revision)
+		}
+		repoRoot = sourcePath
 	}
 	return createWorkspace(repoRoot, cfg, project, handle, revision, envrc, direnvAllow)
 }
