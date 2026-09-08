@@ -2829,6 +2829,38 @@ func TestRunStackAllFromCurrentNonDefaultDoesNotMoveConfiguredMainWorkspace(t *t
 	}
 }
 
+func TestClosableStackInputsExcludeConfiguredMainWorkspace(t *testing.T) {
+	updated := map[string]workspaceInfo{
+		"default": {Ref: workspaceRef{Handle: "default"}, RepresentedElsewhere: true},
+		"child":   {Ref: workspaceRef{Handle: "child"}, RepresentedElsewhere: true},
+	}
+	target := stackTargetResolution{Handle: "speed", ConfiguredMain: "default", FromCurrent: true}
+
+	got := closableStackInputs([]string{"default", "child"}, updated, target)
+	if len(got) != 1 || got[0].Ref.Handle != "child" {
+		t.Fatalf("configured Main Workspace must never be a post-Stack close candidate, got %+v", got)
+	}
+}
+
+func TestCloseWorkspacesProtectsRepositoryOwnerBeforeMutation(t *testing.T) {
+	defaultPath := filepath.Join(t.TempDir(), "default")
+	workspacePath := filepath.Join(t.TempDir(), "workspace")
+	createJJWorkspaceLink(t, defaultPath, workspacePath)
+	marker := filepath.Join(defaultPath, "must-survive")
+	if err := os.WriteFile(marker, []byte("safe\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	targets := []workspaceInfo{{Ref: workspaceRef{Handle: "default"}, Path: defaultPath}}
+
+	closed, err := closeWorkspacesWithProtection(workspacePath, targets, true, true, closeProtectionContext{})
+	if err == nil || !strings.Contains(err.Error(), "repository-owning Workspace") {
+		t.Fatalf("expected repository-owning Workspace protection, got closed=%v err=%v", closed, err)
+	}
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Fatalf("repository-owning Workspace was mutated: %v", statErr)
+	}
+}
+
 func TestRunStackExplicitWorkspaceOverrideStillWins(t *testing.T) {
 	workspacesRoot := filepath.Join(t.TempDir(), "workspaces")
 	defaultPath := filepath.Join(workspacesRoot, "proj", "default")

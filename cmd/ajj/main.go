@@ -1463,6 +1463,19 @@ func stackInputProtectedByTarget(info workspaceInfo, target stackTargetResolutio
 	return target.FromCurrent && target.ConfiguredMain != "" && target.ConfiguredMain != target.Handle && info.Ref.Handle == target.ConfiguredMain
 }
 
+func closableStackInputs(inputs []string, updated map[string]workspaceInfo, target stackTargetResolution) []workspaceInfo {
+	closable := []workspaceInfo{}
+	for _, handle := range inputs {
+		if handle == target.ConfiguredMain {
+			continue
+		}
+		if info, ok := updated[handle]; ok && isClosable(info) {
+			closable = append(closable, info)
+		}
+	}
+	return closable
+}
+
 func runUndo(args []string) error {
 	fs := flag.NewFlagSet("undo", flag.ContinueOnError)
 	var repoRootOverride string
@@ -1818,12 +1831,7 @@ func runStack(args []string) (retErr error) {
 		updatedInfos, _, err := loadWorkspaceInfos(repoRoot, cfg, project)
 		if err == nil {
 			updated := mapInfosByHandle(updatedInfos)
-			closable := []workspaceInfo{}
-			for _, h := range inputs {
-				if info, ok := updated[h]; ok && isClosable(info) {
-					closable = append(closable, info)
-				}
-			}
+			closable := closableStackInputs(inputs, updated, target)
 			if len(closable) > 0 {
 				ok, err := confirm(fmt.Sprintf("Close %d normally Closable Stack Input(s)? [y/N]: ", len(closable)))
 				if err != nil {
@@ -3236,6 +3244,30 @@ func closeWorkspaces(repoPath string, targets []workspaceInfo, force bool, yes b
 	return closeWorkspacesWithProtection(repoPath, targets, force, yes, protection)
 }
 
+func validateWorkspaceRemovalTarget(repoPath string, info workspaceInfo) error {
+	candidate, err := canonicalExistingDirectory(info.Path)
+	if err != nil {
+		return fmt.Errorf("resolve Workspace %q removal path: %w", info.Ref.Handle, err)
+	}
+	current, err := canonicalExistingDirectory(repoPath)
+	if err != nil {
+		return fmt.Errorf("resolve repository Workspace path: %w", err)
+	}
+	if candidate == current {
+		return fmt.Errorf("refusing to close Workspace %q: %s is the active repository Workspace", info.Ref.Handle, info.Path)
+	}
+	if owner, ok := resolveDefaultWorkspaceRoot(repoPath); ok {
+		canonicalOwner, err := canonicalExistingDirectory(owner)
+		if err != nil {
+			return fmt.Errorf("resolve repository-owning Workspace path: %w", err)
+		}
+		if candidate == canonicalOwner {
+			return fmt.Errorf("refusing to close Workspace %q: %s is the repository-owning Workspace", info.Ref.Handle, info.Path)
+		}
+	}
+	return nil
+}
+
 func closeWorkspacesWithProtection(repoPath string, targets []workspaceInfo, force bool, yes bool, protection closeProtectionContext) ([]string, error) {
 	closed := []string{}
 	if err := validateUniqueCloseTargets(targets); err != nil {
@@ -3248,6 +3280,14 @@ func closeWorkspacesWithProtection(repoPath string, targets []workspaceInfo, for
 		}
 		if len(unsafe) > 0 {
 			return closed, fmt.Errorf("%s not normally closable against surviving Workspaces", workspaceSummary(unsafe))
+		}
+	}
+	for _, info := range targets {
+		if info.Missing {
+			continue
+		}
+		if err := validateWorkspaceRemovalTarget(repoPath, info); err != nil {
+			return closed, err
 		}
 	}
 	confirmed, err := confirmExternalDeletes(targets, yes)

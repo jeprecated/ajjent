@@ -24,6 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Current-Workspace Stack no longer offers the configured Main Workspace for post-Stack Closing when that Main Workspace was used as a cursor-sync input. Closing also refuses the active or repository-owning Workspace path as a defense in depth, preventing a misclassified input from deleting the Jujutsu repository that owns all linked Workspaces.
 - `ajj tidy` now disables the Current Workspace and preselects stale missing Workspace registrations for safe cleanup. Missing rows retain their distinct status colour because they are selectable; tidying one forgets only its Jujutsu registration and leaves its commits visible.
 
 - Current-Workspace Stack is now invocation-symmetric: the configured Main Workspace remains a valid selectable cursor-sync input when another Workspace is current, and clean empty Workspace cursors finish as siblings over the same payload instead of being stacked one above another.

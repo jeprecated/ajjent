@@ -108,6 +108,7 @@ _Avoid_: Disposable workspace, empty or Main-stacked workspace
 - **Stacking** uses one or more **Stack Inputs**.
 - Main-targeted **Stack Inputs** are non-main **Workspaces**.
 - When Main-targeted **Stacking** produces a clean Stack merge, it keeps an **In-progress Workspace Head** in the target Workspace above that merge rather than turning its changes into the merge itself.
+- When a non-main Current Workspace is the Stack target, the configured Main Workspace may participate as a cursor-sync input but is never a post-Stack Closing candidate. Closing also refuses the active and repository-owning Workspace paths regardless of status classification.
 - **Line Stacking** **Stack Inputs** are ordered **Workspaces** identified by **Workspace Handles**.
 - **Line Stacking** keeps an **In-progress Workspace Head** out of the payload line and rebases it onto the final Line Stacking tip.
 - **Moving to Main** applies to non-main **Workspaces** with no unique non-empty commits and advances their Workspace heads to the Main Workspace line.
