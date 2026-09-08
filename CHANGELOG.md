@@ -24,6 +24,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Closing verifies that each directory's `.jj/repo` metadata resolves to the active repository's shared storage before any close/Tidy mutation. Plain replacement directories, foreign repositories, and broken pointers are refused, including with `--force`.
+- Closing refuses directories containing the active, repository-owning, or another registered Workspace, even with `--force`. Nested Workspaces must be closed separately, children first; Tidy validates this before abandoning empty heads. Relative repository pointers are resolved from their physical directory.
+- Post-Stack Closing lists every selected handle and path and retains the separate outside-layout deletion confirmation. Missing registrations are forget-only, even if their old path is occupied, and failed Jujutsu root lookups no longer fall back to guessed paths.
 - Current-Workspace Stack no longer offers the configured Main Workspace for post-Stack Closing when that Main Workspace was used as a cursor-sync input. Closing also refuses the active or repository-owning Workspace path as a defense in depth, preventing a misclassified input from deleting the Jujutsu repository that owns all linked Workspaces.
 - `ajj tidy` now disables the Current Workspace and preselects stale missing Workspace registrations for safe cleanup. Missing rows retain their distinct status colour because they are selectable; tidying one forgets only its Jujutsu registration and leaves its commits visible.
 

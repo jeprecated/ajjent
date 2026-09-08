@@ -11,6 +11,8 @@ import (
 
 func TestCloseRepairsReadOnlyCacheWithoutChangingOutsideLinks(t *testing.T) {
 	workspace := filepath.Join(t.TempDir(), "workspace")
+	repoPath := t.TempDir()
+	createJJWorkspaceLink(t, repoPath, workspace)
 	cache := filepath.Join(workspace, ".devenv", "go", "pkg", "mod", "cache")
 	if err := os.MkdirAll(cache, 0755); err != nil {
 		t.Fatal(err)
@@ -37,7 +39,7 @@ func TestCloseRepairsReadOnlyCacheWithoutChangingOutsideLinks(t *testing.T) {
 		forgot = strings.Contains(strings.Join(args, " "), "workspace forget cache")
 		return nil
 	})
-	_, err := closeWorkspacesWithProtection(t.TempDir(), []workspaceInfo{{Ref: workspaceRef{Handle: "cache"}, Path: workspace}}, true, true, closeProtectionContext{})
+	_, err := closeWorkspacesWithProtection(repoPath, []workspaceInfo{{Ref: workspaceRef{Handle: "cache"}, Path: workspace}}, true, true, closeProtectionContext{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,6 +59,7 @@ func TestCloseRepairsReadOnlyCacheWithoutChangingOutsideLinks(t *testing.T) {
 
 func TestTidyExternalCancellationPrecedesAllAbandonment(t *testing.T) {
 	mainPath, workspace := t.TempDir(), t.TempDir()
+	createJJWorkspaceLink(t, mainPath, workspace)
 	infos := []workspaceInfo{{Ref: workspaceRef{Handle: "default"}, Path: mainPath, Main: true}, {Ref: workspaceRef{Handle: "alpha"}, Path: workspace, External: true, RepresentedElsewhere: true}}
 	withCommandCapture(t, func(_ string, args ...string) (string, error) {
 		query := strings.Join(args, " ")
@@ -127,6 +130,10 @@ func TestClosePartialFailureReportsCompletedAndUnattemptedTargets(t *testing.T) 
 	}
 	t.Cleanup(func() { _ = os.Chmod(parent, 0755) })
 	targets := []workspaceInfo{{Ref: workspaceRef{Handle: "done"}, Path: t.TempDir()}, {Ref: workspaceRef{Handle: "blocked"}, Path: blocked}, {Ref: workspaceRef{Handle: "later"}, Path: t.TempDir()}}
+	repoPath := t.TempDir()
+	for _, target := range targets {
+		createJJWorkspaceLink(t, repoPath, target.Path)
+	}
 	withCommandCapture(t, func(string, ...string) (string, error) { return "unique\n", nil })
 	forgot := []string{}
 	withCommandToStderr(t, func(_ string, args ...string) error {
@@ -136,7 +143,7 @@ func TestClosePartialFailureReportsCompletedAndUnattemptedTargets(t *testing.T) 
 		}
 		return nil
 	})
-	_, err := closeWorkspacesWithProtection(t.TempDir(), targets, true, true, closeProtectionContext{})
+	_, err := closeWorkspacesWithProtection(repoPath, targets, true, true, closeProtectionContext{})
 	if err == nil || !errors.Is(err, os.ErrPermission) {
 		t.Fatalf("expected retained permission failure: %v", err)
 	}
@@ -264,6 +271,7 @@ func TestTidyPartialFailureReportsPriorEmptyCursorCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(parent, 0755) })
+	createJJWorkspaceLink(t, mainPath, workspace)
 	infos := []workspaceInfo{{Ref: workspaceRef{Handle: "default"}, Path: mainPath, Main: true}, {Ref: workspaceRef{Handle: "blocked"}, Path: workspace, RepresentedElsewhere: true}}
 	withCommandCapture(t, func(_ string, args ...string) (string, error) {
 		query := strings.Join(args, " ")

@@ -292,7 +292,7 @@ func integrationSelectedWorkspacePaths(repoRoot, operationID string, cfg config,
 		parts := strings.SplitN(line, "\t", 2)
 		ref := workspaceRef{Handle: strings.TrimSpace(parts[0])}
 		if len(parts) == 2 {
-			ref.Root = cleanWorkspaceRoot(parts[1])
+			ref.Root = strings.TrimSpace(parts[1])
 		}
 		refs = append(refs, ref)
 	}

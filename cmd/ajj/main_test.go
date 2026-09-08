@@ -634,9 +634,7 @@ func TestForcedTidyNeverAbandonsMissingWorkspaceChanges(t *testing.T) {
 	mainPath := t.TempDir()
 	missingPath := filepath.Join(t.TempDir(), "missing")
 	presentPath := filepath.Join(t.TempDir(), "present")
-	if err := os.MkdirAll(presentPath, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	createJJWorkspaceLink(t, mainPath, presentPath)
 	queried := []string{}
 	withCommandCapture(t, func(name string, args ...string) (string, error) {
 		queried = append(queried, strings.Join(args, " "))
@@ -1249,7 +1247,7 @@ func TestLoadWorkspaceInfosUsesMainRepoForStatusWhenWorkspacePathIsStale(t *test
 	}
 }
 
-func TestLoadWorkspaceInfosFallsBackWhenJjReportsNoRecordedPath(t *testing.T) {
+func TestLoadWorkspaceInfosDoesNotGuessWhenJjReportsNoRecordedPath(t *testing.T) {
 	workspacesRoot := filepath.Join(t.TempDir(), "workspaces")
 	repoRoot := filepath.Join(workspacesRoot, "proj", "alpha")
 	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
@@ -1257,6 +1255,10 @@ func TestLoadWorkspaceInfosFallsBackWhenJjReportsNoRecordedPath(t *testing.T) {
 	}
 	cfg := config{WorkspacesRoot: workspacesRoot, Project: "proj", MainWorkspace: "default"}
 	badRoot := "<Error: Workspace has no recorded path: default>"
+	// An unrelated directory at the conventional location must not become a target.
+	if err := os.MkdirAll(filepath.Join(workspacesRoot, "proj", "default"), 0755); err != nil {
+		t.Fatal(err)
+	}
 	withCommandCapture(t, func(name string, args ...string) (string, error) {
 		joined := strings.Join(args, " ")
 		if strings.Contains(joined, badRoot) {
@@ -1281,8 +1283,8 @@ func TestLoadWorkspaceInfosFallsBackWhenJjReportsNoRecordedPath(t *testing.T) {
 		t.Fatalf("expected current Workspace alpha, got %q", current)
 	}
 	byHandle := mapInfosByHandle(infos)
-	if strings.Contains(byHandle["default"].Path, "<Error:") || !byHandle["default"].Missing {
-		t.Fatalf("expected default path to fall back to a missing canonical path, got %+v", byHandle["default"])
+	if byHandle["default"].Path != "" || !byHandle["default"].Missing {
+		t.Fatalf("unresolved root must stay missing even when a guessed directory exists, got %+v", byHandle["default"])
 	}
 }
 
@@ -1421,10 +1423,8 @@ func TestRunTidyClosesWorkspacesWithNoUniqueNonEmptyCommits(t *testing.T) {
 	mainPath := filepath.Join(workspacesRoot, "proj", "default")
 	deltaPath := filepath.Join(workspacesRoot, "proj", "delta")
 	alphaPath := filepath.Join(workspacesRoot, "proj", "alpha")
-	for _, path := range []string{mainPath, deltaPath, alphaPath} {
-		if err := os.MkdirAll(path, 0o755); err != nil {
-			t.Fatal(err)
-		}
+	for _, path := range []string{deltaPath, alphaPath} {
+		createJJWorkspaceLink(t, mainPath, path)
 	}
 	writeConfig(t, mainPath, "workspaces_root: "+workspacesRoot+"\nproject: proj\nmain_workspace: default\n")
 	withCommandCapture(t, func(name string, args ...string) (string, error) {
@@ -1528,9 +1528,7 @@ func TestForcedTidyRequiresDestructiveConfirmation(t *testing.T) {
 func TestForcedTidyAbandonsAndClosesUnstackedWorkspace(t *testing.T) {
 	mainPath := t.TempDir()
 	workspacePath := filepath.Join(t.TempDir(), "alpha")
-	if err := os.MkdirAll(workspacePath, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	createJJWorkspaceLink(t, mainPath, workspacePath)
 	infos := []workspaceInfo{
 		{Ref: workspaceRef{Handle: "default"}, Path: mainPath, Main: true},
 		{Ref: workspaceRef{Handle: "alpha"}, Path: workspacePath, Ahead: 1},
@@ -1576,9 +1574,8 @@ func TestCloseWorkspacesKeepsJJRegistrationWhenDirectoryRemovalFails(t *testing.
 	}
 	parent := t.TempDir()
 	workspacePath := filepath.Join(parent, "delta")
-	if err := os.Mkdir(workspacePath, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	repoPath := t.TempDir()
+	createJJWorkspaceLink(t, repoPath, workspacePath)
 	if err := os.Chmod(parent, 0o555); err != nil {
 		t.Fatal(err)
 	}
@@ -1593,7 +1590,7 @@ func TestCloseWorkspacesKeepsJJRegistrationWhenDirectoryRemovalFails(t *testing.
 	})
 
 	withCommandCapture(t, func(name string, args ...string) (string, error) { return "", nil })
-	_, err := closeWorkspacesWithProtection(t.TempDir(), []workspaceInfo{{
+	_, err := closeWorkspacesWithProtection(repoPath, []workspaceInfo{{
 		Ref:  workspaceRef{Handle: "delta"},
 		Path: workspacePath,
 	}}, true, true, closeProtectionContext{})
@@ -1610,9 +1607,8 @@ func TestCloseWorkspacesKeepsJJRegistrationWhenDirectoryRemovalFails(t *testing.
 
 func TestCloseWorkspacesReportsRecoveryWhenJJForgetFails(t *testing.T) {
 	workspacePath := filepath.Join(t.TempDir(), "delta")
-	if err := os.MkdirAll(workspacePath, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	repoPath := t.TempDir()
+	createJJWorkspaceLink(t, repoPath, workspacePath)
 	withCommandToStderr(t, func(name string, args ...string) error {
 		if strings.Contains(strings.Join(args, " "), "workspace forget delta") {
 			return errors.New("jj operation failed")
@@ -1621,7 +1617,7 @@ func TestCloseWorkspacesReportsRecoveryWhenJJForgetFails(t *testing.T) {
 	})
 
 	withCommandCapture(t, func(name string, args ...string) (string, error) { return "", nil })
-	_, err := closeWorkspacesWithProtection(t.TempDir(), []workspaceInfo{{
+	_, err := closeWorkspacesWithProtection(repoPath, []workspaceInfo{{
 		Ref:  workspaceRef{Handle: "delta"},
 		Path: workspacePath,
 	}}, true, true, closeProtectionContext{})
@@ -2464,9 +2460,7 @@ func TestCloseWorkspacesConfirmsExternalDeletionOnce(t *testing.T) {
 	alphaPath := filepath.Join(t.TempDir(), "alpha")
 	bravoPath := filepath.Join(t.TempDir(), "bravo")
 	for _, path := range []string{alphaPath, bravoPath} {
-		if err := os.MkdirAll(path, 0o755); err != nil {
-			t.Fatal(err)
-		}
+		createJJWorkspaceLink(t, repoRoot, path)
 	}
 	origIn, origErr := stdinReader, stderrWriter
 	stdinReader = strings.NewReader("y\n")
@@ -2506,11 +2500,7 @@ func TestRunCloseCurrentWorkspaceForgetsFromMainWorkspace(t *testing.T) {
 	workspacesRoot := filepath.Join(t.TempDir(), "workspaces")
 	mainPath := filepath.Join(workspacesRoot, "proj", "default")
 	currentPath := filepath.Join(workspacesRoot, "proj", "test")
-	for _, path := range []string{mainPath, currentPath} {
-		if err := os.MkdirAll(path, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
+	createJJWorkspaceLink(t, mainPath, currentPath)
 	writeConfig(t, currentPath, "workspaces_root: "+workspacesRoot+"\nproject: proj\nmain_workspace: default\n")
 	withCommandCapture(t, func(name string, args ...string) (string, error) {
 		joined := strings.Join(args, " ")
@@ -2555,11 +2545,7 @@ func TestRunCloseStackedStaleWorkspaceDoesNotRequireForcedClosing(t *testing.T) 
 	workspacesRoot := filepath.Join(t.TempDir(), "workspaces")
 	mainPath := filepath.Join(workspacesRoot, "proj", "default")
 	deltaPath := filepath.Join(workspacesRoot, "proj", "delta")
-	for _, path := range []string{mainPath, deltaPath} {
-		if err := os.MkdirAll(path, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
+	createJJWorkspaceLink(t, mainPath, deltaPath)
 	writeConfig(t, mainPath, "workspaces_root: "+workspacesRoot+"\nproject: proj\nmain_workspace: default\n")
 	withCommandCapture(t, func(name string, args ...string) (string, error) {
 		joined := strings.Join(args, " ")
