@@ -113,6 +113,72 @@ func TestTidyMissingRootPreservesReplacementEntry(t *testing.T) {
 	}
 }
 
+func TestTidyMissingMetadataPreservesLeftoverDirectory(t *testing.T) {
+	for _, layout := range []string{"canonical", "external"} {
+		for _, mode := range []string{"normal", "forced"} {
+			t.Run(layout+"/"+mode, func(t *testing.T) {
+				workspacesRoot, mainPath := setupRealCreateRepo(t)
+				path := filepath.Join(workspacesRoot, "proj", "leftover")
+				if layout == "external" {
+					path = filepath.Join(t.TempDir(), "leftover")
+				}
+				runJJ(t, "-R", mainPath, "workspace", "add", "--name", "leftover", path)
+				if err := os.WriteFile(filepath.Join(path, "unique.txt"), []byte("keep work\n"), 0644); err != nil {
+					t.Fatal(err)
+				}
+				runJJ(t, "-R", path, "commit", "-m", "unique leftover work")
+				payload := jjCommitID(t, mainPath, "leftover@-")
+				if err := os.RemoveAll(filepath.Join(path, ".jj")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(filepath.Join(path, ".devenv"), 0755); err != nil {
+					t.Fatal(err)
+				}
+				marker := filepath.Join(path, ".devenv", "keep")
+				if err := os.WriteFile(marker, []byte("untouched"), 0644); err != nil {
+					t.Fatal(err)
+				}
+				entry, err := os.Stat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				cfg := config{MainWorkspace: "default", WorkspacesRoot: workspacesRoot}
+				infos, _, err := loadWorkspaceInfos(mainPath, cfg, "proj")
+				if err != nil {
+					t.Fatal(err)
+				}
+				items := selectorItemsForTidy(infos, mode == "forced")
+				if len(items) != 1 || items[0].Handle != "leftover" || items[0].Status != "missing" || items[0].Safety != "forget-registration" || items[0].Disabled || !items[0].Selected {
+					t.Fatalf("expected preselected forget-only row, got %+v", items)
+				}
+				args := []string{"--repo", mainPath, "--yes"}
+				if mode == "forced" {
+					args = append(args, "--force")
+				}
+				if err := runTidy(args); err != nil {
+					t.Fatal(err)
+				}
+				after, err := os.Stat(path)
+				if err != nil || !os.SameFile(entry, after) {
+					t.Fatalf("tidy changed leftover directory: %v", err)
+				}
+				for file, want := range map[string]string{marker: "untouched", filepath.Join(path, "unique.txt"): "keep work\n"} {
+					data, err := os.ReadFile(file)
+					if err != nil || string(data) != want {
+						t.Fatalf("tidy changed %s: %q, %v", file, data, err)
+					}
+				}
+				if got := jjWorkspaceNames(t, mainPath); got != "default" {
+					t.Fatalf("leftover registration was not forgotten: %s", got)
+				}
+				if got := jjRevsetCount(t, mainPath, payload+" & visible_heads()"); got != 1 {
+					t.Fatal("tidy abandoned unique missing Workspace work")
+				}
+			})
+		}
+	}
+}
+
 func TestMissingTargetIsForgetOnlyEvenIfPathExists(t *testing.T) {
 	root := t.TempDir()
 	file := filepath.Join(root, "keep")
@@ -142,7 +208,7 @@ func TestMissingTargetIsForgetOnlyEvenIfPathExists(t *testing.T) {
 }
 
 func TestCloseAndTidyRejectReplacedWorkspaceRoot(t *testing.T) {
-	for _, kind := range []string{"plain", "foreign-repo", "broken-pointer"} {
+	for _, kind := range []string{"foreign-repo", "broken-pointer", "missing-pointer", "dangling-metadata"} {
 		t.Run(kind, func(t *testing.T) {
 			workspacesRoot, mainPath := setupRealCreateRepo(t)
 			safe := filepath.Join(workspacesRoot, "proj", "alpha")
@@ -157,11 +223,18 @@ func TestCloseAndTidyRejectReplacedWorkspaceRoot(t *testing.T) {
 			} else if err := os.MkdirAll(feature, 0755); err != nil {
 				t.Fatal(err)
 			}
-			if kind == "broken-pointer" {
+			if kind == "broken-pointer" || kind == "missing-pointer" {
 				if err := os.Mkdir(filepath.Join(feature, ".jj"), 0755); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.WriteFile(filepath.Join(feature, ".jj", "repo"), []byte("missing-store"), 0644); err != nil {
+				if kind == "broken-pointer" {
+					if err := os.WriteFile(filepath.Join(feature, ".jj", "repo"), []byte("missing-store"), 0644); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if kind == "dangling-metadata" {
+				if err := os.Symlink(filepath.Join(t.TempDir(), "absent"), filepath.Join(feature, ".jj")); err != nil {
 					t.Fatal(err)
 				}
 			}

@@ -2781,6 +2781,11 @@ func workspaceInfosForRefs(repoRoot string, cfg config, project string, refs []w
 		info := workspaceInfo{Ref: ref, Path: path, Current: ref.Handle == current, Main: ref.Handle == cfg.MainWorkspace}
 		if st, err := os.Stat(path); err != nil || !st.IsDir() {
 			info.Missing = true
+		} else if _, err := os.Lstat(filepath.Join(path, ".jj")); errors.Is(err, os.ErrNotExist) {
+			// Leftovers such as .devenv do not make this a Workspace. Forget
+			// only its registration; never delete the remaining directory.
+			// Existing but broken metadata must still fail ownership checks.
+			info.Missing = true
 		}
 		canonical := filepath.Clean(filepath.Join(cfg.WorkspacesRoot, project, ref.Handle))
 		info.External = !info.Missing && filepath.Clean(path) != canonical && !info.Main

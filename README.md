@@ -328,7 +328,7 @@ ajj --repo "$MAIN" integrate --request-json /tmp/Main-A.json
 ajj --repo "$MAIN" tidy --yes
 ```
 
-Normal close/tidy computes **Represented Elsewhere** against surviving registered Workspace heads outside the complete closing set, so a batch cannot protect itself. Missing-directory registered survivors still protect reachable work. Tidy may forget selected missing registrations without abandoning their visible changes. Automatic Tidy never selects Current, and configured Main is never closable.
+Normal close/tidy computes **Represented Elsewhere** against surviving registered Workspace heads outside the complete closing set, so a batch cannot protect itself. Missing-directory registered survivors still protect reachable work. Tidy may forget selected missing registrations without abandoning their visible changes. A registered directory without `.jj` metadata is also missing: Tidy shows `missing` / `forget-registration` and preserves the directory and all leftovers (such as `.devenv`). Existing but broken metadata or foreign repository pointers still fail ownership validation; `--force` does not bypass it. Automatic Tidy never selects Current, and configured Main is never closable.
 
 Discover the exact schemas, strategies, dispositions, operation-id pattern, jj minimum, and byte/count limits without a repository:
 

@@ -1158,7 +1158,7 @@ func TestLoadWorkspaceInfosTreatsEmptyHeadWithUnstackedAncestorAsUnstacked(t *te
 	mainPath := filepath.Join(workspacesRoot, "proj", "default")
 	alphaPath := filepath.Join(workspacesRoot, "proj", "alpha")
 	for _, path := range []string{mainPath, alphaPath} {
-		if err := os.MkdirAll(path, 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Join(path, ".jj"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1210,7 +1210,7 @@ func TestLoadWorkspaceInfosUsesMainRepoForStatusWhenWorkspacePathIsStale(t *test
 	repoRoot := mainPath
 	deltaPath := filepath.Join(workspacesRoot, "proj", "delta")
 	for _, path := range []string{mainPath, deltaPath} {
-		if err := os.MkdirAll(path, 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Join(path, ".jj"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1351,7 +1351,7 @@ func TestRunMoveToMainAllMovesOnlyBehindTidyWorkspaces(t *testing.T) {
 	alphaPath := filepath.Join(workspacesRoot, "proj", "alpha")
 	memePath := filepath.Join(workspacesRoot, "proj", "billing")
 	for _, path := range []string{mainPath, alphaPath, memePath} {
-		if err := os.MkdirAll(path, 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Join(path, ".jj"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -2348,6 +2348,7 @@ func TestRunCreateRejectsMalformedRevisionBeforeCreation(t *testing.T) {
 func TestRunOpenMaterializesAssimilatedFoldersBeforePrintingPath(t *testing.T) {
 	mainPath := t.TempDir()
 	workspacePath := filepath.Join(t.TempDir(), "alpha")
+	createJJWorkspaceLink(t, mainPath, workspacePath)
 	if err := os.MkdirAll(filepath.Join(mainPath, "scratch"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -2383,6 +2384,7 @@ func TestRunOpenMaterializesAssimilatedFoldersBeforePrintingPath(t *testing.T) {
 func TestRunOpenWarnsButStillPrintsPathWhenAssimilationFails(t *testing.T) {
 	mainPath := t.TempDir()
 	workspacePath := filepath.Join(t.TempDir(), "alpha")
+	createJJWorkspaceLink(t, mainPath, workspacePath)
 	if err := os.WriteFile(filepath.Join(mainPath, ".envrc"), []byte("main\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -2610,7 +2612,7 @@ func TestRunStackExplicitWorkspaceStacksPayloadFrontierThenAdvancesWorkspaceHead
 	mainPath := filepath.Join(workspacesRoot, "proj", "default")
 	teamsPath := filepath.Join(workspacesRoot, "proj", "teams")
 	for _, path := range []string{mainPath, teamsPath} {
-		if err := os.MkdirAll(path, 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Join(path, ".jj"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -2681,7 +2683,7 @@ func TestRunStackPrintsUndoHintWhenMutationFails(t *testing.T) {
 	mainPath := filepath.Join(workspacesRoot, "proj", "default")
 	teamsPath := filepath.Join(workspacesRoot, "proj", "teams")
 	for _, path := range []string{mainPath, teamsPath} {
-		if err := os.MkdirAll(path, 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Join(path, ".jj"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -3629,8 +3631,7 @@ func TestRunStackLineUsesOrderedPayloadRebasesAndAdvancesSelectedHeadsOnly(t *te
 	mainPath := filepath.Join(workspacesRoot, "proj", "default")
 	handles := []string{"default", "helper", "ingest", "worker", "loop", "mobile-docs"}
 	for _, handle := range handles {
-		path := filepath.Join(workspacesRoot, "proj", handle)
-		if err := os.MkdirAll(path, 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Join(workspacesRoot, "proj", handle, ".jj"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -3739,7 +3740,7 @@ func TestRunStackLineStopsOnConflictBeforeAdvances(t *testing.T) {
 	mainPath := filepath.Join(workspacesRoot, "proj", "default")
 	handles := []string{"default", "alpha", "bravo", "loop"}
 	for _, handle := range handles {
-		if err := os.MkdirAll(filepath.Join(workspacesRoot, "proj", handle), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Join(workspacesRoot, "proj", handle, ".jj"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}

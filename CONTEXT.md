@@ -73,7 +73,7 @@ Closing a Workspace while also abandoning its unique mutable changes.
 _Avoid_: Discarding
 
 **Tidying**:
-Batch-closing selected normally Closable Workspaces, forgetting stale registrations whose Workspace paths are missing, and cleaning up empty leftovers that no longer represent active Workspaces. Automatic Tidying selects normally Closable non-Current Workspaces and missing registrations; the Current Workspace remains unavailable. Visible empty/unstacked/stacked status remains Main-relative and is not itself the close-safety decision.
+Batch-closing selected normally Closable Workspaces, forgetting stale registrations whose Workspace paths or `.jj` metadata are missing (preserving any leftover directory), and cleaning up empty leftovers that no longer represent active Workspaces. Automatic Tidying selects normally Closable non-Current Workspaces and missing registrations; the Current Workspace remains unavailable. Visible empty/unstacked/stacked status remains Main-relative and is not itself the close-safety decision.
 _Avoid_: Implicitly abandoning unique changes
 
 **Forced Tidying**:
@@ -108,7 +108,7 @@ _Avoid_: Disposable workspace, empty or Main-stacked workspace
 - **Stacking** uses one or more **Stack Inputs**.
 - Main-targeted **Stack Inputs** are non-main **Workspaces**.
 - When Main-targeted **Stacking** produces a clean Stack merge, it keeps an **In-progress Workspace Head** in the target Workspace above that merge rather than turning its changes into the merge itself.
-- When a non-main Current Workspace is the Stack target, the configured Main Workspace may participate as a cursor-sync input but is never a post-Stack Closing candidate. Post-Stack Closing names every handle/path and retains outside-layout confirmation. Closing refuses the active and repository-owning Workspace paths and directories containing any registered Workspace, even in the same closing set; close nested children separately first. Tidy validates paths before any abandonment. Before removal, a directory's `.jj/repo` must resolve to the active repository's shared storage; a registered path alone is not proof of ownership. Missing registrations are forget-only; failed root lookups never authorize deletion at a guessed path.
+- When a non-main Current Workspace is the Stack target, the configured Main Workspace may participate as a cursor-sync input but is never a post-Stack Closing candidate. Post-Stack Closing names every handle/path and retains outside-layout confirmation. Closing refuses the active and repository-owning Workspace paths and directories containing any registered Workspace, even in the same closing set; close nested children separately first. Tidy validates paths before any abandonment. Before removal, a directory's `.jj/repo` must resolve to the active repository's shared storage; a registered path alone is not proof of ownership. Missing registrations, including existing directories with no `.jj` entry, are forget-only: preserve their contents and visible changes. Existing but broken `.jj` metadata and foreign repository pointers still fail removal validation. Failed root lookups never authorize deletion at a guessed path.
 - **Line Stacking** **Stack Inputs** are ordered **Workspaces** identified by **Workspace Handles**.
 - **Line Stacking** keeps an **In-progress Workspace Head** out of the payload line and rebases it onto the final Line Stacking tip.
 - **Moving to Main** applies to non-main **Workspaces** with no unique non-empty commits and advances their Workspace heads to the Main Workspace line.
