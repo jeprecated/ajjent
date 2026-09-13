@@ -40,8 +40,17 @@ type createTargetAssertionV1 struct {
 	ExpectedHeadCommit string `json:"expectedHeadCommit"`
 }
 type createChildAssertionV1 struct {
-	Workspace string `json:"workspace"`
+	Workspace  string `json:"workspace"`
+	BaseCommit string `json:"baseCommit,omitempty"`
 }
+
+func (r createRequestV1) baseCommit() string {
+	if r.Child.BaseCommit != "" {
+		return r.Child.BaseCommit
+	}
+	return r.Target.ExpectedHeadCommit
+}
+
 type createReceiptV1 struct {
 	Schema         string                `json:"schema"`
 	RequestID      string                `json:"requestId"`
@@ -59,6 +68,7 @@ type createReceiptTargetV1 struct {
 }
 type createReceiptChildV1 struct {
 	Workspace     string `json:"workspace"`
+	BaseCommit    string `json:"baseCommit,omitempty"`
 	WorkspaceRoot string `json:"workspaceRoot,omitempty"`
 	HeadCommit    string `json:"headCommit,omitempty"`
 	ParentCommit  string `json:"parentCommit,omitempty"`
@@ -115,6 +125,7 @@ type createCapabilitiesV2 struct {
 	MaxRequestBytes      int      `json:"maxRequestBytes"`
 	MaxOutputBytes       int      `json:"maxOutputBytes"`
 	MaxErrorMessageBytes int      `json:"maxErrorMessageBytes"`
+	ExplicitBaseCommit   bool     `json:"explicitBaseCommit"`
 }
 
 func createCapabilityBase() createCapabilitiesV1 {
@@ -127,7 +138,7 @@ func capabilitiesV2() ajjCapabilitiesV2 {
 func capabilitiesV3() ajjCapabilitiesV3 {
 	v1 := integrationCapabilities()
 	create := createCapabilityBase()
-	return ajjCapabilitiesV3{Schema: ajjCapabilitiesSchemaV3, Integrate: v1.Integrate, Create: createCapabilitiesV2{RequestSchema: create.RequestSchema, ReceiptSchemas: []string{createReceiptSchemaV1, createReceiptSchemaV2}, Executable: create.Executable, MinimumJJVersion: create.MinimumJJVersion, TargetResolution: create.TargetResolution, ExactHeadAssertion: create.ExactHeadAssertion, RecoveryModel: create.RecoveryModel, Statuses: create.Statuses, NextActions: create.NextActions, RequestIDPattern: create.RequestIDPattern, MaxRequestBytes: create.MaxRequestBytes, MaxOutputBytes: create.MaxOutputBytes, MaxErrorMessageBytes: create.MaxErrorMessageBytes}}
+	return ajjCapabilitiesV3{Schema: ajjCapabilitiesSchemaV3, Integrate: v1.Integrate, Create: createCapabilitiesV2{ExplicitBaseCommit: true, RequestSchema: create.RequestSchema, ReceiptSchemas: []string{createReceiptSchemaV1, createReceiptSchemaV2}, Executable: create.Executable, MinimumJJVersion: create.MinimumJJVersion, TargetResolution: create.TargetResolution, ExactHeadAssertion: create.ExactHeadAssertion, RecoveryModel: create.RecoveryModel, Statuses: create.Statuses, NextActions: create.NextActions, RequestIDPattern: create.RequestIDPattern, MaxRequestBytes: create.MaxRequestBytes, MaxOutputBytes: create.MaxOutputBytes, MaxErrorMessageBytes: create.MaxErrorMessageBytes}}
 }
 func parseCreateRequestV1(data []byte) (createRequestV1, string, error) {
 	if len(bytes.TrimSpace(data)) == 0 {
@@ -170,6 +181,9 @@ func validateCreateRequestV1(r createRequestV1) error {
 	if err := validateWorkspaceHandle(r.Child.Workspace); err != nil {
 		return fmt.Errorf("invalid child workspace: %w", err)
 	}
+	if r.Child.BaseCommit != "" && !integrationCommitIDRE.MatchString(r.Child.BaseCommit) {
+		return fmt.Errorf("child baseCommit must be a full 40-character lowercase hexadecimal commit id")
+	}
 	if r.Child.Workspace == r.Target.ExpectedWorkspace {
 		return fmt.Errorf("child workspace %q is the target workspace", r.Child.Workspace)
 	}
@@ -186,8 +200,15 @@ func validateCreateRequestJSONKeys(data []byte) error {
 		}
 	}
 	if raw, ok := top["child"]; ok {
-		if _, err := decodeExactJSONObject(raw, "child", []string{"workspace"}); err != nil {
+		child, err := decodeExactJSONObject(raw, "child", []string{"workspace", "baseCommit"})
+		if err != nil {
 			return err
+		}
+		if base, ok := child["baseCommit"]; ok {
+			var commit string
+			if err := json.Unmarshal(base, &commit); err != nil || !integrationCommitIDRE.MatchString(commit) {
+				return fmt.Errorf("child baseCommit must be a full 40-character lowercase hexadecimal commit id")
+			}
 		}
 	}
 	return nil
@@ -249,8 +270,15 @@ func validateCreateReceipt(r createReceiptV1) error {
 	if (r.Checks.ParentMatches || r.Checks.FreshCursor) && !r.Checks.RepositoryMatches {
 		return fmt.Errorf("receipt graph evidence is inconsistent")
 	}
-	if r.Checks.ParentMatches && r.Child.ParentCommit != r.Target.ExpectedHeadCommit {
-		return fmt.Errorf("receipt child parent does not match the target assertion")
+	baseCommit := r.Target.ExpectedHeadCommit
+	if r.Child.BaseCommit != "" {
+		if !integrationCommitIDRE.MatchString(r.Child.BaseCommit) {
+			return fmt.Errorf("receipt child base is invalid")
+		}
+		baseCommit = r.Child.BaseCommit
+	}
+	if r.Checks.ParentMatches && r.Child.ParentCommit != baseCommit {
+		return fmt.Errorf("receipt child parent does not match the base assertion")
 	}
 	if r.Checks.FreshCursor && r.Child.HeadCommit == "" {
 		return fmt.Errorf("receipt fresh cursor lacks a child head")

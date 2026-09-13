@@ -38,7 +38,7 @@ A request is one strict bounded JSON value:
 }
 ```
 
-Real requests substitute the exact 40-hex Current Workspace head. That commit is passed as the exact creation revision and must be the fresh child's sole parent. `requestId` is bounded correlation metadata, not durable operation ownership. Ajj computes an exact request-byte SHA-256 digest but stores no create operation journal.
+Real requests substitute the exact 40-hex Current Workspace head. By default, that commit is passed as the exact creation revision and must be the fresh child's sole parent. [ADR 0013](0013-separate-machine-create-base-from-target-head.md) adds optional `child.baseCommit` to select a separate exact creation base without weakening the Current Workspace head assertion. `requestId` is bounded correlation metadata, not durable operation ownership. Ajj computes an exact request-byte SHA-256 digest but stores no create operation journal.
 
 The result is exactly one bounded, path-free `ajj-create-receipt-v1` JSON object with one state:
 

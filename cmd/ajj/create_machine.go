@@ -84,7 +84,7 @@ func readCreateRequestSource(source string) ([]byte, error) {
 }
 
 func reconcileCreateRequest(repoOverride string, req createRequestV1, digest, receiptSchema string) error {
-	base := createReceiptV1{Schema: receiptSchema, RequestID: req.RequestID, RequestDigest: digest, Target: createReceiptTargetV1{Workspace: req.Target.ExpectedWorkspace, ExpectedHeadCommit: req.Target.ExpectedHeadCommit}, Child: createReceiptChildV1{Workspace: req.Child.Workspace}}
+	base := createReceiptV1{Schema: receiptSchema, RequestID: req.RequestID, RequestDigest: digest, Target: createReceiptTargetV1{Workspace: req.Target.ExpectedWorkspace, ExpectedHeadCommit: req.Target.ExpectedHeadCommit}, Child: createReceiptChildV1{Workspace: req.Child.Workspace, BaseCommit: req.Child.BaseCommit}}
 	repo, cfg, project, err := commandContext(repoOverride, "", "")
 	if err != nil {
 		return emitCreateState(base, createStatusConflict, createReceiptChecksV1{}, "target-resolution-failed", "Current Workspace or provider configuration does not match", createNextOperatorReview)
@@ -124,7 +124,7 @@ func reconcileCreateRequest(repoOverride string, req createRequestV1, digest, re
 	if err != nil || head != req.Target.ExpectedHeadCommit {
 		return emitCreateTargetChangedState(base, repo, cfg, project, req)
 	}
-	_ = createWorkspaceInternal(repo, cfg, project, req.Child.Workspace, req.Target.ExpectedHeadCommit, cfg.Create.Envrc, false, false)
+	_ = createWorkspaceInternal(repo, cfg, project, req.Child.Workspace, req.baseCommit(), cfg.Create.Envrc, false, false)
 	return reconcileAndEmitCreateState(base, repo, cfg, project, req, "create-failed-before-effect", "Workspace was not created")
 }
 
@@ -265,7 +265,7 @@ func inspectCreateState(repo string, cfg config, project string, req createReque
 		return s
 	}
 	s.headCommit, s.parentCommit = head, parent
-	s.checks.ParentMatches = parent == req.Target.ExpectedHeadCommit
+	s.checks.ParentMatches = parent == req.baseCommit()
 	fresh, err := integrationCommitIDs(dest, `@ & empty() & description("") & ~conflicts() & mutable()`)
 	s.checks.FreshCursor = err == nil && len(fresh) == 1 && fresh[0] == head
 	if !s.checks.ParentMatches || !s.checks.FreshCursor {
