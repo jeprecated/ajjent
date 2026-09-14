@@ -4,6 +4,8 @@
 
 Accepted
 
+[ADR 0014](0014-add-non-destructive-machine-create.md) adds negotiated `noCleanup` creation with durable exact-request evidence and no post-add cleanup; legacy behavior below remains the default.
+
 ## Context
 
 Human `ajj create A1 --revision <commit>` creates and registers a Jujutsu Workspace, performs provider setup, and prints a navigation path. Automation needs structured evidence when creation succeeds only partly or when a caller receives no response and retries.

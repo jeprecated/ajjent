@@ -16,6 +16,7 @@ const (
 	createReceiptSchemaV2      = "ajj-create-receipt-v2"
 	ajjCapabilitiesSchemaV2    = "ajj-capabilities-v2"
 	ajjCapabilitiesSchemaV3    = "ajj-capabilities-v3"
+	createNoCleanupJJVersion   = "0.43.0"
 	createRecoveryModel        = "state-reconciliation"
 	createStatusReady          = "ready"
 	createStatusPartial        = "partial"
@@ -30,7 +31,9 @@ const (
 )
 
 type createRequestV1 struct {
-	Schema    string                  `json:"schema"`
+	Schema    string `json:"schema"`
+	NoCleanup bool   `json:"noCleanup,omitempty"`
+	ownedHead string
 	RequestID string                  `json:"requestId"`
 	Target    createTargetAssertionV1 `json:"target"`
 	Child     createChildAssertionV1  `json:"child"`
@@ -53,6 +56,7 @@ func (r createRequestV1) baseCommit() string {
 
 type createReceiptV1 struct {
 	Schema         string                `json:"schema"`
+	NoCleanup      bool                  `json:"noCleanup,omitempty"`
 	RequestID      string                `json:"requestId"`
 	RequestDigest  string                `json:"requestDigest"`
 	Status         string                `json:"status"`
@@ -126,6 +130,8 @@ type createCapabilitiesV2 struct {
 	MaxOutputBytes       int      `json:"maxOutputBytes"`
 	MaxErrorMessageBytes int      `json:"maxErrorMessageBytes"`
 	ExplicitBaseCommit   bool     `json:"explicitBaseCommit"`
+	NoCleanup            bool     `json:"noCleanup"`
+	NoCleanupJJVersions  []string `json:"noCleanupJjVersions"`
 }
 
 func createCapabilityBase() createCapabilitiesV1 {
@@ -138,7 +144,7 @@ func capabilitiesV2() ajjCapabilitiesV2 {
 func capabilitiesV3() ajjCapabilitiesV3 {
 	v1 := integrationCapabilities()
 	create := createCapabilityBase()
-	return ajjCapabilitiesV3{Schema: ajjCapabilitiesSchemaV3, Integrate: v1.Integrate, Create: createCapabilitiesV2{ExplicitBaseCommit: true, RequestSchema: create.RequestSchema, ReceiptSchemas: []string{createReceiptSchemaV1, createReceiptSchemaV2}, Executable: create.Executable, MinimumJJVersion: create.MinimumJJVersion, TargetResolution: create.TargetResolution, ExactHeadAssertion: create.ExactHeadAssertion, RecoveryModel: create.RecoveryModel, Statuses: create.Statuses, NextActions: create.NextActions, RequestIDPattern: create.RequestIDPattern, MaxRequestBytes: create.MaxRequestBytes, MaxOutputBytes: create.MaxOutputBytes, MaxErrorMessageBytes: create.MaxErrorMessageBytes}}
+	return ajjCapabilitiesV3{Schema: ajjCapabilitiesSchemaV3, Integrate: v1.Integrate, Create: createCapabilitiesV2{NoCleanup: true, NoCleanupJJVersions: []string{createNoCleanupJJVersion}, ExplicitBaseCommit: true, RequestSchema: create.RequestSchema, ReceiptSchemas: []string{createReceiptSchemaV1, createReceiptSchemaV2}, Executable: create.Executable, MinimumJJVersion: create.MinimumJJVersion, TargetResolution: create.TargetResolution, ExactHeadAssertion: create.ExactHeadAssertion, RecoveryModel: create.RecoveryModel, Statuses: create.Statuses, NextActions: create.NextActions, RequestIDPattern: create.RequestIDPattern, MaxRequestBytes: create.MaxRequestBytes, MaxOutputBytes: create.MaxOutputBytes, MaxErrorMessageBytes: create.MaxErrorMessageBytes}}
 }
 func parseCreateRequestV1(data []byte) (createRequestV1, string, error) {
 	if len(bytes.TrimSpace(data)) == 0 {
@@ -190,9 +196,14 @@ func validateCreateRequestV1(r createRequestV1) error {
 	return nil
 }
 func validateCreateRequestJSONKeys(data []byte) error {
-	top, err := decodeExactJSONObject(data, "request", []string{"schema", "requestId", "target", "child"})
+	top, err := decodeExactJSONObject(data, "request", []string{"schema", "requestId", "target", "child", "noCleanup"})
 	if err != nil {
 		return err
+	}
+	if raw, ok := top["noCleanup"]; ok {
+		if string(raw) != "true" && string(raw) != "false" {
+			return fmt.Errorf("noCleanup must be a boolean")
+		}
 	}
 	if raw, ok := top["target"]; ok {
 		if _, err := decodeExactJSONObject(raw, "target", []string{"expectedWorkspace", "expectedHeadCommit"}); err != nil {
@@ -329,6 +340,9 @@ func validCreateReceiptError(e *createReceiptErrorV1, allowed map[string]string)
 
 func createConflictErrorActions() map[string]string {
 	return map[string]string{
+		"create-evidence-conflict":      createNextOperatorReview,
+		"create-effects-unknown":        createNextOperatorReview,
+		"create-verification-failed":    createNextOperatorReview,
 		"target-resolution-failed":      createNextOperatorReview,
 		"target-assertion-failed":       createNextOperatorReview,
 		"target-head-drift":             createNextOperatorReview,

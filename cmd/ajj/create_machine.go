@@ -56,6 +56,12 @@ func runCreateMachine(args []string) error {
 	if err != nil {
 		return err
 	}
+	if request.NoCleanup {
+		version, err := jjVersionFn()
+		if err != nil || strings.TrimSpace(version) != "jj "+createNoCleanupJJVersion {
+			return fmt.Errorf("noCleanup requires tested jj version %s", createNoCleanupJJVersion)
+		}
+	}
 	return reconcileCreateRequest(repo, request, digest, receiptSchema)
 }
 func readCreateRequestSource(source string) ([]byte, error) {
@@ -84,10 +90,20 @@ func readCreateRequestSource(source string) ([]byte, error) {
 }
 
 func reconcileCreateRequest(repoOverride string, req createRequestV1, digest, receiptSchema string) error {
-	base := createReceiptV1{Schema: receiptSchema, RequestID: req.RequestID, RequestDigest: digest, Target: createReceiptTargetV1{Workspace: req.Target.ExpectedWorkspace, ExpectedHeadCommit: req.Target.ExpectedHeadCommit}, Child: createReceiptChildV1{Workspace: req.Child.Workspace, BaseCommit: req.Child.BaseCommit}}
+	base := createReceiptV1{NoCleanup: req.NoCleanup, Schema: receiptSchema, RequestID: req.RequestID, RequestDigest: digest, Target: createReceiptTargetV1{Workspace: req.Target.ExpectedWorkspace, ExpectedHeadCommit: req.Target.ExpectedHeadCommit}, Child: createReceiptChildV1{Workspace: req.Child.Workspace, BaseCommit: req.Child.BaseCommit}}
 	repo, cfg, project, err := commandContext(repoOverride, "", "")
 	if err != nil {
 		return emitCreateState(base, createStatusConflict, createReceiptChecksV1{}, "target-resolution-failed", "Current Workspace or provider configuration does not match", createNextOperatorReview)
+	}
+	// All machine callers serialize with safe creation and honor its retained evidence,
+	// even if a retry omits or changes noCleanup.
+	safety, err := openCreateSafety(repo, cfg, project, req, digest)
+	if err != nil {
+		return emitCreateState(base, createStatusConflict, createReceiptChecksV1{}, "create-evidence-conflict", "Retained creation evidence is unavailable or belongs to another request", createNextOperatorReview)
+	}
+	defer safety.Close()
+	if req.NoCleanup && safety.record.HeadCommit != "" {
+		req.ownedHead = safety.record.HeadCommit
 	}
 	refs, err := listWorkspaceRefs(repo)
 	if err != nil {
@@ -102,6 +118,15 @@ func reconcileCreateRequest(repoOverride string, req createRequestV1, digest, re
 		return emitCreateState(base, createStatusConflict, createReceiptChecksV1{}, "target-head-drift", "Current Workspace head does not match the request assertion", createNextOperatorReview)
 	}
 	observed := inspectCreateState(repo, cfg, project, req)
+	if req.NoCleanup && safety.found && req.ownedHead == "" {
+		return emitObservedCreateState(base, observed, createStatusConflict, "create-effects-unknown", "A prior add may have taken effect; retained evidence requires operator review", createNextOperatorReview)
+	}
+	if req.NoCleanup && !safety.found && !observed.absent {
+		return emitObservedCreateState(base, observed, createStatusConflict, "create-evidence-conflict", "Existing Workspace has no evidence for this request", createNextOperatorReview)
+	}
+	if req.NoCleanup && safety.found && observed.absent {
+		return emitObservedCreateState(base, observed, createStatusConflict, "create-effects-unknown", "Previously created Workspace is no longer present", createNextOperatorReview)
+	}
 	if observed.matchingCore {
 		return reconcileAndEmitCreateState(base, repo, cfg, project, req, "", "")
 	}
@@ -124,17 +149,37 @@ func reconcileCreateRequest(repoOverride string, req createRequestV1, digest, re
 	if err != nil || head != req.Target.ExpectedHeadCommit {
 		return emitCreateTargetChangedState(base, repo, cfg, project, req)
 	}
-	_ = createWorkspaceInternal(repo, cfg, project, req.Child.Workspace, req.baseCommit(), cfg.Create.Envrc, false, false)
+	if req.NoCleanup {
+		if err := verifyRevisionInRepo(repo, req.baseCommit()); err != nil {
+			return reconcileAndEmitCreateState(base, repo, cfg, project, req, "create-failed-before-effect", "Requested base could not be verified before creation")
+		}
+		if err := safety.create(repo, req); err != nil {
+			observed := inspectCreateState(repo, cfg, project, req)
+			return emitObservedCreateState(base, observed, createStatusConflict, "create-effects-unknown", "Creation or evidence verification failed; preserve the Workspace and replay the exact request for reconciliation", createNextOperatorReview)
+		}
+		req.ownedHead = safety.record.HeadCommit
+		parent, err := workspaceParentCommitID(safety.record.Destination)
+		if err != nil || parent != req.baseCommit() {
+			observed := inspectCreateState(repo, cfg, project, req)
+			return emitObservedCreateState(base, observed, createStatusConflict, "create-verification-failed", "Post-add parent verification failed; Workspace and evidence were retained", createNextOperatorReview)
+		}
+		// Safe mode performs only idempotent file setup, never direnv trust.
+	} else {
+		_ = createWorkspaceInternal(repo, cfg, project, req.Child.Workspace, req.baseCommit(), cfg.Create.Envrc, false, false)
+	}
 	return reconcileAndEmitCreateState(base, repo, cfg, project, req, "create-failed-before-effect", "Workspace was not created")
 }
 
 func reconcileAndEmitCreateState(base createReceiptV1, repo string, cfg config, project string, req createRequestV1, absentCode, absentMessage string) error {
 	observed := inspectCreateState(repo, cfg, project, req)
+	if req.NoCleanup && req.ownedHead == "" && !observed.absent {
+		return emitObservedCreateState(base, observed, createStatusConflict, "create-evidence-conflict", "Workspace appeared without acknowledged creation evidence for this request", createNextOperatorReview)
+	}
 	if observed.matchingCore {
 		if !createTargetStillMatches(repo, req) {
 			return emitObservedCreateState(base, observed, createStatusConflict, "target-head-drift", "Current Workspace changed during reconciliation", createNextOperatorReview)
 		}
-		setupErr := reconcileCreateProviderSetup(repo, cfg, project, req.Child.Workspace)
+		setupErr := reconcileCreateProviderSetup(repo, cfg, project, req.Child.Workspace, req.NoCleanup)
 		observed, stable := inspectStableReadyCreateState(repo, cfg, project, req)
 		if !stable {
 			return emitObservedCreateState(base, observed, createStatusConflict, "state-changed", "Workspace state changed during reconciliation", createNextOperatorReview)
@@ -146,6 +191,9 @@ func reconcileAndEmitCreateState(base createReceiptV1, repo string, cfg config, 
 		return emitObservedCreateState(base, observed, createStatusReady, "", "", "")
 	}
 	if observed.absent {
+		if req.NoCleanup && req.ownedHead != "" {
+			return emitObservedCreateState(base, observed, createStatusConflict, "create-effects-unknown", "Previously created Workspace is no longer present", createNextOperatorReview)
+		}
 		if absentCode == "" {
 			absentCode = "create-failed-before-effect"
 			absentMessage = "Workspace was not created"
@@ -254,6 +302,13 @@ func inspectCreateState(repo string, cfg config, project string, req createReque
 		s.conflictCode = "repository-mismatch"
 		return s
 	}
+	if req.NoCleanup {
+		// Observe unsnapshotted concurrent edits before considering a child fresh.
+		if _, err := commandCaptureFn("jj", "-R", dest, "--color=never", "--no-pager", "status"); err != nil {
+			s.conflictCode = "child-head-unavailable"
+			return s
+		}
+	}
 	head, err := integrationWorkspaceHeadCommit(dest, req.Child.Workspace)
 	if err != nil {
 		s.conflictCode = "child-head-unavailable"
@@ -268,19 +323,23 @@ func inspectCreateState(repo string, cfg config, project string, req createReque
 	s.checks.ParentMatches = parent == req.baseCommit()
 	fresh, err := integrationCommitIDs(dest, `@ & empty() & description("") & ~conflicts() & mutable()`)
 	s.checks.FreshCursor = err == nil && len(fresh) == 1 && fresh[0] == head
-	if !s.checks.ParentMatches || !s.checks.FreshCursor {
+	if !s.checks.ParentMatches || !s.checks.FreshCursor || (req.ownedHead != "" && head != req.ownedHead) {
 		s.conflictCode = "child-graph-mismatch"
 		return s
 	}
 	s.matchingCore = true
 	return s
 }
-func reconcileCreateProviderSetup(repo string, cfg config, project, child string) error {
+func reconcileCreateProviderSetup(repo string, cfg config, project, child string, noCleanup bool) error {
 	dest := filepath.Join(cfg.WorkspacesRoot, project, child)
 	if cfg.Create.Envrc {
-		if err := ensureEnvrc(dest); err != nil {
+		if err := ensureEnvrcMode(dest, noCleanup); err != nil {
 			return err
 		}
+	}
+	if noCleanup {
+		_, err := materializeAssimilatedFolderSymlinksMode(mainWorkspaceRoot(repo), dest, cfg, project, true)
+		return err
 	}
 	return createMaterializeSetupFn(mainWorkspaceRoot(repo), dest, cfg, project)
 }

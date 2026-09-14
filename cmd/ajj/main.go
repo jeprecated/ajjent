@@ -4316,6 +4316,10 @@ func materializeAssimilatedFolders(mainPath string, workspacePath string, cfg co
 }
 
 func materializeAssimilatedFolderSymlinks(mainPath string, workspacePath string, cfg config, project string) ([]assimilatedSymlink, error) {
+	return materializeAssimilatedFolderSymlinksMode(mainPath, workspacePath, cfg, project, false)
+}
+
+func materializeAssimilatedFolderSymlinksMode(mainPath string, workspacePath string, cfg config, project string, noReplace bool) ([]assimilatedSymlink, error) {
 	mainPath = filepath.Clean(mainPath)
 	workspacePath = filepath.Clean(workspacePath)
 	if mainPath == workspacePath {
@@ -4343,7 +4347,7 @@ func materializeAssimilatedFolderSymlinks(mainPath string, workspacePath string,
 			return nil, fmt.Errorf("assimilated path source is not a regular file or directory: %s", source)
 		}
 		dest := filepath.Join(workspacePath, path)
-		created, err := ensureAssimilatedSymlink(source, dest)
+		created, err := ensureAssimilatedSymlinkMode(source, dest, noReplace)
 		if err != nil {
 			return nil, err
 		}
@@ -4506,6 +4510,10 @@ func matchAssimilatedGlobParts(patternParts []string, nameParts []string) (bool,
 }
 
 func ensureAssimilatedSymlink(source string, dest string) (bool, error) {
+	return ensureAssimilatedSymlinkMode(source, dest, false)
+}
+
+func ensureAssimilatedSymlinkMode(source string, dest string, noReplace bool) (bool, error) {
 	if st, err := os.Lstat(dest); err == nil {
 		if st.Mode()&os.ModeSymlink != 0 {
 			target, err := os.Readlink(dest)
@@ -4519,6 +4527,9 @@ func ensureAssimilatedSymlink(source string, dest string) (bool, error) {
 				return false, fmt.Errorf("refusing to replace existing Workspace symlink %s -> %s with assimilated path source %s", dest, target, source)
 			}
 			return false, nil
+		}
+		if noReplace {
+			return false, fmt.Errorf("refusing to replace existing Workspace content in noCleanup mode: %s", dest)
 		}
 		identical, err := regularFilesHaveSameContent(source, dest)
 		if err != nil {
@@ -4868,7 +4879,24 @@ func saveState(repoRoot string, st state) error {
 }
 
 func ensureEnvrc(workspacePath string) error {
+	return ensureEnvrcMode(workspacePath, false)
+}
+
+func ensureEnvrcMode(workspacePath string, noReplace bool) error {
 	path := filepath.Join(workspacePath, ".envrc")
+	if noReplace {
+		// O_EXCL never follows or truncates an entry raced into place. Existing
+		// provider-local content is preserved without executing or trusting it.
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if errors.Is(err, os.ErrExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		_, writeErr := f.WriteString("use_dev_env\n")
+		return errors.Join(writeErr, f.Close())
+	}
 	if exists(path) {
 		return nil
 	}

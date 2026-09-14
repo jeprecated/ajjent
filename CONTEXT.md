@@ -37,7 +37,7 @@ A strict, recoverable JSON operation that preserves the exact non-conflicted Cur
 _Avoid_: Main-targeted fallback, human Line Stacking, repository identity
 
 **Machine Creation**:
-A strict JSON ensure/reconcile operation that creates or verifies one child Workspace while asserting the exact Current Workspace head. The child's exact base commit defaults to that head but may be supplied independently as `child.baseCommit`; the head assertion remains a drift guard. It reports provider state as Ready, Partial, Not Created, or Conflict. Matching desired state is authoritative; Machine Creation does not prove creator provenance or recover by operation ID.
+A strict JSON ensure/reconcile operation that creates or verifies one child Workspace while asserting the exact Current Workspace head. The child's exact base commit defaults to that head but may be supplied independently as `child.baseCommit`; the head assertion remains a drift guard. It reports provider state as Ready, Partial, Not Created, or Conflict. In legacy mode matching desired state is authoritative. Opt-in `noCleanup` additionally requires retained exact-request, acknowledged-add evidence and preserves all uncertain/contradictory children; unknown effects require operator review, not adoption or automatic re-add. Neither mode recovers by operation ID.
 _Avoid_: Exactly-once placement, configured-Main target fallback, caller-supplied destination
 
 **Stack Inputs**:

@@ -4,6 +4,8 @@
 
 Accepted; extends [ADR 0011](0011-add-state-reconciled-machine-create.md) and [ADR 0012](0012-return-private-workspace-root-in-versioned-machine-create.md).
 
+[ADR 0014](0014-add-non-destructive-machine-create.md) adds negotiated `noCleanup` creation with durable exact-request evidence and no post-add cleanup; legacy behavior below remains the default.
+
 ## Context
 
 Summon needs workers to branch from the Current Workspace's `@-`, not its mutable `@`, while still detecting changes to that Current Workspace during creation. Making workers descendants of `@` subjects them to Jujutsu's automatic descendant rebases when that working-copy commit is rewritten. Using `@-` as `target.expectedHeadCommit` instead would incorrectly assert the Current Workspace head.
