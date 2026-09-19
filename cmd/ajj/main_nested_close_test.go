@@ -94,7 +94,7 @@ func TestTidyRejectsDuplicateTargetsBeforeRepositoryOrFilesystemEffect(t *testin
 		calls++
 		return "", nil
 	})
-	if err := tidyWorkspaces(mainPath, config{MainWorkspace: "default"}, "proj", infos, false, true); err == nil || !strings.Contains(err.Error(), "duplicate Workspace Handle \"alpha\"") {
+	if err := tidyWorkspaces(mainPath, config{MainWorkspace: "default"}, "proj", infos, false, true, "unused-duplicate-target-review"); err == nil || !strings.Contains(err.Error(), "duplicate Workspace Handle \"alpha\"") {
 		t.Fatalf("expected duplicate tidy target rejection, got %v", err)
 	}
 	if calls != 0 || !workspacePathExists(alphaPath) {

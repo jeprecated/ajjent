@@ -1,82 +1,104 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strings"
+	"time"
 )
 
-// Snapshot graph evidence once for the selector. Selection changes recompute
-// reachability against the complete closing set without issuing JJ commands in
-// the event loop. The existing operation guard rejects external graph drift.
-func tidyGraphReview(repo string, infos []workspaceInfo) (func([]selectorItem, bool) (map[string]string, error), error) {
-	work := map[string]map[string]bool{}
+// All membership queries and preview reads use one immutable operation. A
+// bounded membership read must fail closed, never turn truncation into safety.
+type tidyGraphEvidence struct {
+	repo, operation string
+	infos           []workspaceInfo
+	work            map[string]map[string]bool
+}
+
+func tidyGraphReview(repo string, infos []workspaceInfo, operation string) (*tidyGraphEvidence, error) {
+	if !integrationFullOperationIDRE.MatchString(operation) {
+		return nil, fmt.Errorf("Tidy evidence requires a pinned operation")
+	}
+	review := &tidyGraphEvidence{repo: repo, operation: operation, infos: infos, work: map[string]map[string]bool{}}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
 	for _, info := range infos {
-		out, err := commandCaptureFn("jj", "-R", repo, "--ignore-working-copy", "--color=never", "--no-pager", "log", "--no-graph", "-r", "mutable() & ::"+info.Ref.Handle+"@ & "+workspaceRelevantRevset(), "-T", `commit_id ++ "\n"`)
+		out, truncated, err := tidyReadCommandFn(ctx, repo, operation, 2*1024*1024, "log", "--no-graph", "-r", "mutable() & ::"+info.Ref.Handle+"@ & "+workspaceRelevantRevset(), "-T", `commit_id ++ "\n"`)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("load pinned Tidy evidence: %w", err)
+		}
+		if truncated {
+			return nil, fmt.Errorf("pinned Tidy evidence exceeds read limit; cannot establish batch safety")
 		}
 		ids := map[string]bool{}
 		for _, id := range strings.Fields(out) {
+			if !integrationCommitIDRE.MatchString(id) {
+				return nil, fmt.Errorf("invalid commit ID in pinned Tidy evidence")
+			}
 			ids[id] = true
 		}
-		work[info.Ref.Handle] = ids
+		review.work[info.Ref.Handle] = ids
 	}
-	return func(selected []selectorItem, force bool) (map[string]string, error) {
-		closing := map[string]bool{}
-		for _, item := range selected {
-			closing[item.Handle] = true
+	return review, nil
+}
+
+func (r *tidyGraphEvidence) review(selected []selectorItem, force bool) (map[string]string, error) {
+	infos, work := r.infos, r.work
+
+	closing := map[string]bool{}
+	for _, item := range selected {
+		closing[item.Handle] = true
+	}
+	evidence := map[string]string{}
+	blocked := []string{}
+	for _, info := range infos {
+		handle := info.Ref.Handle
+		if info.Missing {
+			evidence[handle] = "forget registration only; preserve any leftover directory"
+			continue
 		}
-		evidence := map[string]string{}
-		blocked := []string{}
-		for _, info := range infos {
-			handle := info.Ref.Handle
-			if info.Missing {
-				evidence[handle] = "forget registration only; preserve any leftover directory"
+		protected := map[string]bool{}
+		names := []string{}
+		fullProtectors := []string{}
+		for _, other := range infos {
+			if other.Ref.Handle == handle || closing[other.Ref.Handle] {
 				continue
 			}
-			protected := map[string]bool{}
-			names := []string{}
-			fullProtectors := []string{}
-			for _, other := range infos {
-				if other.Ref.Handle == handle || closing[other.Ref.Handle] {
-					continue
-				}
-				covered := 0
-				for id := range work[handle] {
-					if work[other.Ref.Handle][id] {
-						protected[id] = true
-						covered++
-					}
-				}
-				if covered > 0 {
-					names = append(names, other.Ref.Handle)
-					if covered == len(work[handle]) {
-						fullProtectors = append(fullProtectors, other.Ref.Handle)
-					}
+			covered := 0
+			for id := range work[handle] {
+				if work[other.Ref.Handle][id] {
+					protected[id] = true
+					covered++
 				}
 			}
-			unique := len(work[handle]) - len(protected)
-			reason := "no relevant mutable changes"
-			if unique > 0 {
-				reason = fmt.Sprintf("%d unique mutable change(s) outside surviving Workspaces", unique)
-			} else if len(fullProtectors) > 0 {
-				reason = "represented in surviving: " + strings.Join(fullProtectors, ", ")
-			} else if len(names) > 0 {
-				reason = "represented across surviving (combined): " + strings.Join(names, ", ")
-			}
-			if info.Conflict {
-				reason = "conflicts require force; " + reason
-			}
-			evidence[handle] = reason
-			if closing[handle] && !force && (unique > 0 || info.Conflict) {
-				blocked = append(blocked, handle)
+			if covered > 0 {
+				names = append(names, other.Ref.Handle)
+				if covered == len(work[handle]) {
+					fullProtectors = append(fullProtectors, other.Ref.Handle)
+				}
 			}
 		}
-		if len(blocked) > 0 {
-			return evidence, fmt.Errorf("Batch blocked: %s; uncheck a protector/target, or explicitly enable force. Selected rows cannot protect each other", strings.Join(blocked, ", "))
+		unique := len(work[handle]) - len(protected)
+		reason := "no relevant mutable changes"
+		if unique > 0 {
+			reason = fmt.Sprintf("%d unique mutable change(s) outside surviving Workspaces", unique)
+		} else if len(fullProtectors) > 0 {
+			reason = "represented in surviving: " + strings.Join(fullProtectors, ", ")
+		} else if len(names) > 0 {
+			reason = "represented across surviving (combined): " + strings.Join(names, ", ")
 		}
-		return evidence, nil
-	}, nil
+		if info.Conflict {
+			reason = "conflicts require force; " + reason
+		}
+		evidence[handle] = reason
+		if closing[handle] && !force && (unique > 0 || info.Conflict) {
+			blocked = append(blocked, handle)
+		}
+	}
+	if len(blocked) > 0 {
+		return evidence, fmt.Errorf("Batch blocked: %s; uncheck a protector/target, or explicitly enable force. Selected rows cannot protect each other", strings.Join(blocked, ", "))
+	}
+	return evidence, nil
 }
 
 func (m *selectorModel) refreshTidyReview() {

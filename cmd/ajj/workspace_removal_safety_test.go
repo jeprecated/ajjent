@@ -25,7 +25,7 @@ func TestCloseAndTidyProtectNestedRegisteredWorkspace(t *testing.T) {
 			var err error
 			if mode == "tidy" {
 				infos := []workspaceInfo{{Policy: policyDisposable, Ref: workspaceRef{Handle: "default"}, Path: mainPath, Main: true}, parentInfo}
-				err = tidyWorkspaces(mainPath, config{MainWorkspace: "default"}, "proj", infos, true, true)
+				err = tidyWorkspaces(mainPath, config{MainWorkspace: "default"}, "proj", infos, true, true, currentOperationIDFullForTest(t, mainPath))
 			} else {
 				targets := []workspaceInfo{parentInfo}
 				if mode == "whole-set" {

@@ -393,7 +393,7 @@ func TestTidyHelpOffersForcedTidying(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"surviving registered Workspace heads", "non-Current", "--force", "abandon unique mutable changes"} {
+	for _, want := range []string{"surviving registered Workspace heads", "non-Current", "--force", "abandon unique mutable changes", "v opens", "PgUp/PgDn", "Diff is not ancestry proof"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected tidy help to mention %q, got %q", want, out)
 		}
@@ -1534,7 +1534,7 @@ func TestForcedTidyRequiresDestructiveConfirmation(t *testing.T) {
 	if err := setWorkspacePolicies(mainPath, "proj", infos[1:], policyDisposable); err != nil {
 		t.Fatal(err)
 	}
-	if err := tidyWorkspaces(mainPath, cfg, "proj", infos, true, false); err != nil {
+	if err := tidyWorkspaces(mainPath, cfg, "proj", infos, true, false, "unique-alpha"); err != nil {
 		t.Fatal(err)
 	}
 	if !exists(workspacePath) {
@@ -1585,7 +1585,7 @@ func TestForcedTidyAbandonsAndClosesUnstackedWorkspace(t *testing.T) {
 	if err := setWorkspacePolicies(mainPath, "proj", infos[1:], policyDisposable); err != nil {
 		t.Fatal(err)
 	}
-	if err := tidyWorkspaces(mainPath, cfg, "proj", infos, true, true); err != nil {
+	if err := tidyWorkspaces(mainPath, cfg, "proj", infos, true, true, "reviewed-operation"); err != nil {
 		t.Fatal(err)
 	}
 	if !abandonedAlpha || !forgotAlpha {

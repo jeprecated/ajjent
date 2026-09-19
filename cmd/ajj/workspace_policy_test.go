@@ -266,11 +266,11 @@ func TestTidyBatchMutualProtectionBlocksSubmitUntilProtectorSurvives(t *testing.
 	repo, _, _ := setupMutuallyRepresentedCloseRepo(t)
 	markDisposableForTest(t, repo, "alpha", "bravo")
 	infos := policyInfosForTest(t, repo, "proj")
-	review, err := tidyGraphReview(repo, infos)
+	review, err := tidyGraphReview(repo, infos, currentOperationIDFullForTest(t, repo))
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := selectorModel{opts: selectorOptions{Tidy: true, Mode: selectorMulti, Items: selectorItemsForTidy(infos, false), ReviewTidy: review}, selected: map[int]bool{0: true, 1: true}}
+	m := selectorModel{opts: selectorOptions{Tidy: true, Mode: selectorMulti, Items: selectorItemsForTidy(infos, false), ReviewTidy: review.review}, selected: map[int]bool{0: true, 1: true}}
 	out, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = out.(selectorModel)
 	if cmd != nil || !strings.Contains(m.problem, "Batch blocked") {
@@ -320,11 +320,11 @@ func TestPolicyCLIHelpAndSelectorShowSeparateIntentAndEvidence(t *testing.T) {
 	repo, _, _ := setupMutuallyRepresentedCloseRepo(t)
 	markDisposableForTest(t, repo, "bravo")
 	infos := policyInfosForTest(t, repo, "proj")
-	review, err := tidyGraphReview(repo, infos)
+	review, err := tidyGraphReview(repo, infos, currentOperationIDFullForTest(t, repo))
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := selectorModel{opts: selectorOptions{Tidy: true, Mode: selectorMulti, Items: selectorItemsForTidy(infos, false), ReviewTidy: review}, selected: map[int]bool{}, width: 240, height: 12}
+	m := selectorModel{opts: selectorOptions{Tidy: true, Mode: selectorMulti, Items: selectorItemsForTidy(infos, false), ReviewTidy: review.review}, selected: map[int]bool{}, width: 240, height: 12}
 	m.refreshTidyReview()
 	for _, want := range []string{"Keep", "Disposable", "unstacked", "represented in surviving: bravo", "p Keep/Disposable"} {
 		if !strings.Contains(m.View(), want) {

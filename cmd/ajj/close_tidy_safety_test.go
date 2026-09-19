@@ -85,7 +85,7 @@ func TestTidyExternalCancellationPrecedesAllAbandonment(t *testing.T) {
 	if err := setWorkspacePolicies(mainPath, "proj", infos[1:], policyDisposable); err != nil {
 		t.Fatal(err)
 	}
-	if err := tidyWorkspaces(mainPath, config{MainWorkspace: "default"}, "proj", infos, false, false); err != nil {
+	if err := tidyWorkspaces(mainPath, config{MainWorkspace: "default"}, "proj", infos, false, false, "reviewed-operation"); err != nil {
 		t.Fatal(err)
 	}
 	if len(calls) > 0 {
@@ -303,7 +303,7 @@ func TestTidyPartialFailureReportsPriorEmptyCursorCleanup(t *testing.T) {
 	if err := setWorkspacePolicies(mainPath, "proj", infos[1:], policyDisposable); err != nil {
 		t.Fatal(err)
 	}
-	err := tidyWorkspaces(mainPath, config{MainWorkspace: "default"}, "proj", infos, false, true)
+	err := tidyWorkspaces(mainPath, config{MainWorkspace: "default"}, "proj", infos, false, true, "reviewed-operation")
 	if err == nil || !strings.Contains(err.Error(), "heads were already abandoned") || !strings.Contains(err.Error(), "failed: blocked") {
 		t.Fatalf("missing earlier mutation report: %v", err)
 	}

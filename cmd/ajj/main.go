@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -1109,7 +1110,7 @@ func runTidy(args []string) error {
 	fs.StringVar(&rootOverride, "workspaces-root", "", "Workspaces root override")
 	fs.BoolVar(&force, "force", false, "forced tidy: abandon unique mutable changes before closing")
 	fs.BoolVar(&yes, "yes", false, "skip confirmation")
-	if handled, err := parseCommandFlags(fs, args, "ajj tidy [options]", "Automatically select only eligible Disposable non-Current Workspaces represented by surviving registered Workspace heads; Keep and missing registrations require manual Tidy selection. --force relaxes graph safety, never Keep policy. Remove empty leftovers after completion."); handled || err != nil {
+	if handled, err := parseCommandFlags(fs, args, "ajj tidy [options]", "Automatically select only eligible Disposable non-Current Workspaces represented by surviving registered Workspace heads; Keep and missing registrations require manual Tidy selection. TUI: v opens a bounded pinned-operation log/Main-diff preview; PgUp/PgDn scroll. Diff is not ancestry proof. --force relaxes graph safety, never Keep policy. Remove empty leftovers after completion."); handled || err != nil {
 		return err
 	}
 	repoRoot, cfg, project, err := commandContext(repoRootOverride, projectOverride, rootOverride)
@@ -1132,6 +1133,10 @@ func runTidy(args []string) error {
 	if err := snapshotCloseCandidates(repoRoot, candidates); err != nil {
 		return err
 	}
+	reviewedOperation, err := currentOperationID(repoRoot)
+	if err != nil {
+		return err
+	}
 	infos, _, err = loadWorkspaceInfos(repoRoot, cfg, project)
 	if err != nil {
 		return err
@@ -1139,7 +1144,7 @@ func runTidy(args []string) error {
 	if err := loadWorkspacePolicies(repoRoot, project, infos); err != nil {
 		return err
 	}
-	if err := tidyWorkspaces(repoRoot, cfg, project, infos, force, yes); err != nil {
+	if err := tidyWorkspaces(repoRoot, cfg, project, infos, force, yes, reviewedOperation); err != nil {
 		if errors.Is(err, errTidyCancelled) {
 			return nil
 		}
@@ -1190,14 +1195,17 @@ func runTidy(args []string) error {
 
 var errTidyCancelled = errors.New("Tidy cancelled or no rows selected")
 
-func tidyWorkspaces(repoRoot string, cfg config, project string, infos []workspaceInfo, force bool, yes bool) error {
+func tidyWorkspaces(repoRoot string, cfg config, project string, infos []workspaceInfo, force bool, yes bool, reviewedOperation string) error {
 	targets := tidyTargets(infos, force)
 	if err := validateUniqueCloseTargets(targets); err != nil {
 		return err
 	}
-	reviewedOperation, err := currentOperationID(repoRoot)
+	currentOperation, err := currentOperationID(repoRoot)
 	if err != nil {
 		return err
+	}
+	if currentOperation != reviewedOperation {
+		return fmt.Errorf("Workspace graph changed after review; rerun Tidy and review the new state")
 	}
 	interactive := !yes && canUseTUI()
 	policyTargets := targets
@@ -1214,12 +1222,12 @@ func tidyWorkspaces(repoRoot string, cfg config, project string, infos []workspa
 		if main, ok := mapInfosByHandle(infos)[cfg.MainWorkspace]; ok && !main.Missing {
 			reviewRepo = main.Path
 		}
-		review, err := tidyGraphReview(reviewRepo, infos)
+		review, err := tidyGraphReview(reviewRepo, infos, reviewedOperation)
 		if err != nil {
 			return err
 		}
 		byPolicyHandle := mapInfosByHandle(infos)
-		selected, opts, err := runSelector(selectorOptions{Title: "Tidy Workspaces", Mode: selectorMulti, Items: items, Tidy: true, ForceEnabled: force, AllowForceToggle: true, ReviewTidy: review, SetPolicy: func(handle, policy string) error {
+		selected, opts, err := runSelector(selectorOptions{Title: "Tidy Workspaces", Mode: selectorMulti, Items: items, Tidy: true, ForceEnabled: force, AllowForceToggle: true, ReviewTidy: review.review, PreviewTidy: review.preview, SetPolicy: func(handle, policy string) error {
 			return policyReview.setPolicy(byPolicyHandle[handle], policy)
 		}})
 		if err != nil {
@@ -5268,6 +5276,7 @@ type selectorItem struct {
 }
 
 type selectorOptions struct {
+	PreviewTidy      func(context.Context, string, []selectorItem) (string, error)
 	SetPolicy        func(string, string) error
 	ReviewTidy       func([]selectorItem, bool) (map[string]string, error)
 	Title            string
@@ -5290,6 +5299,12 @@ type selectorResult struct {
 }
 
 type selectorModel struct {
+	previewOpen   bool
+	previewKey    string
+	previewID     uint64
+	previewCancel context.CancelFunc
+	previewText   string
+	previewOffset int
 	notice        string
 	problem       string
 	evidence      map[string]string
@@ -5334,15 +5349,26 @@ func (m selectorModel) Init() tea.Cmd { return nil }
 
 func (m selectorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tidyPreviewMsg:
+		if m.previewOpen && msg.id == m.previewID {
+			m.previewText = msg.text
+			if msg.err != nil {
+				m.previewText = "Preview error: " + msg.err.Error() + "\n" + m.previewText
+			}
+			m.previewText = sanitizeTidyPreview(m.previewText)
+		}
+		return m, nil
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "esc":
+			m.stopPreview()
 			m.cancel = true
 			return m, tea.Quit
 		case "q":
+			m.stopPreview()
 			m.cancel = true
 			return m, tea.Quit
 		case "up", "k":
@@ -5373,7 +5399,23 @@ func (m selectorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.opts.Tidy && m.problem != "" {
 				return m, nil
 			}
+			m.stopPreview()
 			return m.submit(), tea.Quit
+		case "v":
+			if m.opts.Tidy {
+				m.previewOpen = !m.previewOpen
+			} else {
+				m.filter += "v"
+				m.cursor = 0
+			}
+		case "pgdown", "pgup":
+			if m.previewOpen {
+				step := max(1, m.height-5)
+				if msg.String() == "pgup" {
+					step = -step
+				}
+				m.previewOffset = max(0, min(m.previewOffset+step, len(strings.Split(m.previewText, "\n"))-max(1, m.height-5)))
+			}
 		case "p":
 			if m.opts.Tidy {
 				m.toggleTidyPolicy()
@@ -5425,7 +5467,8 @@ func (m selectorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	m.refreshTidyReview()
-	return m, nil
+	cmd := m.requestTidyPreview()
+	return m, cmd
 }
 
 func (m *selectorModel) toggleSelection(idx int) {
@@ -5589,6 +5632,9 @@ func selectorRoleInitial(role string) string {
 }
 
 func (m selectorModel) View() string {
+	if m.opts.Tidy && m.previewOpen {
+		return m.tidyPreviewView()
+	}
 	var b strings.Builder
 	styles := selectorStyles()
 	if m.height <= 0 {
@@ -5668,7 +5714,7 @@ func (m selectorModel) View() string {
 		footer += fmt.Sprintf("  f force:%v", m.opts.ForceEnabled)
 	}
 	if m.opts.Tidy {
-		footer += "  p Keep/Disposable (persist)"
+		footer += "  p Keep/Disposable (persist)  v preview"
 	}
 	if m.opts.AllowRoleToggle {
 		footer += "  a toggle payload/follow-only"
@@ -5793,7 +5839,7 @@ func selectorHint(opts selectorOptions) string {
 		return "Choose Workspaces to move to the Main Workspace line. Movable rows start checked; press space to leave one alone."
 	}
 	if opts.Tidy {
-		return "Choose Workspaces to tidy. Keep is manual-only; eligible non-Current Disposable rows start checked. Space selects; p persists policy; f enables Forced Tidying."
+		return "v preview | Choose Workspaces to tidy. Keep is manual-only; eligible non-Current Disposable rows start checked. Space selects; p persists policy; f enables Forced Tidying."
 	}
 	if opts.AllDefault {
 		return "Choose Stack Inputs. The All row submits every stack-relevant Workspace only when no boxes are checked. Disabled rows are shown for context."

@@ -60,10 +60,29 @@ when manually forgetting registrations. Missing tokens also imply Keep. `keep`
 may clear obsolete records without recreating missing Workspace metadata.
 Records are not migration/provenance authority; no retroactive live migration.
 
+## Bounded evidence preview follow-up
+
+Tidy provides `v` to switch to a highlighted-Workspace detail view, with
+`PgUp/PgDn` scrolling and existing selection/policy/force/submit/cancel keys.
+Relevant mutable ancestor logs include change/commit IDs and descriptions;
+unique details use the captured complete membership sets minus the actual
+selected closing set. Main-to-Workspace changed-files/patch comparisons are
+labeled as comparisons, never ancestry or unique-work proofs.
+
+Bind the review operation before refreshing Workspace information; reject drift
+while loading that information. All graph membership and preview commands then
+use the same full operation ID with `--ignore-working-copy --at-op`, including
+when the live graph moves later. Preview results never authorize Closing.
+
+Use cancellable asynchronous Bubble Tea commands, request IDs for late-result
+rejection, bounded native JJ output, deadlines, and no external pager/formatter.
+Truncated display output is visibly labeled; truncated membership evidence fails
+closed. Replace terminal controls from descriptions, filenames, and diagnostics.
+This is a finite log/diff view, not a general history browser or origin inference.
+
 ## Boundaries
 
-This stage does not add a full JJ graph/log or diff preview, origin tracking,
-provider schema fields, or external Summon opt-in. Existing graph safety still
-permits representation in non-Main surviving Workspaces. Snapshotting can record
+No origin tracking, provider schema fields, or external Summon opt-in are added.
+Existing graph safety still permits representation in non-Main surviving Workspaces. Snapshotting can record
 edits before cancellation. Ignored/untrackable files and concurrent writes after
 final validation remain outside the non-atomic lifecycle guarantee.

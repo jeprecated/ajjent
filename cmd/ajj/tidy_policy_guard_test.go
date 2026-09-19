@@ -128,7 +128,7 @@ func TestTidySelectorPolicyReviewBoundary(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			graphReview, err := tidyGraphReview(repo, infos)
+			graphReview, err := tidyGraphReview(repo, infos, currentOperationIDFullForTest(t, repo))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -150,7 +150,7 @@ func TestTidySelectorPolicyReviewBoundary(t *testing.T) {
 			if alpha < 0 || bravo < 0 {
 				t.Fatal("missing selector rows")
 			}
-			m := selectorModel{opts: selectorOptions{Tidy: true, Mode: selectorMulti, Items: items, ForceEnabled: force, ReviewTidy: graphReview, SetPolicy: func(handle, policy string) error { return review.setPolicy(byHandle[handle], policy) }}, selected: selected, cursor: alpha}
+			m := selectorModel{opts: selectorOptions{Tidy: true, Mode: selectorMulti, Items: items, ForceEnabled: force, ReviewTidy: graphReview.review, SetPolicy: func(handle, policy string) error { return review.setPolicy(byHandle[handle], policy) }}, selected: selected, cursor: alpha}
 			before := currentOperationIDFullForTest(t, repo)
 			key := func(s string) {
 				out, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)})
