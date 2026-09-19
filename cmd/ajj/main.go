@@ -1235,30 +1235,12 @@ func tidyWorkspaces(repoRoot string, cfg config, project string, infos []workspa
 	if err != nil {
 		return err
 	}
-	if err := validateWorkspaceRemovalTargets(mainInfo.Path, targets, protection); err != nil {
-		return err
-	}
-	// All prompts precede abandonment/deletion; snapshots may already have recorded edits.
-	confirmed, err := confirmExternalDeletes(targets, yes)
-	if err != nil || !confirmed {
-		return err
-	}
-	protection, err = revalidateCloseReview(mainInfo.Path, targets, reviewedOperation)
-	if err != nil {
-		return err
-	}
-	emptyAbandoned, err := abandonEmptyWorkspaceHeads(mainInfo.Path, targets)
-	if err != nil {
-		return fmt.Errorf("empty Workspace head cleanup failed (may be partially applied); no Workspace directory closing attempted: %w", err)
-	}
-	closed, closeErr := closeWorkspacesWithProtection(mainInfo.Path, targets, len(forcedTargets) > 0, true, protection)
+	protection.reviewedOperation = reviewedOperation
+	closed, closeErr := closeWorkspacesWithProtection(mainInfo.Path, targets, len(forcedTargets) > 0, yes, true, protection)
 	for _, path := range closed {
 		fmt.Fprintln(stdoutWriter, path)
 	}
-	if closeErr != nil {
-		if emptyAbandoned {
-			return fmt.Errorf("empty undescribed Workspace heads were already abandoned for closing set %s (see jj output above); %w", workspaceHandleList(targets), closeErr)
-		}
+	if closeErr != nil || len(closed) == 0 {
 		return closeErr
 	}
 	if err := abandonTopEmptyMutableAncestors(mainInfo.Path); err != nil {
@@ -1441,7 +1423,7 @@ func runClose(args []string) error {
 		return err
 	}
 	protection.reviewedOperation = reviewedOperation
-	closed, err := closeWorkspacesWithProtection(mainInfo.Path, targets, force, yes, protection)
+	closed, err := closeWorkspacesWithProtection(mainInfo.Path, targets, force, yes, false, protection)
 	if err != nil || len(closed) == 0 {
 		return err
 	}
@@ -3298,14 +3280,6 @@ func normallyUnclosableTargetsWithProtection(repoPath string, targets []workspac
 	return unsafe, nil
 }
 
-func closeWorkspaces(repoPath string, targets []workspaceInfo, force bool, yes bool) ([]string, error) {
-	protection, err := newCloseProtectionContext(repoPath, targets)
-	if err != nil {
-		return nil, err
-	}
-	return closeWorkspacesWithProtection(repoPath, targets, force, yes, protection)
-}
-
 func workspacePathContains(parent, path string) bool {
 	rel, err := filepath.Rel(parent, path)
 	return err == nil && filepath.IsLocal(rel)
@@ -3407,10 +3381,19 @@ func validateWorkspaceRepositoryIdentity(repoPath string, info workspaceInfo) er
 	return nil
 }
 
-func closeWorkspacesWithProtection(repoPath string, targets []workspaceInfo, force bool, yes bool, protection closeProtectionContext) ([]string, error) {
+func closeWorkspacesWithProtection(repoPath string, targets []workspaceInfo, force bool, yes bool, cleanupEmptyHeads bool, protection closeProtectionContext) ([]string, error) {
 	closed := []string{}
 	if err := validateUniqueCloseTargets(targets); err != nil {
 		return closed, err
+	}
+	// An omitted review is never permission to skip filesystem inspection.
+	// Direct callers establish a review before this helper's own prompts.
+	if protection.reviewedOperation == "" {
+		var err error
+		protection, err = prepareCloseReview(repoPath, targets)
+		if err != nil {
+			return closed, err
+		}
 	}
 	if !force {
 		unsafe, err := normallyUnclosableTargetsWithProtection(repoPath, targets, protection)
@@ -3428,26 +3411,37 @@ func closeWorkspacesWithProtection(repoPath string, targets []workspaceInfo, for
 	if err != nil || !confirmed {
 		return closed, err
 	}
-	if protection.reviewedOperation != "" {
-		var err error
-		protection, err = revalidateCloseReview(repoPath, targets, protection.reviewedOperation)
+	protection, err = revalidateCloseReview(repoPath, targets, protection.reviewedOperation)
+	if err != nil {
+		return closed, err
+	}
+	if !force {
+		unsafe, err := normallyUnclosableTargetsWithProtection(repoPath, targets, protection)
 		if err != nil {
 			return closed, err
 		}
-		if !force {
-			unsafe, err := normallyUnclosableTargetsWithProtection(repoPath, targets, protection)
-			if err != nil {
-				return closed, err
-			}
-			if len(unsafe) > 0 {
-				return closed, fmt.Errorf("%s not normally closable against surviving Workspaces", workspaceSummary(unsafe))
-			}
+		if len(unsafe) > 0 {
+			return closed, fmt.Errorf("%s not normally closable against surviving Workspaces", workspaceSummary(unsafe))
 		}
 	}
+	// Tidy's intentional empty-cursor cleanup follows the shared final guard.
+	// Do not snapshot again after it: the cleanup itself can make cursors stale.
+	emptyAbandoned := false
+	if cleanupEmptyHeads {
+		emptyAbandoned, err = abandonEmptyWorkspaceHeads(repoPath, targets)
+		if err != nil {
+			return closed, fmt.Errorf("empty Workspace head cleanup failed (may be partially applied); no Workspace directory closing attempted: %w", err)
+		}
+	}
+
 	closedHandles, abandoned := []string{}, []string{}
 	failure := func(index int, cause error) ([]string, error) {
-		return closed, fmt.Errorf("Closing stopped (not atomic): closed: %s; abandoned unique mutable changes: %s; failed: %s; not attempted: %s; failing command may be partially applied: %w",
+		err := fmt.Errorf("Closing stopped (not atomic): closed: %s; abandoned unique mutable changes: %s; failed: %s; not attempted: %s; failing command may be partially applied: %w",
 			emptyDefault(strings.Join(closedHandles, ", "), "none"), emptyDefault(strings.Join(abandoned, ", "), "none"), targets[index].Ref.Handle, workspaceHandleList(targets[index+1:]), cause)
+		if emptyAbandoned {
+			err = fmt.Errorf("empty undescribed Workspace heads were already abandoned for closing set %s (see jj output above); %w", workspaceHandleList(targets), err)
+		}
+		return closed, err
 	}
 	for index, info := range targets {
 		if force && !info.Missing {
@@ -3485,6 +3479,19 @@ func workspaceHandleList(targets []workspaceInfo) string {
 }
 
 func closeStackInputs(repoPath string, targets []workspaceInfo) ([]string, error) {
+	// Stack computation is already finished. Snapshot only now, at the separate
+	// lifecycle review boundary, and bind this first confirmation to its state.
+	protection, err := prepareCloseReview(repoPath, targets)
+	if err != nil {
+		return nil, err
+	}
+	unsafe, err := normallyUnclosableTargetsWithProtection(repoPath, targets, protection)
+	if err != nil {
+		return nil, err
+	}
+	if len(unsafe) > 0 {
+		return nil, fmt.Errorf("%s not normally closable against surviving Workspaces", workspaceSummary(unsafe))
+	}
 	paths := make([]string, 0, len(targets))
 	for _, info := range targets {
 		paths = append(paths, fmt.Sprintf("  %s: %s", info.Ref.Handle, info.Path))
@@ -3493,7 +3500,7 @@ func closeStackInputs(repoPath string, targets []workspaceInfo) ([]string, error
 	if err != nil || !ok {
 		return nil, err
 	}
-	return closeWorkspaces(repoPath, targets, false, false)
+	return closeWorkspacesWithProtection(repoPath, targets, false, false, false, protection)
 }
 
 func normalClosePrompt(targets []workspaceInfo) string {

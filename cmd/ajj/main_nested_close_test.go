@@ -115,7 +115,7 @@ func TestCloseHelperRejectsDuplicateTargetsBeforeGraphOrFilesystemEffect(t *test
 		effectCalls++
 		return nil
 	})
-	closed, err := closeWorkspacesWithProtection(t.TempDir(), []workspaceInfo{target, target}, true, true, closeProtectionContext{})
+	closed, err := closeWorkspacesWithProtection(t.TempDir(), []workspaceInfo{target, target}, true, true, false, closeProtectionContext{})
 	if err == nil || !strings.Contains(err.Error(), "duplicate Workspace Handle \"alpha\"") {
 		t.Fatalf("expected close-helper duplicate rejection, closed=%v err=%v", closed, err)
 	}

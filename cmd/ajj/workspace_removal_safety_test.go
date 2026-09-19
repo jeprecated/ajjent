@@ -30,7 +30,7 @@ func TestCloseAndTidyProtectNestedRegisteredWorkspace(t *testing.T) {
 				if mode == "whole-set" {
 					targets = append(targets, childInfo)
 				}
-				_, err = closeWorkspaces(mainPath, targets, mode != "normal", true)
+				_, err = closeWorkspacesWithProtection(mainPath, targets, mode != "normal", true, false, closeProtectionContext{})
 			}
 			if err == nil || !strings.Contains(err.Error(), "contains registered Workspace") {
 				t.Fatalf("expected nested Workspace refusal: %v", err)
@@ -194,10 +194,13 @@ func TestMissingTargetIsForgetOnlyEvenIfPathExists(t *testing.T) {
 		calls = append(calls, strings.Join(args, " "))
 		return nil
 	})
-	_, err := closeWorkspacesWithProtection(t.TempDir(), []workspaceInfo{
+	repoPath := t.TempDir()
+	targets := []workspaceInfo{
 		{Ref: workspaceRef{Handle: "missing"}, Path: file, Missing: true},
 		{Ref: workspaceRef{Handle: "missing-dir"}, Path: root, Missing: true},
-	}, true, true, closeProtectionContext{})
+	}
+	withCloseReviewEvidence(t, repoPath, targets)
+	_, err := closeWorkspacesWithProtection(repoPath, targets, true, true, false, closeProtectionContext{})
 	if err != nil {
 		t.Fatal(err)
 	}

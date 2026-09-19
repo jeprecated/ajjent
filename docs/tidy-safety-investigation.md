@@ -183,11 +183,10 @@ represented conflicts, and mutual protection across the complete closing set.
   inspects it; automatic recovery is deliberately disabled.
 - This is not a filesystem lock. Concurrent writers after the final check,
   ignored files, and files JJ declines to track remain outside the guarantee.
-  Post-Stack Closing remains an outstanding data-loss path: `closeStackInputs`
-  calls `closeWorkspaces` without a `reviewedOperation`, bypassing the new
-  snapshot/review guard. This investigation does **not** claim all Closing paths
-  are fixed. Extending the guard to that confirmation boundary requires a
-  separately scoped change; generic list/Stack behavior remains unchanged.
+  Post-Stack Closing was an outstanding data-loss path in the first two
+  payloads: `closeStackInputs` called `closeWorkspaces` without a
+  `reviewedOperation`. The separately authorized safety-stage follow-up below
+  closes that bypass. Generic list/Stack computation remains unchanged.
 - No integration, installation, release, or live lifecycle cleanup was performed.
 
 ## Independent review correction: snapshot validation is not deletion validation
@@ -244,5 +243,104 @@ Validation after correction:
 
 This correction is a separate descendant of the reviewed payload. No live
 repository commands, integration, installation, or lifecycle operations were
-performed during this follow-up. Post-Stack Closing remains explicitly outside
-this fix, as described in Remaining boundaries above.
+performed during this follow-up. Post-Stack Closing was explicitly outside
+this nesting correction; it is addressed by the subsequent authorized safety
+stage below.
+
+## Authorized safety stage: close the post-Stack bypass
+
+The next authorized stage addresses data safety only, on top of nesting
+correction `897277090cee8d11d785690d7d390a39ef2f919e`. No lifecycle-intent or
+selector UX changes were made, and no live agent repository was inspected or
+mutated in this stage.
+
+### Production caller audit and shared boundary
+
+Before this stage the production paths were:
+
+- `runClose` → `closeWorkspacesWithProtection`, with a reviewed operation.
+- `runTidy` → `tidyWorkspaces` → revalidation → empty-head abandonment →
+  `closeWorkspacesWithProtection`, without a reviewed operation after cleanup.
+- `runStack` → `closeStackInputs` → confirmation → `closeWorkspaces` →
+  `closeWorkspacesWithProtection`, without any snapshot/review binding.
+
+The last path could delete unsnapshotted work and accept changes made during its
+confirmation. A blank `reviewedOperation` also silently bypassed the guard at
+the shared helper itself.
+
+Now all three production paths converge on an **unconditional** final
+snapshot/review guard in `closeWorkspacesWithProtection`. An absent review causes
+the shared helper to establish one before its own prompts, never to skip safety.
+`closeStackInputs` explicitly prepares the review and rechecks complete-batch
+safety **before its first confirmation**, after Stack computation has finished.
+The later outside-layout confirmation uses that same review. No lifecycle
+snapshot was inserted into Stack planning or generic graph inspection.
+
+Tidy's intentional empty-head abandonment now runs immediately after the shared
+final guard and before removal, in the same helper. This removes the old bypass
+without adding a second snapshot after abandonment (which could itself make
+cursors stale). Existing partial-failure diagnostics still report prior
+empty-cursor abandonment. Cancellation with no closed targets returns before
+final cleanup. Force confirmation and repository ownership/containment checks
+are unchanged. The unused `closeWorkspaces` wrapper was removed; there is one
+production removal helper rather than an alternate unguarded route.
+
+### RED evidence
+
+`post_stack_close_safety_test.go` runs the actual `runStack` algorithm with `--yes`
+in disposable real-JJ repositories, then invokes `closeStackInputs`, the same
+production entry point used by the interactive post-Stack offer. This exercises
+the complete graph/lifecycle behavior without mocking JJ; terminal dispatch
+itself is not emulated.
+
+Before the production fix, ten cases failed (6.250s):
+
+```text
+TestPostStackClosePreservesUnrecordedWork/shared.txt:
+  post-Stack close lost unrecorded work ... close=<nil>
+TestPostStackClosePreservesUnrecordedWork/new-work.txt:
+  post-Stack close lost unrecorded work ... close=<nil>
+TestPostStackCloseRejectsConfirmationDrift:
+  prompt-1/{tracked,new-file,graph}: ... drift accepted ... close=<nil>
+  prompt-2/{tracked,new-file,graph}: ... drift accepted ... close=<nil>
+TestSharedClosingHelpersCannotSkipSnapshotSafety:
+  closeWorkspaces: helper bypassed snapshots ... err=<nil>
+  closeWorkspacesWithProtection: helper bypassed snapshots ... err=<nil>
+```
+
+The second prompt is outside-layout consent. Edits are injected at the actual
+confirmation read, after initial inspection, not before the command starts.
+The shared-helper regression now tests both empty and unreviewed contexts against
+the remaining single helper (`TestSharedClosingHelperCannotSkipSnapshotSafety`),
+since the obsolete wrapper was removed.
+
+### GREEN coverage and refactor validation
+
+Additional real-JJ tests verify clean post-Stack closure still succeeds, a
+surviving **non-Main** human parent protects the completed child, cancellation
+and stale candidates preserve Workspaces, and the shared helper rejects edits
+during forced external-consent confirmation without abandoning the reviewed
+payload. Existing normal/forced Close/Tidy drift, original four file-loss,
+nesting, identity, missing-registration, and removal-containment tests remain.
+
+Lower-level filesystem tests use explicit stable registration/operation evidence
+for their mocked JJ calls; their graph-query and side-effect assertions were not
+weakened. The first full run exposed one remaining mock that rejected even
+read-only registration/operation queries for missing targets. That fixture was
+updated to permit review evidence while still rejecting any snapshot or
+abandonment probe of missing Workspaces.
+
+- New post-Stack/shared-helper suite: PASS, 9.329s.
+- Broader affected Close/Tidy/lifecycle/representation suite: PASS, 57.687s.
+- Final focused safety suite: PASS, 22.207s.
+- Final `go test ./...`: PASS, 282.517s.
+- `go vet ./...`: PASS.
+- `gofmt` validation: clean.
+
+All actual Closing paths now use the review guard, but this is **not** a claim
+of atomic filesystem safety. Ignored files, files JJ declines to track, and
+concurrent writes after the last check remain outside the guarantee. Stale
+candidates continue to fail closed with no automatic recovery. Lifecycle intent,
+individual-versus-batch selector feedback, force-toggle behavior, and zero-box
+submission remain for later separately reviewed work. This safety stage stops
+for independent review before implementing those changes.

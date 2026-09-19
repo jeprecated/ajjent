@@ -39,7 +39,8 @@ func TestCloseRepairsReadOnlyCacheWithoutChangingOutsideLinks(t *testing.T) {
 		forgot = strings.Contains(strings.Join(args, " "), "workspace forget cache")
 		return nil
 	})
-	_, err := closeWorkspacesWithProtection(repoPath, []workspaceInfo{{Ref: workspaceRef{Handle: "cache"}, Path: workspace}}, true, true, closeProtectionContext{})
+	withCloseReviewEvidence(t, repoPath, []workspaceInfo{{Ref: workspaceRef{Handle: "cache"}, Path: workspace}})
+	_, err := closeWorkspacesWithProtection(repoPath, []workspaceInfo{{Ref: workspaceRef{Handle: "cache"}, Path: workspace}}, true, true, false, closeProtectionContext{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +147,8 @@ func TestClosePartialFailureReportsCompletedAndUnattemptedTargets(t *testing.T) 
 		}
 		return nil
 	})
-	_, err := closeWorkspacesWithProtection(repoPath, targets, true, true, closeProtectionContext{})
+	withCloseReviewEvidence(t, repoPath, targets)
+	_, err := closeWorkspacesWithProtection(repoPath, targets, true, true, false, closeProtectionContext{})
 	if err == nil || !errors.Is(err, os.ErrPermission) {
 		t.Fatalf("expected retained permission failure: %v", err)
 	}
@@ -299,4 +301,30 @@ func TestTidyPartialFailureReportsPriorEmptyCursorCleanup(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "heads were already abandoned") || !strings.Contains(err.Error(), "failed: blocked") {
 		t.Fatalf("missing earlier mutation report: %v", err)
 	}
+}
+
+// Lower-level filesystem tests mock JJ rather than create a repository. Supply
+// explicit stable review evidence without changing their graph-query responses.
+func withCloseReviewEvidence(t *testing.T, repoPath string, targets []workspaceInfo) {
+	t.Helper()
+	refs := ""
+	hasDefault := false
+	for _, target := range targets {
+		refs += target.Ref.Handle + "\thead\t" + target.Path + "\n"
+		hasDefault = hasDefault || target.Ref.Handle == "default"
+	}
+	if !hasDefault {
+		refs = "default\tmain\t" + repoPath + "\n" + refs
+	}
+	original := commandCaptureFn
+	withCommandCapture(t, func(name string, args ...string) (string, error) {
+		query := strings.Join(args, " ")
+		if name == "jj" && strings.Contains(query, "workspace list") {
+			return refs, nil
+		}
+		if name == "jj" && strings.Contains(query, "op log") {
+			return "reviewed-operation\n", nil
+		}
+		return original(name, args...)
+	})
 }

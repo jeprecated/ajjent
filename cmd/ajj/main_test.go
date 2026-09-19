@@ -644,10 +644,11 @@ func TestForcedTidyNeverAbandonsMissingWorkspaceChanges(t *testing.T) {
 		return "", nil
 	})
 	withCommandToStderr(t, func(name string, args ...string) error { return nil })
+	withCloseReviewEvidence(t, mainPath, []workspaceInfo{{Ref: workspaceRef{Handle: "missing"}, Path: missingPath, Missing: true}, {Ref: workspaceRef{Handle: "present"}, Path: presentPath}})
 	_, err := closeWorkspacesWithProtection(mainPath, []workspaceInfo{
 		{Ref: workspaceRef{Handle: "missing"}, Path: missingPath, Missing: true},
 		{Ref: workspaceRef{Handle: "present"}, Path: presentPath},
-	}, true, true, closeProtectionContext{})
+	}, true, true, false, closeProtectionContext{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1599,10 +1600,11 @@ func TestCloseWorkspacesKeepsJJRegistrationWhenDirectoryRemovalFails(t *testing.
 	})
 
 	withCommandCapture(t, func(name string, args ...string) (string, error) { return "", nil })
+	withCloseReviewEvidence(t, repoPath, []workspaceInfo{{Ref: workspaceRef{Handle: "delta"}, Path: workspacePath}})
 	_, err := closeWorkspacesWithProtection(repoPath, []workspaceInfo{{
 		Ref:  workspaceRef{Handle: "delta"},
 		Path: workspacePath,
-	}}, true, true, closeProtectionContext{})
+	}}, true, true, false, closeProtectionContext{})
 	if err == nil {
 		t.Fatal("expected directory removal to fail")
 	}
@@ -1626,10 +1628,11 @@ func TestCloseWorkspacesReportsRecoveryWhenJJForgetFails(t *testing.T) {
 	})
 
 	withCommandCapture(t, func(name string, args ...string) (string, error) { return "", nil })
+	withCloseReviewEvidence(t, repoPath, []workspaceInfo{{Ref: workspaceRef{Handle: "delta"}, Path: workspacePath}})
 	_, err := closeWorkspacesWithProtection(repoPath, []workspaceInfo{{
 		Ref:  workspaceRef{Handle: "delta"},
 		Path: workspacePath,
-	}}, true, true, closeProtectionContext{})
+	}}, true, true, false, closeProtectionContext{})
 	if err == nil {
 		t.Fatal("expected jj forget to fail")
 	}
@@ -2492,10 +2495,11 @@ func TestCloseWorkspacesConfirmsExternalDeletionOnce(t *testing.T) {
 		return nil
 	})
 
-	_, err := closeWorkspaces(repoRoot, []workspaceInfo{
+	withCloseReviewEvidence(t, repoRoot, []workspaceInfo{{Ref: workspaceRef{Handle: "alpha"}, Path: alphaPath}, {Ref: workspaceRef{Handle: "bravo"}, Path: bravoPath}})
+	_, err := closeWorkspacesWithProtection(repoRoot, []workspaceInfo{
 		{Ref: workspaceRef{Handle: "alpha"}, Path: alphaPath, External: true},
 		{Ref: workspaceRef{Handle: "bravo"}, Path: bravoPath, External: true},
-	}, false, false)
+	}, false, false, false, closeProtectionContext{})
 	if err != nil {
 		t.Fatalf("expected one confirmation to cover all external deletes, got %v", err)
 	}
@@ -2849,7 +2853,8 @@ func TestCloseWorkspacesProtectsRepositoryOwnerBeforeMutation(t *testing.T) {
 	}
 	targets := []workspaceInfo{{Ref: workspaceRef{Handle: "default"}, Path: defaultPath}}
 
-	closed, err := closeWorkspacesWithProtection(workspacePath, targets, true, true, closeProtectionContext{})
+	withCloseReviewEvidence(t, workspacePath, targets)
+	closed, err := closeWorkspacesWithProtection(workspacePath, targets, true, true, false, closeProtectionContext{})
 	if err == nil || !strings.Contains(err.Error(), "repository-owning Workspace") {
 		t.Fatalf("expected repository-owning Workspace protection, got closed=%v err=%v", closed, err)
 	}

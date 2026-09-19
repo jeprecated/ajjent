@@ -82,3 +82,25 @@ func revalidateCloseReview(repoPath string, targets []workspaceInfo, reviewedOpe
 	}
 	return newCloseProtectionContext(repoPath, targets)
 }
+
+// prepareCloseReview is for already-selected closing targets. It does not run
+// during Stack computation or generic listing. Validate deletion restrictions
+// before snapshotting, then bind every later confirmation to the resulting view.
+func prepareCloseReview(repoPath string, targets []workspaceInfo) (closeProtectionContext, error) {
+	protection, err := newCloseProtectionContext(repoPath, targets)
+	if err != nil {
+		return closeProtectionContext{}, err
+	}
+	if err := validateWorkspaceRemovalTargets(repoPath, targets, protection); err != nil {
+		return closeProtectionContext{}, err
+	}
+	if err := snapshotCloseCandidates(repoPath, targets); err != nil {
+		return closeProtectionContext{}, err
+	}
+	protection, err = newCloseProtectionContext(repoPath, targets)
+	if err != nil {
+		return closeProtectionContext{}, err
+	}
+	protection.reviewedOperation, err = currentOperationID(repoPath)
+	return protection, err
+}
