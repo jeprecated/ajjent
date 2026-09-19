@@ -11,3 +11,7 @@
 - `ajj tidy --force` exposes the same behavior outside the selector. `--force --yes` applies it to every non-main, non-missing Workspace without confirmation.
 - The Main and Current Workspaces remain unavailable.
 - Missing Workspace registrations start selected and may be forgotten by ordinary Tidying. `jj workspace forget` preserves their commits as visible heads, so this cleanup does not require Forced Tidying.
+
+## Superseded selection defaults
+
+ADR 0015 replaces automatic selection with explicit Keep/Disposable policy. Forced Tidying remains available, but force never overrides Keep for automatic selection; missing registrations require manual selection.

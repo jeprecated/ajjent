@@ -61,7 +61,7 @@ func TestCloseRepairsReadOnlyCacheWithoutChangingOutsideLinks(t *testing.T) {
 func TestTidyExternalCancellationPrecedesAllAbandonment(t *testing.T) {
 	mainPath, workspace := t.TempDir(), t.TempDir()
 	createJJWorkspaceLink(t, mainPath, workspace)
-	infos := []workspaceInfo{{Ref: workspaceRef{Handle: "default"}, Path: mainPath, Main: true}, {Ref: workspaceRef{Handle: "alpha"}, Path: workspace, External: true, RepresentedElsewhere: true}}
+	infos := []workspaceInfo{{Policy: policyDisposable, Ref: workspaceRef{Handle: "default"}, Path: mainPath, Main: true}, {Policy: policyDisposable, Ref: workspaceRef{Handle: "alpha"}, Path: workspace, External: true, RepresentedElsewhere: true}}
 	withCommandCapture(t, func(_ string, args ...string) (string, error) {
 		if strings.Contains(strings.Join(args, " "), "op log") {
 			return "reviewed-operation\n", nil
@@ -277,7 +277,7 @@ func TestTidyPartialFailureReportsPriorEmptyCursorCleanup(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(parent, 0755) })
 	createJJWorkspaceLink(t, mainPath, workspace)
-	infos := []workspaceInfo{{Ref: workspaceRef{Handle: "default"}, Path: mainPath, Main: true}, {Ref: workspaceRef{Handle: "blocked"}, Path: workspace, RepresentedElsewhere: true}}
+	infos := []workspaceInfo{{Policy: policyDisposable, Ref: workspaceRef{Handle: "default"}, Path: mainPath, Main: true}, {Policy: policyDisposable, Ref: workspaceRef{Handle: "blocked"}, Path: workspace, RepresentedElsewhere: true}}
 	withCommandCapture(t, func(_ string, args ...string) (string, error) {
 		if strings.Contains(strings.Join(args, " "), "op log") {
 			return "reviewed-operation\n", nil

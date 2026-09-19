@@ -6,16 +6,14 @@ import (
 	"testing"
 )
 
-// Characterization, not a changed lifecycle policy: a surviving disposable
-// descendant can protect a human ancestor even though Main lacks its payload.
+// Graph safety remains unchanged: a surviving Disposable descendant can protect
+// a human ancestor, but Keep intent excludes that ancestor from automatic Tidy.
 func TestTidyHumanAncestorProtectedOnlyByDisposableDescendant(t *testing.T) {
 	mainPath, _, childPath := setupMutuallyRepresentedCloseRepo(t)
 	runJJ(t, "-R", childPath, "new", "alpha@")
 	writeTrackedCommit(t, childPath, "child.txt", "unfinished child work")
-	infos, _, err := loadWorkspaceInfos(mainPath, mustReadConfigForNestedClose(t, mainPath), "proj")
-	if err != nil {
-		t.Fatal(err)
-	}
+	markDisposableForTest(t, mainPath, "bravo")
+	infos := policyInfosForTest(t, mainPath, "proj")
 	human := mapInfosByHandle(infos)["alpha"]
 	child := mapInfosByHandle(infos)["bravo"]
 	if human.Ahead != 1 || human.Empty || human.Stacked || !isClosable(human) || isClosable(child) {
@@ -31,11 +29,10 @@ func TestTidyHumanAncestorProtectedOnlyByDisposableDescendant(t *testing.T) {
 		}
 	}
 	items := mapSelectorItemsByHandle(selectorItemsForTidy(infos, false))
-	if !items["alpha"].Selected || items["bravo"].Selected {
-		t.Fatal("characterization: non-Current human ancestor is selected; unique child is not")
+	if items["alpha"].Selected || items["bravo"].Selected {
+		t.Fatal("Keep human ancestor must not be automatically selected even when a descendant protects it")
 	}
-	// This lifecycle recommendation is permitted by current graph safety, not
-	// evidence that the human Workspace has finished its task.
+	// Keep intent does not weaken batch safety if both are deliberately selected.
 	unsafe, err := normallyUnclosableTargets(mainPath, []workspaceInfo{human, child})
 	if err != nil || len(unsafe) != 2 {
 		t.Fatalf("complete closing set must not protect itself: unsafe=%v err=%v", unsafe, err)
@@ -46,10 +43,8 @@ func TestTidyCompletedChildProtectedByHumanParentBeforeMainIntegration(t *testin
 	mainPath, humanPath, childPath := setupMutuallyRepresentedCloseRepo(t)
 	writeTrackedCommit(t, childPath, "child.txt", "completed child work")
 	runJJ(t, "-R", humanPath, "new", "bravo@-")
-	infos, _, err := loadWorkspaceInfos(humanPath, mustReadConfigForNestedClose(t, mainPath), "proj")
-	if err != nil {
-		t.Fatal(err)
-	}
+	markDisposableForTest(t, mainPath, "bravo")
+	infos := policyInfosForTest(t, humanPath, "proj")
 	byHandle := mapInfosByHandle(infos)
 	child := byHandle["bravo"]
 	if child.Ahead != 2 || child.Stacked || !isClosable(child) {

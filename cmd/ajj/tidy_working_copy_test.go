@@ -17,6 +17,7 @@ func TestNormalLifecyclePreservesUnsnapshottedFiles(t *testing.T) {
 			t.Run(command+"/"+filename, func(t *testing.T) {
 				mainPath, humanPath, _ := setupMutuallyRepresentedCloseRepo(t)
 				runJJ(t, "-R", mainPath, "new", "alpha@-")
+				markDisposableForTest(t, mainPath, "alpha", "bravo")
 				infos, _, err := loadWorkspaceInfos(mainPath, mustReadConfigForNestedClose(t, mainPath), "proj")
 				if err != nil {
 					t.Fatal(err)
@@ -73,6 +74,7 @@ func TestLifecycleAbortsEditsMadeDuringConfirmation(t *testing.T) {
 				t.Run(fmt.Sprintf("%s/force=%v/%s", command, force, drift), func(t *testing.T) {
 					mainPath, humanPath, _ := setupMutuallyRepresentedCloseRepo(t)
 					runJJ(t, "-R", mainPath, "new", "alpha@-")
+					markDisposableForTest(t, mainPath, "alpha", "bravo")
 					payload := ""
 					if force {
 						writeTrackedCommit(t, humanPath, "reviewed.txt", "reviewed unique work")
@@ -128,6 +130,7 @@ func TestLifecycleFailsClosedOnRealStaleCandidate(t *testing.T) {
 		t.Run(command, func(t *testing.T) {
 			mainPath, humanPath, _ := setupMutuallyRepresentedCloseRepo(t)
 			runJJ(t, "-R", mainPath, "new", "alpha@-")
+			markDisposableForTest(t, mainPath, "alpha", "bravo")
 			writeTrackedCommit(t, mainPath, "main-only.txt", "advance main tree")
 			runJJ(t, "-R", mainPath, "rebase", "-r", "alpha@", "-d", "default@")
 			// Even a user configuration enabling stale recovery must not silently

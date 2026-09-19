@@ -14,8 +14,10 @@ func TestLifecycleSelectionAllowsUnsafeParentWithClosableNestedChild(t *testing.
 		t.Run(command, func(t *testing.T) {
 			mainPath, parent, _ := setupMutuallyRepresentedCloseRepo(t)
 			writeTrackedCommit(t, parent, ".gitignore", "child/")
+			markDisposableForTest(t, mainPath, "alpha", "bravo")
 			child := filepath.Join(parent, "child")
 			runJJ(t, "-R", mainPath, "workspace", "add", "--name", "child", "--revision", "alpha@-", child)
+			markDisposableForTest(t, mainPath, "child")
 			unrecorded := strings.HasSuffix(command, "-unrecorded")
 			if unrecorded {
 				// Do not snapshot the parent here. It initially looks safe, and

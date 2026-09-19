@@ -98,6 +98,7 @@ type workspaceRef struct {
 }
 
 type workspaceInfo struct {
+	Policy               string
 	Ref                  workspaceRef
 	Path                 string
 	Missing              bool
@@ -180,6 +181,10 @@ func run(args []string) error {
 		return runClose(commandArgs)
 	case "tidy":
 		return runTidy(commandArgs)
+	case "keep":
+		return runWorkspacePolicy(commandArgs, policyKeep)
+	case "disposable":
+		return runWorkspacePolicy(commandArgs, policyDisposable)
 	case "stack":
 		return runStack(commandArgs)
 	case "undo":
@@ -258,7 +263,7 @@ func countRepoFlags(args []string) int {
 
 func commandAcceptsRepoFlag(command string) bool {
 	switch command {
-	case "init", "create", "open", "list", "main", "workspaces-subdir", "close", "tidy", "stack", "undo", "integrate", "move-to-main", "catch-up":
+	case "init", "create", "open", "list", "main", "workspaces-subdir", "close", "tidy", "keep", "disposable", "stack", "undo", "integrate", "move-to-main", "catch-up":
 		return true
 	default:
 		return false
@@ -283,6 +288,8 @@ func printUsage(w io.Writer) {
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "create [source] [handle]", 18), "Create a Workspace, or reconcile strict machine state with --request-json")
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "open [handle]", 18), "Open an existing Workspace; with no handle, use the selector")
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "close [handle...]", 18), "Close Workspaces represented by surviving registered Workspace heads")
+	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "keep <handle...>", 18), "Persist Keep policy (never automatically tidy)")
+	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "disposable <handle...>", 18), "Opt into automatic Tidy; normal safety still applies")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, s.Section.Render("Stacking:"))
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "stack [handle...]", 18), "Stack selected Workspaces into the target Workspace; with no handles, use the selector")
@@ -295,7 +302,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "list", 18), "List Workspaces with status and markers")
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "main", 18), "Print the Main Workspace path")
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "workspaces-subdir", 18), "Create and print this Project's Workspaces subdirectory")
-	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "tidy", 18), "Close represented non-Current Workspaces and remove empty leftovers")
+	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "tidy", 18), "Tidy eligible Disposable Workspaces; Keep requires explicit selection")
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "shell-init", 18), "Print shell integration for cd-on-open/main")
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "capabilities --json", 18), "Print bounded machine protocol capabilities")
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "version", 18), "Print the ajj version (also --version)")
@@ -514,16 +521,17 @@ func runCreate(args []string) error {
 	}
 	fs := flag.NewFlagSet("create", flag.ContinueOnError)
 	var repoRootOverride, projectOverride, rootOverride, revision, machineRequestHelp string
-	var envrc, direnvAllow, machineJSONHelp bool
+	var envrc, direnvAllow, machineJSONHelp, disposable bool
 	fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
 	fs.StringVar(&projectOverride, "project", "", "Project override")
 	fs.StringVar(&rootOverride, "workspaces-root", "", "Workspaces root override")
 	fs.StringVar(&revision, "revision", "", "base the new Workspace on an exact full commit id instead of jj's default")
+	fs.BoolVar(&disposable, "disposable", false, "opt this Workspace into automatic Tidy (safety still required)")
 	fs.BoolVar(&envrc, "envrc", false, "create .envrc in the new Workspace")
 	fs.BoolVar(&direnvAllow, "direnv-allow", false, "run direnv allow for the new Workspace")
 	fs.StringVar(&machineRequestHelp, "request-json", "", "machine mode: read a strict create request from PATH or -")
 	fs.BoolVar(&machineJSONHelp, "json", false, "machine mode: write one bounded state receipt")
-	if handled, err := parseCommandFlags(fs, args, "ajj create [source] [handle] [options]", "Create a new Workspace and print its path. With two Handles, inherit the source Workspace's current content."); handled || err != nil {
+	if handled, err := parseCommandFlags(fs, args, "ajj create [source] [handle] [options]", "Create a new Workspace (Keep by default) and print its path. Use --disposable to opt into automatic Tidy. With two Handles, inherit the source Workspace's current content."); handled || err != nil {
 		return err
 	}
 	if machineRequestHelp != "" || machineJSONHelp {
@@ -579,6 +587,9 @@ func runCreate(args []string) error {
 			return err
 		}
 		if _, ok := inUse[handle]; ok {
+			if disposable {
+				return fmt.Errorf("Workspace %q already exists; use `ajj disposable %s` to change its policy", handle, handle)
+			}
 			if !canUseTUI() {
 				return fmt.Errorf("Workspace %q already exists; use `ajj open %s`", handle, handle)
 			}
@@ -606,7 +617,26 @@ func runCreate(args []string) error {
 		}
 		repoRoot = sourcePath
 	}
-	return createWorkspace(repoRoot, cfg, project, handle, revision, envrc, direnvAllow)
+	if err := createWorkspace(repoRoot, cfg, project, handle, revision, envrc, direnvAllow); err != nil {
+		return err
+	}
+	if disposable {
+		refs, err := listWorkspaceRefs(repoRoot)
+		if err != nil {
+			return err
+		}
+		for _, ref := range refs {
+			if ref.Handle == handle {
+				info := workspaceInfo{Ref: ref, Path: filepath.Join(cfg.WorkspacesRoot, project, handle), Main: handle == cfg.MainWorkspace}
+				if err := setWorkspacePolicies(repoRoot, project, []workspaceInfo{info}, policyDisposable); err != nil {
+					return fmt.Errorf("Workspace created; Disposable policy was not saved: %w", err)
+				}
+				return nil
+			}
+		}
+		return fmt.Errorf("created Workspace %q not registered", handle)
+	}
+	return nil
 }
 
 func createWorkspace(repoRoot string, cfg config, project string, handle string, revision string, envrc bool, direnvAllow bool) error {
@@ -1079,7 +1109,7 @@ func runTidy(args []string) error {
 	fs.StringVar(&rootOverride, "workspaces-root", "", "Workspaces root override")
 	fs.BoolVar(&force, "force", false, "forced tidy: abandon unique mutable changes before closing")
 	fs.BoolVar(&yes, "yes", false, "skip confirmation")
-	if handled, err := parseCommandFlags(fs, args, "ajj tidy [options]", "Close non-Current Workspaces represented by surviving registered Workspace heads, optionally abandoning unique mutable changes with --force, then remove empty leftovers."); handled || err != nil {
+	if handled, err := parseCommandFlags(fs, args, "ajj tidy [options]", "Automatically select only eligible Disposable non-Current Workspaces represented by surviving registered Workspace heads; Keep and missing registrations require manual Tidy selection. --force relaxes graph safety, never Keep policy. Remove empty leftovers after completion."); handled || err != nil {
 		return err
 	}
 	repoRoot, cfg, project, err := commandContext(repoRootOverride, projectOverride, rootOverride)
@@ -1088,6 +1118,9 @@ func runTidy(args []string) error {
 	}
 	infos, _, err := loadWorkspaceInfos(repoRoot, cfg, project)
 	if err != nil {
+		return err
+	}
+	if err := loadWorkspacePolicies(repoRoot, project, infos); err != nil {
 		return err
 	}
 	candidates := []workspaceInfo{}
@@ -1103,7 +1136,13 @@ func runTidy(args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := loadWorkspacePolicies(repoRoot, project, infos); err != nil {
+		return err
+	}
 	if err := tidyWorkspaces(repoRoot, cfg, project, infos, force, yes); err != nil {
+		if errors.Is(err, errTidyCancelled) {
+			return nil
+		}
 		return err
 	}
 	active := make(map[string]struct{}, len(infos))
@@ -1149,6 +1188,8 @@ func runTidy(args []string) error {
 	return nil
 }
 
+var errTidyCancelled = errors.New("Tidy cancelled or no rows selected")
+
 func tidyWorkspaces(repoRoot string, cfg config, project string, infos []workspaceInfo, force bool, yes bool) error {
 	targets := tidyTargets(infos, force)
 	if err := validateUniqueCloseTargets(targets); err != nil {
@@ -1161,9 +1202,23 @@ func tidyWorkspaces(repoRoot string, cfg config, project string, infos []workspa
 	interactive := !yes && canUseTUI()
 	if interactive {
 		items := selectorItemsForTidy(infos, force)
-		selected, opts, err := runSelector(selectorOptions{Title: "Tidy Workspaces", Mode: selectorMulti, Items: items, Tidy: true, ForceEnabled: force, AllowForceToggle: true})
+		reviewRepo := repoRoot
+		if main, ok := mapInfosByHandle(infos)[cfg.MainWorkspace]; ok && !main.Missing {
+			reviewRepo = main.Path
+		}
+		review, err := tidyGraphReview(reviewRepo, infos)
 		if err != nil {
 			return err
+		}
+		byPolicyHandle := mapInfosByHandle(infos)
+		selected, opts, err := runSelector(selectorOptions{Title: "Tidy Workspaces", Mode: selectorMulti, Items: items, Tidy: true, ForceEnabled: force, AllowForceToggle: true, ReviewTidy: review, SetPolicy: func(handle, policy string) error {
+			return setWorkspacePolicies(repoRoot, project, []workspaceInfo{byPolicyHandle[handle]}, policy)
+		}})
+		if err != nil {
+			return err
+		}
+		if len(selected) == 0 {
+			return errTidyCancelled
 		}
 		force = opts.ForceEnabled
 		byHandle := mapInfosByHandle(infos)
@@ -1191,18 +1246,7 @@ func tidyWorkspaces(repoRoot string, cfg config, project string, infos []workspa
 		return err
 	}
 	if !force && len(unsafeTargets) > 0 {
-		unsafe := make(map[string]struct{}, len(unsafeTargets))
-		for _, info := range unsafeTargets {
-			unsafe[info.Ref.Handle] = struct{}{}
-		}
-		filtered := targets[:0]
-		for _, info := range targets {
-			if _, found := unsafe[info.Ref.Handle]; !found {
-				filtered = append(filtered, info)
-			}
-		}
-		targets = filtered
-		unsafeTargets = nil
+		return fmt.Errorf("Tidy batch blocked: %s not represented outside the complete closing set; uncheck a protector or target and review again", workspaceSummary(unsafeTargets))
 	}
 	if len(targets) == 0 {
 		fmt.Fprintln(stderrWriter, cliStylesForWriter(stderrWriter).Muted.Render("No tidy Workspaces selected."))
@@ -1255,7 +1299,7 @@ func tidyWorkspaces(repoRoot string, cfg config, project string, infos []workspa
 func tidyTargets(infos []workspaceInfo, force bool) []workspaceInfo {
 	targets := []workspaceInfo{}
 	for _, info := range infos {
-		if info.Main || info.Current {
+		if info.Main || info.Current || info.Policy != policyDisposable {
 			continue
 		}
 		if info.Missing || force || isClosable(info) {
@@ -5192,18 +5236,22 @@ const (
 )
 
 type selectorItem struct {
-	Safety   string
-	Handle   string
-	Path     string
-	Status   string
-	Markers  string
-	Role     string
-	Disabled bool
-	All      bool
-	Selected bool
+	Policy           string
+	NormallyClosable bool
+	Safety           string
+	Handle           string
+	Path             string
+	Status           string
+	Markers          string
+	Role             string
+	Disabled         bool
+	All              bool
+	Selected         bool
 }
 
 type selectorOptions struct {
+	SetPolicy        func(string, string) error
+	ReviewTidy       func([]selectorItem, bool) (map[string]string, error)
 	Title            string
 	Mode             selectorMode
 	Items            []selectorItem
@@ -5224,6 +5272,9 @@ type selectorResult struct {
 }
 
 type selectorModel struct {
+	notice        string
+	problem       string
+	evidence      map[string]string
 	opts          selectorOptions
 	cursor        int
 	selected      map[int]bool
@@ -5246,6 +5297,7 @@ func runSelector(opts selectorOptions) ([]selectorItem, selectorOptions, error) 
 			}
 		}
 	}
+	model.refreshTidyReview()
 	program := tea.NewProgram(model, tea.WithInput(stdinReader), tea.WithOutput(stderrWriter))
 	out, err := program.Run()
 	if err != nil {
@@ -5299,7 +5351,18 @@ func (m selectorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case "enter":
+			m.refreshTidyReview()
+			if m.opts.Tidy && m.problem != "" {
+				return m, nil
+			}
 			return m.submit(), tea.Quit
+		case "p":
+			if m.opts.Tidy {
+				m.toggleTidyPolicy()
+			} else {
+				m.filter += "p"
+				m.cursor = 0
+			}
 		case "f":
 			if m.opts.AllowForceToggle {
 				m.opts.ForceEnabled = !m.opts.ForceEnabled
@@ -5309,11 +5372,14 @@ func (m selectorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						continue
 					}
 					if m.opts.Tidy {
-						item.Disabled = itemHasMarker(*item, "current") || (!m.opts.ForceEnabled && item.Status != "empty" && item.Status != "stacked" && item.Status != "missing")
+						item.Disabled = itemHasMarker(*item, "current") || itemHasMarker(*item, "main") || (!m.opts.ForceEnabled && !item.NormallyClosable && item.Status != "missing")
 					} else if m.opts.ForceEnabled {
 						item.Disabled = item.Status == "missing"
 					} else {
-						item.Disabled = item.Status != "empty" && item.Status != "stacked"
+						item.Disabled = item.Status == "missing" || !item.NormallyClosable
+					}
+					if item.Disabled {
+						delete(m.selected, i)
 					}
 				}
 			}
@@ -5340,6 +5406,7 @@ func (m selectorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	}
+	m.refreshTidyReview()
 	return m, nil
 }
 
@@ -5428,6 +5495,10 @@ func (m selectorModel) submit() selectorModel {
 	selectedItems := m.selectedItems()
 	if len(selectedItems) > 0 {
 		m.result = selectorResult{Items: selectedItems, ForceEnabled: m.opts.ForceEnabled, StackOptions: m.opts.StackOptions}
+		return m
+	}
+	if m.opts.Tidy {
+		m.result = selectorResult{ForceEnabled: m.opts.ForceEnabled}
 		return m
 	}
 	if item.All {
@@ -5554,6 +5625,22 @@ func (m selectorModel) View() string {
 		}
 		fmt.Fprintln(&b, clipSelectorLine(line, m.width))
 	}
+	if m.opts.Tidy {
+		detail := "No Workspace highlighted"
+		if len(visible) > 0 {
+			item := m.opts.Items[visible[cursor]]
+			detail = item.Handle + ": " + m.evidence[item.Handle]
+		}
+		fmt.Fprintln(&b, clipSelectorLine(styles.Help.Render(detail), m.width))
+		message := m.notice
+		if m.problem != "" {
+			message = m.problem
+		}
+		if message == "" {
+			message = "Keep is never automatic; Space explicitly selects. p persists policy even on cancel."
+		}
+		fmt.Fprintln(&b, clipSelectorLine(styles.Help.Render(message), m.width))
+	}
 	fmt.Fprintln(&b, clipSelectorLine(styles.Help.Render(selectorLegend(m.opts)), m.width))
 	footer := "↑/↓ move  type filter  enter choose  q quit"
 	if m.opts.Mode == selectorMulti {
@@ -5561,6 +5648,9 @@ func (m selectorModel) View() string {
 	}
 	if m.opts.AllowForceToggle {
 		footer += fmt.Sprintf("  f force:%v", m.opts.ForceEnabled)
+	}
+	if m.opts.Tidy {
+		footer += "  p Keep/Disposable (persist)"
 	}
 	if m.opts.AllowRoleToggle {
 		footer += "  a toggle payload/follow-only"
@@ -5587,6 +5677,9 @@ func (m selectorModel) selectorItemRows() int {
 		return 0
 	}
 	chromeRows := 4 // title, hint, legend, and footer
+	if m.opts.Tidy {
+		chromeRows += 2
+	}
 	if m.filter != "" {
 		chromeRows++
 	}
@@ -5608,6 +5701,7 @@ func selectorViewport(visible []int, cursor int, limit int) ([]int, int) {
 }
 
 type selectorColumnWidths struct {
+	Policy  int
 	Safety  int
 	Handle  int
 	Status  int
@@ -5631,12 +5725,17 @@ func selectorColumnWidthsForItems(items []selectorItem, visible []int) selectorC
 		widths.Status = max(widths.Status, lipgloss.Width(item.Status))
 		widths.Markers = max(widths.Markers, lipgloss.Width(item.Markers))
 		widths.Safety = max(widths.Safety, lipgloss.Width(item.Safety))
+		widths.Policy = max(widths.Policy, lipgloss.Width(item.Policy))
 	}
 	return widths
 }
 
 func formatSelectorItemLine(pointer string, mark string, item selectorItem, widths selectorColumnWidths) string {
-	line := pointer + mark + padVisible(item.Handle, widths.Handle) + " " + padVisible(item.Status, widths.Status) + " " + padVisible(item.Markers, widths.Markers)
+	line := pointer + mark
+	if widths.Policy > 0 {
+		line += padVisible(item.Policy, widths.Policy) + " "
+	}
+	line += padVisible(item.Handle, widths.Handle) + " " + padVisible(item.Status, widths.Status) + " " + padVisible(item.Markers, widths.Markers)
 	if widths.Safety > 0 {
 		line += " " + padVisible(item.Safety, widths.Safety)
 	}
@@ -5654,7 +5753,7 @@ func selectorLegend(opts selectorOptions) string {
 		return "status: only Workspaces with no unique commits and behind Main are selected by default; uncheck any to leave alone"
 	}
 	if opts.Tidy {
-		return "status: Main-relative; safety: individually Represented Elsewhere = safe-to-close; complete closing set rechecked on submit; non-Current and missing registrations start selected; f enables Forced Tidying"
+		return "Status: Main-relative. Safety: Represented Elsewhere; selected closing set cannot protect itself. Only Disposable rows start checked; f enables Forced Tidying."
 	}
 	if opts.AllDefault {
 		return "status: unstacked/conflict = stack-relevant; stacked/empty/missing = shown for context"
@@ -5676,7 +5775,7 @@ func selectorHint(opts selectorOptions) string {
 		return "Choose Workspaces to move to the Main Workspace line. Movable rows start checked; press space to leave one alone."
 	}
 	if opts.Tidy {
-		return "Choose represented Workspaces and missing registrations to tidy. Safe non-Current rows start checked; the complete closing set cannot protect itself. Press f for Forced Tidying."
+		return "Choose Workspaces to tidy. Keep is manual-only; eligible non-Current Disposable rows start checked. Space selects; p persists policy; f enables Forced Tidying."
 	}
 	if opts.AllDefault {
 		return "Choose Stack Inputs. The All row submits every stack-relevant Workspace only when no boxes are checked. Disabled rows are shown for context."
@@ -5691,7 +5790,7 @@ func (m selectorModel) visibleItems() []int {
 	needle := strings.ToLower(strings.TrimSpace(m.filter))
 	var out []int
 	for i, item := range m.opts.Items {
-		if needle == "" || strings.Contains(strings.ToLower(item.Handle+" "+item.Path+" "+item.Status+" "+item.Markers+" "+item.Safety), needle) {
+		if needle == "" || strings.Contains(strings.ToLower(item.Handle+" "+item.Path+" "+item.Status+" "+item.Markers+" "+item.Safety+" "+item.Policy), needle) {
 			out = append(out, i)
 		}
 	}
@@ -5723,7 +5822,7 @@ func selectorItemsForClose(infos []workspaceInfo, force bool) []selectorItem {
 			continue
 		}
 		disabled := info.Missing || (!force && !isClosable(info))
-		items = append(items, selectorItem{Handle: info.Ref.Handle, Path: info.Path, Status: statusLabel(info), Safety: workspaceCloseSafetyLabel(info), Markers: strings.Join(markers(info), ","), Disabled: disabled})
+		items = append(items, selectorItem{Handle: info.Ref.Handle, Path: info.Path, Status: statusLabel(info), Safety: workspaceCloseSafetyLabel(info), NormallyClosable: isClosable(info), Markers: strings.Join(markers(info), ","), Disabled: disabled})
 	}
 	return items
 }
@@ -5760,7 +5859,7 @@ func selectorItemsForTidy(infos []workspaceInfo, force bool) []selectorItem {
 		}
 		tidy := isClosable(info) || info.Missing
 		disabled := info.Current || (!force && !tidy)
-		items = append(items, selectorItem{Handle: info.Ref.Handle, Path: info.Path, Status: statusLabel(info), Safety: workspaceCloseSafetyLabel(info), Markers: strings.Join(markers(info), ","), Disabled: disabled, Selected: tidy && !info.Current})
+		items = append(items, selectorItem{Handle: info.Ref.Handle, Path: info.Path, Status: statusLabel(info), Policy: emptyDefault(info.Policy, policyKeep), Safety: workspaceCloseSafetyLabel(info), NormallyClosable: isClosable(info), Markers: strings.Join(markers(info), ","), Disabled: disabled, Selected: info.Policy == policyDisposable && (tidy || force) && !info.Current})
 	}
 	return items
 }
@@ -5915,7 +6014,7 @@ func versionString() string {
 // shell-init and init do not touch jj and must not trigger the check.
 func commandNeedsJJ(command string) bool {
 	switch command {
-	case "create", "open", "list", "main", "workspaces-subdir", "close", "tidy", "stack", "undo", "integrate", "move-to-main", "catch-up":
+	case "create", "open", "list", "main", "workspaces-subdir", "close", "tidy", "keep", "disposable", "stack", "undo", "integrate", "move-to-main", "catch-up":
 		return true
 	default:
 		return false

@@ -120,7 +120,7 @@ Repo-aware commands can target another checkout with either the global form `ajj
 
 ### Workspace lifecycle
 
-- `ajj create [handle]` — create a Workspace and print its path. Without a Handle, picks one from `workspace_handles`. Materializes configured **Assimilated paths**: repo-relative local files, directories, or globs shared into Workspaces by symlink.
+- `ajj create [handle]` — create a **Keep** Workspace and print its path. Add `--disposable` to opt the new Workspace into automatic Tidy. Without a Handle, picks one from `workspace_handles`. Materializes configured **Assimilated paths**: repo-relative local files, directories, or globs shared into Workspaces by symlink.
 - `ajj create <source> <handle>` — create a child of an existing Workspace without opening it first. Includes the source's current working-copy content, including uncommitted edits, and prints the new Workspace path. For example, `ajj create web api` starts `api` from `web`. Cannot be combined with `--revision`.
 - `ajj create [handle] --revision <full-commit-id>` — base the new Workspace on an exact, immutable commit instead of jj's default. The value must be a full 40-character lowercase hexadecimal commit id; it is resolved against the selected repo before anything is created, passed straight through to `jj workspace add --revision`, and verified by read-back so the new working-copy change has exactly that commit as parent (on mismatch the half-created Workspace is cleaned up and the command fails). To inherit a source Workspace's dirty content, first capture its exact current commit (for example `jj -R <source> log -r @ --no-graph -T commit_id`) and pass that id.
 - `ajj create --repo PATH --request-json PATH|- --json` — strict machine create/ensure. cwd/`--repo` is the Current Workspace target; the request asserts its exact Handle/head and names one child while Ajj configuration owns the destination. Replaying the request reconciles desired provider state and returns `ready`, `partial`, `not-created`, or `conflict`. By default it does **not** prove which actor created a matching Workspace. The opt-in `noCleanup` mode below requires retained creation evidence; neither mode advertises `recoverByOperationId`.
@@ -154,6 +154,9 @@ Both receipt schemas echo the selected option, bound by `evidenceDigest`. Safe m
 Persist and replay exact request bytes; never silently remove the option or alter the request to bypass a conflict. Keep collector setup disabled or provider-local files ignored; safe creation still performs configured file setup, but not `direnv allow`. It creates `.envrc`/links exclusively and preserves existing regular files (even identical) or mismatching links as setup conflicts instead of replacing them. Assimilated symlinks remain live links to Main-local content, not immutable checkpoint evidence. See [ADR 0014](docs/adr/0014-add-non-destructive-machine-create.md) for durability, compatibility, limitations and recovery. Human/default legacy creation without retained safe records is unchanged.
 
 - `ajj open [handle]` — print an existing Workspace path. With no Handle, opens the built-in selector. Opening never creates. It also repairs configured Assimilated path symlinks.
+- `ajj keep <handle...>` — persist **Keep** policy: never select these Workspaces automatically for Tidy. Existing/unmarked Workspaces already default to Keep.
+- `ajj disposable <handle...>` — explicitly opt present Workspaces into automatic Tidy. This is cleanup intent, **not** evidence that work is safe to close. Missing registrations cannot opt in because their identity is unavailable.
+
 - `ajj close [handle...]` — normally close registered, present, non-main, nonconflicted Workspaces whose relevant mutable changes are represented by surviving registered Workspace heads, then print the Main Workspace path for shell wrappers. Each explicit Handle must appear exactly once.
 - `ajj close --all` — close all normally Closable Workspaces that remain safe when the complete selected closing set is excluded from protection.
 - `ajj close --force [--yes] ...` — Forced Closing: abandon only mutable changes not reachable from any surviving registered Workspace head outside the complete closing set, then close. A surviving registered Workspace protects reachable work even when its directory is missing.
@@ -328,6 +331,7 @@ A successful command writes exactly one `ajj-integrate-receipt-v1` JSON object t
 After A represents its children, normal Tidy can close them even though their visible `Stacked` labels remain Main-relative:
 
 ```sh
+ajj --repo "$A" disposable A1 A2 A3
 ajj --repo "$A" tidy --yes
 
 MAIN=/absolute/path/to/workspaces/project/default
@@ -337,6 +341,7 @@ cat > /tmp/Main-A.json <<JSON
 {"schema":"ajj-integrate-request-v1","operationId":"recursive-Main-A-001","target":{"expectedWorkspace":"default","expectedHeadCommit":"$MAIN_HEAD"},"strategy":"single","payloads":[{"workspace":"A","expectedHeadCommit":"$A_HEAD"}]}
 JSON
 ajj --repo "$MAIN" integrate --request-json /tmp/Main-A.json
+ajj --repo "$MAIN" disposable A
 ajj --repo "$MAIN" tidy --yes
 ```
 
@@ -372,7 +377,12 @@ See [ADR 0010](docs/adr/0010-add-workspace-relative-integration-protocol.md) for
 
 - `ajj list` — print Workspaces as Handle, markers, ahead, behind, action, path. Terminal output is aligned for reading; redirected output is tab-separated for parsing. Includes Current and Main markers. `ahead` counts Workspace commits not in Main except empty undescribed changes; `behind` counts Main commits not in that Workspace except empty undescribed changes.
 - `ajj list --paths` — print paths only.
-- `ajj tidy` — offer to close normally Closable Workspaces represented by surviving registered Workspace heads, forget stale missing Workspace registrations, then remove empty leftover directories under the Project layout and report non-empty leftovers. Normally closable non-Current rows and missing registrations start checked; Current is disabled. The visible `empty/unstacked/stacked/conflict/missing` labels remain Main-relative context rather than the close-safety predicate. A separate safety column shows `safe-to-close`, `requires-force`, or `forget-registration`; safety is individual and is rechecked against the complete closing set on submission. The complete selected closing set is excluded from protection, and missing-directory registered survivors still protect reachable work. Press `f` to enable **Forced Tidying**, select otherwise unsafe or conflicted Workspaces, and explicitly confirm abandoning unique mutable changes. Use `--force` outside the TUI; `--force --yes` force-tidies every non-main, non-Current Workspace without confirmation.
+- `ajj tidy` — show **Keep/Disposable policy**, Main-relative status, and independent graph safety. Only eligible **Disposable** non-Current Workspaces start checked. **Space** deliberately selects/unselects a row, including normally closable Keep rows; **p** toggles and immediately persists Keep/Disposable for the highlighted row (marking Keep unchecks it; marking Disposable does not check it). Policy changes survive cancellation. Main is omitted and Current is disabled. Missing registrations are Keep and manually selectable for forget-only cleanup, preserving leftover directories/files.
+- The focused row names surviving full protectors, or explains combined representation / unique mutable work. This evidence and batch checks use the reviewed graph snapshot; selected rows cannot protect each other. A contradictory normal batch blocks Enter with an actionable message instead of silently dropping targets. With no checks, Enter closes nothing. Cancellation/no selection performs no abandonment, deletion, or leftover-directory cleanup.
+- `ajj tidy --yes` automatically closes only eligible Disposable Workspaces and then cleans literal empty leftover directories. `--force --yes` may abandon unique mutable work in **Disposable** candidates, but **never** overrides Keep policy. In the TUI, **f** enables explicit forced selection; it does not check Keep rows. Force still requires destructive confirmation unless `--yes` was explicitly supplied. `ajj close <handle>` remains explicit and is not prohibited by Keep.
+
+Policy is local per shared JJ repository and Project, stored under `.jj/repo/ajj-policy/<project>/policies.json`, separately from NextIndex/Undo state. Writes are locked and atomic. Disposable records bind the registered Handle, canonical root, and a random identity token in that Workspace's `.jj/ajj-workspace-identity`. Reading policy creates nothing and changes no JJ history. New/recreated Workspaces without that token default to Keep; unknown names (including `summon-*`) are never inferred Disposable. Missing directories, `.jj` metadata, or tokens cannot inherit Disposable. Corrupt/unreadable stores fail closed rather than silently resetting intent. `ajj keep` can clear obsolete records without creating missing Workspace metadata. No machine-create schema or Summon integration changes are required: clients may opt in explicitly later. See [ADR 0015](docs/adr/0015-separate-workspace-cleanup-policy-from-graph-safety.md).
+
 - `ajj shell-init [bash|zsh]` — print shell integration so `create`, `open`, `close`, and `main` can change the current shell's directory.
 
 ## Config
@@ -449,7 +459,7 @@ See [`docs/assimilated-folders.md`](docs/assimilated-folders.md) for an agent-fr
 
 ## Interactive UX
 
-When stdin/stderr are terminals, `ajj` prefers in-place TUI interactions: selectors for `open`, `close`, `tidy`, `stack`, and `move-to-main`; yes/no confirmations; and prompts for missing setup values such as `init`'s Workspaces root. In every multi-select TUI, Space toggles the current row and advances to the next visible row, so repeatedly pressing Space walks and selects the list; disabled rows are skipped without selection. If you open a missing Workspace by Handle, `ajj` can offer to create it immediately. Close/Tidy footers explain representation-based normal-close safety while retaining Main-relative status labels; Tidy leaves Current unselected. Other footers show available keys and status legends so you can toggle options, for example close force mode or advanced stack options, without re-running with extra flags.
+When stdin/stderr are terminals, `ajj` prefers in-place TUI interactions: selectors for `open`, `close`, `tidy`, `stack`, and `move-to-main`; yes/no confirmations; and prompts for missing setup values such as `init`'s Workspaces root. In every multi-select TUI, Space toggles the current row and advances to the next visible row, so repeatedly pressing Space walks and selects the list; disabled rows are skipped without selection. If you open a missing Workspace by Handle, `ajj` can offer to create it immediately. Close/Tidy footers explain representation-based normal-close safety while retaining Main-relative status labels; Tidy leaves Current unselected and auto-checks only eligible Disposable rows. Its policy action (`p`) persists even on cancellation; selecting a Keep row with Space does not change its policy. Other footers show available keys and status legends so you can toggle options, for example close force mode or advanced stack options, without re-running with extra flags.
 
 Human-facing output uses color on terminals and respects `NO_COLOR`.
 

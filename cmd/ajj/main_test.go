@@ -376,12 +376,12 @@ func TestStackSelectorHintExplainsAllRowDoesNotOverrideCheckedBoxes(t *testing.T
 func TestTidySelectorGuidanceExplainsRepresentationAndCurrentDefault(t *testing.T) {
 	hint := selectorHint(selectorOptions{Mode: selectorMulti, Tidy: true, AllowForceToggle: true})
 	legend := selectorLegend(selectorOptions{Mode: selectorMulti, Tidy: true, AllowForceToggle: true})
-	for _, want := range []string{"represented", "non-Current", "missing registrations", "complete closing set", "Press f", "Forced Tidying"} {
+	for _, want := range []string{"Keep", "Disposable", "non-Current", "Space", "p persists policy", "Forced Tidying"} {
 		if !strings.Contains(hint, want) {
 			t.Fatalf("expected tidy hint to mention %q, got %q", want, hint)
 		}
 	}
-	for _, want := range []string{"Represented Elsewhere", "non-Current", "missing registrations", "Main-relative", "Forced Tidying"} {
+	for _, want := range []string{"Represented Elsewhere", "Disposable", "closing set", "Main-relative", "Forced Tidying"} {
 		if !strings.Contains(legend, want) {
 			t.Fatalf("expected tidy legend to mention %q, got %q", want, legend)
 		}
@@ -412,7 +412,7 @@ func TestCloseHelpAndGeneralUsageExplainRepresentationSafety(t *testing.T) {
 	}
 	var usage bytes.Buffer
 	printUsage(&usage)
-	for _, want := range []string{"Close Workspaces represented by surviving registered Workspace heads", "Close represented non-Current Workspaces"} {
+	for _, want := range []string{"Close Workspaces represented by surviving registered Workspace heads", "Tidy eligible Disposable Workspaces; Keep requires explicit selection"} {
 		if !strings.Contains(usage.String(), want) {
 			t.Fatalf("expected general usage to mention %q, got %q", want, usage.String())
 		}
@@ -532,17 +532,20 @@ func TestMoveToMainSelectorPreselectsWorkspaceBehindDescribedEmptyMerge(t *testi
 	}
 }
 
-func TestTidySelectorPreselectsClosableAndMissingWorkspaces(t *testing.T) {
+func TestTidySelectorPreselectsOnlyDisposableClosableWorkspaces(t *testing.T) {
 	items := selectorItemsForTidy([]workspaceInfo{
 		{Ref: workspaceRef{Handle: "default"}, Main: true},
-		{Ref: workspaceRef{Handle: "empty"}, Empty: true, RepresentedElsewhere: true},
-		{Ref: workspaceRef{Handle: "stacked"}, Stacked: true, RepresentedElsewhere: true},
+		{Policy: policyDisposable, Ref: workspaceRef{Handle: "empty"}, Empty: true, RepresentedElsewhere: true},
+		{Policy: policyDisposable, Ref: workspaceRef{Handle: "stacked"}, Stacked: true, RepresentedElsewhere: true},
 		{Ref: workspaceRef{Handle: "unstacked"}, Ahead: 1},
 		{Ref: workspaceRef{Handle: "conflict"}, Conflict: true, RepresentedElsewhere: true},
 		{Ref: workspaceRef{Handle: "missing"}, Missing: true},
 	}, false)
 	byHandle := mapSelectorItemsByHandle(items)
-	for _, handle := range []string{"empty", "stacked", "missing"} {
+	if byHandle["missing"].Selected || byHandle["missing"].Disabled {
+		t.Fatal("missing Keep registration must be manual-selectable only")
+	}
+	for _, handle := range []string{"empty", "stacked"} {
 		if !byHandle[handle].Selected || byHandle[handle].Disabled {
 			t.Fatalf("expected %s selected as tidy, got %+v", handle, byHandle[handle])
 		}
@@ -560,13 +563,16 @@ func TestTidySelectorPreselectsClosableAndMissingWorkspaces(t *testing.T) {
 func TestTidySelectorForceEnablesUnstackedAndConflictedWorkspaces(t *testing.T) {
 	items := selectorItemsForTidy([]workspaceInfo{
 		{Ref: workspaceRef{Handle: "default"}, Main: true},
-		{Ref: workspaceRef{Handle: "empty"}, Empty: true, RepresentedElsewhere: true},
+		{Policy: policyDisposable, Ref: workspaceRef{Handle: "empty"}, Empty: true, RepresentedElsewhere: true},
 		{Ref: workspaceRef{Handle: "unstacked"}, Ahead: 1},
 		{Ref: workspaceRef{Handle: "conflict"}, Conflict: true},
 		{Ref: workspaceRef{Handle: "missing"}, Missing: true},
 	}, true)
 	byHandle := mapSelectorItemsByHandle(items)
-	for _, handle := range []string{"empty", "missing"} {
+	if byHandle["missing"].Selected || byHandle["missing"].Disabled {
+		t.Fatal("missing Keep registration must be manual-selectable only")
+	}
+	for _, handle := range []string{"empty"} {
 		if !byHandle[handle].Selected || byHandle[handle].Disabled {
 			t.Fatalf("expected %s to remain selected for tidy, got %+v", handle, byHandle[handle])
 		}
@@ -625,7 +631,7 @@ func TestTidyForgetsMissingWorkspaceRegistration(t *testing.T) {
 		}
 		return nil
 	})
-	if err := tidyWorkspaces(mainPath, config{MainWorkspace: "default"}, "proj", infos, false, true); err != nil {
+	if err := tidyManualSelectionForTest(t, mainPath, infos[1:], false); err != nil {
 		t.Fatal(err)
 	}
 	if !forgot {
@@ -674,7 +680,9 @@ func TestTidyMissingWorkspacePreservesItsVisibleChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := captureStdout(func() error { return runTidy([]string{"--repo", mainPath, "--yes"}) }); err != nil {
+	if _, err := captureStdout(func() error {
+		return tidyManualSelectionForTest(t, mainPath, []workspaceInfo{{Ref: workspaceRef{Handle: "missing"}, Path: missingPath, Missing: true}}, false)
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if got := jjRevsetCount(t, mainPath, commitID+" & visible_heads()"); got != 1 {
@@ -1476,6 +1484,9 @@ func TestRunTidyClosesWorkspacesWithNoUniqueNonEmptyCommits(t *testing.T) {
 	var out, errOut bytes.Buffer
 	stdoutWriter, stderrWriter = &out, &errOut
 	defer func() { stdoutWriter, stderrWriter = origOut, origErr }()
+	if err := setWorkspacePolicies(mainPath, "proj", []workspaceInfo{{Ref: workspaceRef{Handle: "delta"}, Path: deltaPath}}, policyDisposable); err != nil {
+		t.Fatal(err)
+	}
 	if err := runTidy([]string{"--repo", mainPath, "--yes"}); err != nil {
 		t.Fatal(err)
 	}
@@ -1503,8 +1514,8 @@ func TestForcedTidyRequiresDestructiveConfirmation(t *testing.T) {
 		t.Fatal(err)
 	}
 	infos := []workspaceInfo{
-		{Ref: workspaceRef{Handle: "default"}, Path: mainPath, Main: true},
-		{Ref: workspaceRef{Handle: "alpha"}, Path: workspacePath, Ahead: 1},
+		{Policy: policyDisposable, Ref: workspaceRef{Handle: "default"}, Path: mainPath, Main: true},
+		{Policy: policyDisposable, Ref: workspaceRef{Handle: "alpha"}, Path: workspacePath, Ahead: 1},
 	}
 	origIn, origErr := stdinReader, stderrWriter
 	stdinReader = strings.NewReader("n\n")
@@ -1537,8 +1548,8 @@ func TestForcedTidyAbandonsAndClosesUnstackedWorkspace(t *testing.T) {
 	workspacePath := filepath.Join(t.TempDir(), "alpha")
 	createJJWorkspaceLink(t, mainPath, workspacePath)
 	infos := []workspaceInfo{
-		{Ref: workspaceRef{Handle: "default"}, Path: mainPath, Main: true},
-		{Ref: workspaceRef{Handle: "alpha"}, Path: workspacePath, Ahead: 1},
+		{Policy: policyDisposable, Ref: workspaceRef{Handle: "default"}, Path: mainPath, Main: true},
+		{Policy: policyDisposable, Ref: workspaceRef{Handle: "alpha"}, Path: workspacePath, Ahead: 1},
 	}
 	withCommandCapture(t, func(name string, args ...string) (string, error) {
 		if strings.Contains(strings.Join(args, " "), "op log") {

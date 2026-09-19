@@ -108,6 +108,7 @@ func TestRecursiveWorkspaceLifecyclePublicCLI(t *testing.T) {
 			// and the unique omitted Workspace, while A protects all selected
 			// children. This also proves local Project config was not replaced by
 			// an FD-number fallback during normal cleanup.
+			runLifecycleAJJWithInheritedRepo(t, binary, paths.parent, paths.parent, env, nil, append([]string{"disposable", "--repo", lifecycleInheritedRepoArg}, childHandles...)...)
 			tidyChildren := runLifecycleAJJWithInheritedRepo(t, binary, paths.parent, paths.parent, env, nil, "tidy", "--repo", lifecycleInheritedRepoArg, "--yes")
 			for _, handle := range childHandles {
 				if pathExists(paths.children[handle]) {
@@ -145,6 +146,7 @@ func TestRecursiveWorkspaceLifecyclePublicCLI(t *testing.T) {
 			// Main now represents A, so automatic normal Tidy must select A. Main
 			// is Current and therefore excluded; the unique omitted sibling must
 			// remain unselected, registered, and present.
+			runLifecycleAJJ(t, binary, paths.main, env, nil, "disposable", "--repo", paths.main, "A")
 			tidyMain := runLifecycleAJJ(t, binary, paths.main, env, nil, "tidy", "--repo", paths.main, "--yes")
 			closed := strings.Fields(strings.TrimSpace(tidyMain.stdout))
 			if len(closed) != 1 || closed[0] != paths.parent {

@@ -16,14 +16,14 @@ func TestCloseAndTidyProtectNestedRegisteredWorkspace(t *testing.T) {
 	if err := os.WriteFile(marker, []byte("keep me"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	parentInfo := workspaceInfo{Ref: workspaceRef{Handle: "alpha"}, Path: parent, RepresentedElsewhere: true}
-	childInfo := workspaceInfo{Ref: workspaceRef{Handle: "child"}, Path: child, RepresentedElsewhere: true}
+	parentInfo := workspaceInfo{Policy: policyDisposable, Ref: workspaceRef{Handle: "alpha"}, Path: parent, RepresentedElsewhere: true}
+	childInfo := workspaceInfo{Policy: policyDisposable, Ref: workspaceRef{Handle: "child"}, Path: child, RepresentedElsewhere: true}
 	before := currentOperationIDFullForTest(t, mainPath)
 	for _, mode := range []string{"normal", "forced", "whole-set", "tidy"} {
 		t.Run(mode, func(t *testing.T) {
 			var err error
 			if mode == "tidy" {
-				infos := []workspaceInfo{{Ref: workspaceRef{Handle: "default"}, Path: mainPath, Main: true}, parentInfo}
+				infos := []workspaceInfo{{Policy: policyDisposable, Ref: workspaceRef{Handle: "default"}, Path: mainPath, Main: true}, parentInfo}
 				err = tidyWorkspaces(mainPath, config{MainWorkspace: "default"}, "proj", infos, true, true)
 			} else {
 				targets := []workspaceInfo{parentInfo}
@@ -93,7 +93,7 @@ func TestTidyMissingRootPreservesReplacementEntry(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := runTidy([]string{"--repo", mainPath, "--yes"}); err != nil {
+			if err := tidyManualSelectionForTest(t, mainPath, []workspaceInfo{{Ref: workspaceRef{Handle: "missing"}, Path: missing, Missing: true}}, false); err != nil {
 				t.Fatal(err)
 			}
 			after, err := os.Lstat(missing)
@@ -148,14 +148,10 @@ func TestTidyMissingMetadataPreservesLeftoverDirectory(t *testing.T) {
 					t.Fatal(err)
 				}
 				items := selectorItemsForTidy(infos, mode == "forced")
-				if len(items) != 1 || items[0].Handle != "leftover" || items[0].Status != "missing" || items[0].Safety != "forget-registration" || items[0].Disabled || !items[0].Selected {
-					t.Fatalf("expected preselected forget-only row, got %+v", items)
+				if len(items) != 1 || items[0].Handle != "leftover" || items[0].Status != "missing" || items[0].Safety != "forget-registration" || items[0].Disabled || items[0].Selected {
+					t.Fatalf("expected manually selectable Keep forget-only row, got %+v", items)
 				}
-				args := []string{"--repo", mainPath, "--yes"}
-				if mode == "forced" {
-					args = append(args, "--force")
-				}
-				if err := runTidy(args); err != nil {
+				if err := tidyManualSelectionForTest(t, mainPath, []workspaceInfo{mapInfosByHandle(infos)["leftover"]}, mode == "forced"); err != nil {
 					t.Fatal(err)
 				}
 				after, err := os.Stat(path)

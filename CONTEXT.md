@@ -73,11 +73,19 @@ Closing a Workspace while also abandoning its unique mutable changes.
 _Avoid_: Discarding
 
 **Tidying**:
-Batch-closing selected normally Closable Workspaces, forgetting stale registrations whose Workspace paths or `.jj` metadata are missing (preserving any leftover directory), and cleaning up empty leftovers that no longer represent active Workspaces. Automatic Tidying selects normally Closable non-Current Workspaces and missing registrations; the Current Workspace remains unavailable. Visible empty/unstacked/stacked status remains Main-relative and is not itself the close-safety decision.
+Batch-closing selected normally Closable Workspaces, forgetting stale registrations whose Workspace paths or `.jj` metadata are missing (preserving any leftover directory), and cleaning up empty leftovers that no longer represent active Workspaces. Automatic Tidying selects only normally Closable, explicitly Disposable non-Current Workspaces; Keep and missing registrations require manual selection; the Current Workspace remains unavailable. Visible empty/unstacked/stacked status remains Main-relative and is not itself the close-safety decision.
 _Avoid_: Implicitly abandoning unique changes
 
+**Keep Workspace**:
+A Workspace whose persistent cleanup policy excludes it from automatic Tidying. Keep is the default for new, existing/unmarked, and identity-unavailable Workspaces. Explicit Closing or manual Tidy selection is still allowed under normal graph checks.
+_Avoid_: Immutable Workspace, forbidden to close
+
+**Disposable Workspace**:
+A present Workspace explicitly opted into automatic Tidying. Disposable is lifecycle intent, not graph safety; relevant work still needs surviving representation unless forced.
+_Avoid_: Safe-to-close Workspace, generated-name inference
+
 **Forced Tidying**:
-Explicitly abandoning unique mutable changes while Tidying selected non-main Workspaces. It requires force mode and destructive confirmation unless confirmation is explicitly skipped.
+Explicitly abandoning unique mutable changes while Tidying selected non-main Workspaces. Force never overrides Keep for automatic selection. It requires force mode and destructive confirmation unless confirmation is explicitly skipped.
 _Avoid_: Ordinary Tidying, implicit cleanup
 
 **Stacked Workspace**:
@@ -122,7 +130,8 @@ _Avoid_: Disposable workspace, empty or Main-stacked workspace
 - The `ajj close` and `ajj tidy` commands snapshot present candidates before selection and reload graph safety. Snapshot validation checks registered path/handle and shared repository identity; only the actual removal set is subject to deletion containment/owner restrictions. Post-Stack Closing uses the same snapshot/review guards after Stack computation finishes, before its first close prompt; Stack planning and generic graph inspection do not trigger lifecycle snapshots. Stale or failed snapshots block lifecycle operations rather than triggering automatic recovery. Selected candidates are snapshotted again after confirmation; any change from the reviewed repository operation aborts even forced actions. Cancellation can leave recorded snapshots, but never authorizes abandonment or deletion. Graph safety does not cover ignored/untrackable files or concurrent filesystem writes after the final check.
 - Batch **Closing** excludes every selected Workspace from the protection set, so selected Workspaces cannot mutually authorize their own removal.
 - Missing-directory but registered surviving Workspaces still protect reachable work. **Tidying** may forget a selected missing registration without Closing or abandoning its surviving visible changes.
-- **Tidying** automatically selects normally **Closable Workspaces** except the **Current Workspace**, plus missing registrations, then cleans up empty leftovers.
+- **Tidying** automatically selects only normally **Closable Disposable Workspaces**, excluding Main and Current. Keep and missing registrations remain manually selectable. Contradictory selected batches block submission rather than silently filtering targets. Zero checked rows and cancellation do not delete, abandon, or clean leftovers.
+- Keep/Disposable policy is persisted locally per shared repository and Project, separate from NextIndex/Undo. Disposable records bind Handle, root, and a Workspace-local identity token. Identity-unavailable Workspaces default Keep and cannot be newly marked Disposable; policy discovery never creates tokens. Policy changes do not change JJ history, and explicit TUI policy actions persist even on cancel. No name/origin inference or machine-create schema changes are involved.
 - **Forced Tidying** may also close selected unstacked or conflicted **Workspaces** by abandoning their unique mutable changes.
 - Machine integration journals live under the configured **Main Workspace** as local path-bound state, but configured Main is not an implicit integration target.
 - A Jujutsu repository may have many **Workspaces**.

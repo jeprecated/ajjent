@@ -85,9 +85,9 @@ func TestTidyRejectsDuplicateTargetsBeforeRepositoryOrFilesystemEffect(t *testin
 	mainPath := t.TempDir()
 	alphaPath := t.TempDir()
 	infos := []workspaceInfo{
-		{Ref: workspaceRef{Handle: "default"}, Path: mainPath, Main: true},
-		{Ref: workspaceRef{Handle: "alpha"}, Path: alphaPath, RepresentedElsewhere: true},
-		{Ref: workspaceRef{Handle: "alpha"}, Path: alphaPath, RepresentedElsewhere: true},
+		{Policy: policyDisposable, Ref: workspaceRef{Handle: "default"}, Path: mainPath, Main: true},
+		{Policy: policyDisposable, Ref: workspaceRef{Handle: "alpha"}, Path: alphaPath, RepresentedElsewhere: true},
+		{Policy: policyDisposable, Ref: workspaceRef{Handle: "alpha"}, Path: alphaPath, RepresentedElsewhere: true},
 	}
 	calls := 0
 	withCommandCapture(t, func(name string, args ...string) (string, error) {
@@ -160,6 +160,7 @@ func TestNestedIntegrationMakesChildThenParentNormallyClosable(t *testing.T) {
 		t.Fatalf("A must remain Main-relative unstacked after child integration: %+v", parent)
 	}
 
+	markDisposableForTest(t, paths.speedPath, "agm-speed-transition")
 	if _, _, err := captureOutput(func() error {
 		return runTidy([]string{"--repo", paths.speedPath, "--yes"})
 	}); err != nil {
@@ -204,6 +205,7 @@ func TestNestedIntegrationMakesChildThenParentNormallyClosable(t *testing.T) {
 
 func TestNormalCloseBatchCannotUseClosingWorkspacesAsMutualProtectors(t *testing.T) {
 	defaultPath, alphaPath, bravoPath := setupMutuallyRepresentedCloseRepo(t)
+	markDisposableForTest(t, defaultPath, "alpha", "bravo")
 	cfg := mustReadConfigForNestedClose(t, defaultPath)
 	infos, _, err := loadWorkspaceInfos(defaultPath, cfg, "proj")
 	if err != nil {
@@ -218,8 +220,8 @@ func TestNormalCloseBatchCannotUseClosingWorkspacesAsMutualProtectors(t *testing
 	}
 	if _, _, err := captureOutput(func() error {
 		return runTidy([]string{"--repo", defaultPath, "--yes"})
-	}); err != nil {
-		t.Fatalf("automatic tidy should safely decline mutually covering batch: %v", err)
+	}); err == nil || !strings.Contains(err.Error(), "batch blocked") {
+		t.Fatalf("automatic tidy must report contradictory batch: %v", err)
 	}
 	if !workspacePathExists(alphaPath) || !workspacePathExists(bravoPath) {
 		t.Fatal("automatic tidy let selected Workspaces mutually authorize deletion")
@@ -375,9 +377,9 @@ func TestRepresentedConflictedWorkspaceIsNeverNormallyClosable(t *testing.T) {
 
 func TestAutomaticTidyDoesNotPreselectCurrentWorkspace(t *testing.T) {
 	infos := []workspaceInfo{
-		{Ref: workspaceRef{Handle: "default"}, Main: true},
-		{Ref: workspaceRef{Handle: "current"}, Current: true, RepresentedElsewhere: true},
-		{Ref: workspaceRef{Handle: "other"}, RepresentedElsewhere: true},
+		{Policy: policyDisposable, Ref: workspaceRef{Handle: "default"}, Main: true},
+		{Policy: policyDisposable, Ref: workspaceRef{Handle: "current"}, Current: true, RepresentedElsewhere: true},
+		{Policy: policyDisposable, Ref: workspaceRef{Handle: "other"}, RepresentedElsewhere: true},
 	}
 	targets := tidyTargets(infos, false)
 	if len(targets) != 1 || targets[0].Ref.Handle != "other" {
