@@ -62,6 +62,9 @@ func TestTidyExternalCancellationPrecedesAllAbandonment(t *testing.T) {
 	createJJWorkspaceLink(t, mainPath, workspace)
 	infos := []workspaceInfo{{Ref: workspaceRef{Handle: "default"}, Path: mainPath, Main: true}, {Ref: workspaceRef{Handle: "alpha"}, Path: workspace, External: true, RepresentedElsewhere: true}}
 	withCommandCapture(t, func(_ string, args ...string) (string, error) {
+		if strings.Contains(strings.Join(args, " "), "op log") {
+			return "reviewed-operation\n", nil
+		}
 		query := strings.Join(args, " ")
 		if strings.Contains(query, "workspace list") {
 			return "default\tmain\t" + mainPath + "\nalpha\talpha\t" + workspace + "\n", nil
@@ -274,6 +277,9 @@ func TestTidyPartialFailureReportsPriorEmptyCursorCleanup(t *testing.T) {
 	createJJWorkspaceLink(t, mainPath, workspace)
 	infos := []workspaceInfo{{Ref: workspaceRef{Handle: "default"}, Path: mainPath, Main: true}, {Ref: workspaceRef{Handle: "blocked"}, Path: workspace, RepresentedElsewhere: true}}
 	withCommandCapture(t, func(_ string, args ...string) (string, error) {
+		if strings.Contains(strings.Join(args, " "), "op log") {
+			return "reviewed-operation\n", nil
+		}
 		query := strings.Join(args, " ")
 		if strings.Contains(query, "workspace list") {
 			return "default\tmain\t" + mainPath + "\nblocked\tblocked\t" + workspace + "\n", nil

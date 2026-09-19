@@ -610,6 +610,9 @@ func TestTidyForgetsMissingWorkspaceRegistration(t *testing.T) {
 		{Ref: workspaceRef{Handle: "missing"}, Path: missingPath, Missing: true},
 	}
 	withCommandCapture(t, func(name string, args ...string) (string, error) {
+		if strings.Contains(strings.Join(args, " "), "op log") {
+			return "reviewed-operation\n", nil
+		}
 		if strings.Contains(strings.Join(args, " "), "workspace list") {
 			return "default\tmain111\t" + mainPath + "\nmissing\tmissing111\t" + missingPath + "\n", nil
 		}
@@ -1428,6 +1431,9 @@ func TestRunTidyClosesWorkspacesWithNoUniqueNonEmptyCommits(t *testing.T) {
 	}
 	writeConfig(t, mainPath, "workspaces_root: "+workspacesRoot+"\nproject: proj\nmain_workspace: default\n")
 	withCommandCapture(t, func(name string, args ...string) (string, error) {
+		if strings.Contains(strings.Join(args, " "), "op log") {
+			return "reviewed-operation\n", nil
+		}
 		joined := strings.Join(args, " ")
 		if strings.Contains(joined, "workspace list") {
 			return "default\tmain111\t" + mainPath + "\ndelta\tdelta111\t" + deltaPath + "\nalpha\talpha111\t" + alphaPath + "\n", nil
@@ -1534,6 +1540,9 @@ func TestForcedTidyAbandonsAndClosesUnstackedWorkspace(t *testing.T) {
 		{Ref: workspaceRef{Handle: "alpha"}, Path: workspacePath, Ahead: 1},
 	}
 	withCommandCapture(t, func(name string, args ...string) (string, error) {
+		if strings.Contains(strings.Join(args, " "), "op log") {
+			return "reviewed-operation\n", nil
+		}
 		joined := strings.Join(args, " ")
 		if strings.Contains(joined, "workspace list") {
 			return "default\tmain111\t" + mainPath + "\nalpha\talpha111\t" + workspacePath + "\n", nil
@@ -2505,6 +2514,9 @@ func TestRunCloseCurrentWorkspaceForgetsFromMainWorkspace(t *testing.T) {
 	createJJWorkspaceLink(t, mainPath, currentPath)
 	writeConfig(t, currentPath, "workspaces_root: "+workspacesRoot+"\nproject: proj\nmain_workspace: default\n")
 	withCommandCapture(t, func(name string, args ...string) (string, error) {
+		if strings.Contains(strings.Join(args, " "), "op log") {
+			return "reviewed-operation\n", nil
+		}
 		joined := strings.Join(args, " ")
 		if strings.Contains(joined, "workspace list") {
 			return "default\tmain111\t" + mainPath + "\ntest\ttest111\t" + currentPath + "\n", nil
@@ -2543,7 +2555,7 @@ func TestRunCloseCurrentWorkspaceForgetsFromMainWorkspace(t *testing.T) {
 	}
 }
 
-func TestRunCloseStackedStaleWorkspaceDoesNotRequireForcedClosing(t *testing.T) {
+func TestRunCloseStackedStaleWorkspaceFailsClosedWithoutRecovery(t *testing.T) {
 	workspacesRoot := filepath.Join(t.TempDir(), "workspaces")
 	mainPath := filepath.Join(workspacesRoot, "proj", "default")
 	deltaPath := filepath.Join(workspacesRoot, "proj", "delta")
@@ -2576,14 +2588,11 @@ func TestRunCloseStackedStaleWorkspaceDoesNotRequireForcedClosing(t *testing.T) 
 		return nil
 	})
 	out, err := captureStdout(func() error { return runClose([]string{"delta", "--repo", mainPath, "--yes"}) })
-	if err != nil {
-		t.Fatalf("expected normal close without forced-closing prompt/error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "working copy is stale") {
+		t.Fatalf("expected stale snapshot refusal, got %v", err)
 	}
-	if !forgot {
-		t.Fatal("expected delta workspace to be forgotten")
-	}
-	if exists(deltaPath) {
-		t.Fatalf("expected delta workspace directory removed, stdout=%q", out)
+	if forgot || !exists(deltaPath) {
+		t.Fatalf("stale Workspace must remain registered and present, stdout=%q", out)
 	}
 }
 

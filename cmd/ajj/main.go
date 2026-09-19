@@ -1090,6 +1090,19 @@ func runTidy(args []string) error {
 	if err != nil {
 		return err
 	}
+	candidates := []workspaceInfo{}
+	for _, info := range infos {
+		if !info.Main && !info.Current {
+			candidates = append(candidates, info)
+		}
+	}
+	if err := snapshotCloseCandidates(repoRoot, candidates); err != nil {
+		return err
+	}
+	infos, _, err = loadWorkspaceInfos(repoRoot, cfg, project)
+	if err != nil {
+		return err
+	}
 	if err := tidyWorkspaces(repoRoot, cfg, project, infos, force, yes); err != nil {
 		return err
 	}
@@ -1138,6 +1151,13 @@ func runTidy(args []string) error {
 
 func tidyWorkspaces(repoRoot string, cfg config, project string, infos []workspaceInfo, force bool, yes bool) error {
 	targets := tidyTargets(infos, force)
+	if err := validateUniqueCloseTargets(targets); err != nil {
+		return err
+	}
+	reviewedOperation, err := currentOperationID(repoRoot)
+	if err != nil {
+		return err
+	}
 	interactive := !yes && canUseTUI()
 	if interactive {
 		items := selectorItemsForTidy(infos, force)
@@ -1218,9 +1238,13 @@ func tidyWorkspaces(repoRoot string, cfg config, project string, infos []workspa
 	if err := validateWorkspaceRemovalTargets(mainInfo.Path, targets, protection); err != nil {
 		return err
 	}
-	// All prompts must precede the first mutation, including empty-cursor cleanup.
+	// All prompts precede abandonment/deletion; snapshots may already have recorded edits.
 	confirmed, err := confirmExternalDeletes(targets, yes)
 	if err != nil || !confirmed {
+		return err
+	}
+	protection, err = revalidateCloseReview(mainInfo.Path, targets, reviewedOperation)
+	if err != nil {
 		return err
 	}
 	emptyAbandoned, err := abandonEmptyWorkspaceHeads(mainInfo.Path, targets)
@@ -1290,6 +1314,34 @@ func runClose(args []string) error {
 		return err
 	}
 	infos, currentHandle, err := loadWorkspaceInfos(repoRoot, cfg, project)
+	if err != nil {
+		return err
+	}
+	candidates := []workspaceInfo{}
+	for _, info := range infos {
+		if info.Main || info.Missing {
+			continue
+		}
+		include := all || (len(positionals) == 0 && (currentHandle == "" || currentHandle == cfg.MainWorkspace || info.Current))
+		for _, handle := range positionals {
+			include = include || handle == info.Ref.Handle
+		}
+		if include {
+			candidates = append(candidates, info)
+		}
+	}
+	graphRepoPath := repoRoot
+	if main, ok := mapInfosByHandle(infos)[cfg.MainWorkspace]; ok && !main.Missing {
+		graphRepoPath = main.Path
+	}
+	if err := snapshotCloseCandidates(graphRepoPath, candidates); err != nil {
+		return err
+	}
+	infos, currentHandle, err = loadWorkspaceInfos(repoRoot, cfg, project)
+	if err != nil {
+		return err
+	}
+	reviewedOperation, err := currentOperationID(repoRoot)
 	if err != nil {
 		return err
 	}
@@ -1384,7 +1436,12 @@ func runClose(args []string) error {
 			return err
 		}
 	}
-	closed, err := closeWorkspaces(mainInfo.Path, targets, force, yes)
+	protection, err := newCloseProtectionContext(mainInfo.Path, targets)
+	if err != nil {
+		return err
+	}
+	protection.reviewedOperation = reviewedOperation
+	closed, err := closeWorkspacesWithProtection(mainInfo.Path, targets, force, yes, protection)
 	if err != nil || len(closed) == 0 {
 		return err
 	}
@@ -3138,9 +3195,10 @@ func markers(info workspaceInfo) []string {
 }
 
 type closeProtectionContext struct {
-	closingHandles   map[string]struct{}
-	protectorHandles []string
-	workspaceRoots   []workspaceRef
+	reviewedOperation string
+	closingHandles    map[string]struct{}
+	protectorHandles  []string
+	workspaceRoots    []workspaceRef
 }
 
 func canonicalUniqueWorkspaceHandles(handles []string) ([]string, error) {
@@ -3363,6 +3421,22 @@ func closeWorkspacesWithProtection(repoPath string, targets []workspaceInfo, for
 	confirmed, err := confirmExternalDeletes(targets, yes)
 	if err != nil || !confirmed {
 		return closed, err
+	}
+	if protection.reviewedOperation != "" {
+		var err error
+		protection, err = revalidateCloseReview(repoPath, targets, protection.reviewedOperation)
+		if err != nil {
+			return closed, err
+		}
+		if !force {
+			unsafe, err := normallyUnclosableTargetsWithProtection(repoPath, targets, protection)
+			if err != nil {
+				return closed, err
+			}
+			if len(unsafe) > 0 {
+				return closed, fmt.Errorf("%s not normally closable against surviving Workspaces", workspaceSummary(unsafe))
+			}
+		}
 	}
 	closedHandles, abandoned := []string{}, []string{}
 	failure := func(index int, cause error) ([]string, error) {

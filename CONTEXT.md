@@ -119,6 +119,7 @@ _Avoid_: Disposable workspace, empty or Main-stacked workspace
 - **Closing** commonly targets the **Current Workspace** or selected non-main **Workspaces**.
 - A **Stacked Workspace** is represented specifically in the configured **Main Workspace**; this status is not redefined by nested integration.
 - **Closing** without force applies to a **Closable Workspace** whose relevant mutable changes are **Represented Elsewhere**.
+- Close/Tidy snapshot present candidates before selection and reload graph safety. Stale or failed snapshots block lifecycle operations rather than triggering automatic recovery. Selected candidates are snapshotted again after confirmation; any change from the reviewed repository operation aborts even forced actions. Cancellation can leave recorded snapshots, but never authorizes abandonment or deletion. Graph safety does not cover ignored/untrackable files or concurrent filesystem writes after the final check.
 - Batch **Closing** excludes every selected Workspace from the protection set, so selected Workspaces cannot mutually authorize their own removal.
 - Missing-directory but registered surviving Workspaces still protect reachable work. **Tidying** may forget a selected missing registration without Closing or abandoning its surviving visible changes.
 - **Tidying** automatically selects normally **Closable Workspaces** except the **Current Workspace**, plus missing registrations, then cleans up empty leftovers.
