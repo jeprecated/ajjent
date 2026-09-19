@@ -31,6 +31,13 @@ selection defaults, not its explicit forced-abandonment boundary.
   force changes against the reviewed snapshot. Contradictory normal selections
   block submission with an explanation rather than silently filtering targets.
   Existing pre-mutation snapshot/operation guards reject external graph drift.
+  Cleanup policy does not change JJ operations, so separately bind per-row effective policy and
+  identity before selection/confirmation. Revalidate selected rows after all
+  confirmations and graph checks, before any abandonment or removal. Changes
+  require rerun/review even under force; explicit Close is unaffected. Successful
+  TUI `p` actions accept the changed row's state before submission, without
+  refreshing other rows or holding locks across prompts. Stable manual Keep
+  selections remain valid; post-final-check writers remain a non-atomic limit.
 - Force toggles use actual closability, not empty/stacked status, and retain
   safe nested-child choices. Force mode does not automatically check Keep rows.
 

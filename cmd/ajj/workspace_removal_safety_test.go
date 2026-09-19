@@ -18,6 +18,7 @@ func TestCloseAndTidyProtectNestedRegisteredWorkspace(t *testing.T) {
 	}
 	parentInfo := workspaceInfo{Policy: policyDisposable, Ref: workspaceRef{Handle: "alpha"}, Path: parent, RepresentedElsewhere: true}
 	childInfo := workspaceInfo{Policy: policyDisposable, Ref: workspaceRef{Handle: "child"}, Path: child, RepresentedElsewhere: true}
+	markDisposableForTest(t, mainPath, "alpha")
 	before := currentOperationIDFullForTest(t, mainPath)
 	for _, mode := range []string{"normal", "forced", "whole-set", "tidy"} {
 		t.Run(mode, func(t *testing.T) {

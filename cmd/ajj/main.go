@@ -1200,6 +1200,14 @@ func tidyWorkspaces(repoRoot string, cfg config, project string, infos []workspa
 		return err
 	}
 	interactive := !yes && canUseTUI()
+	policyTargets := targets
+	if interactive {
+		policyTargets = infos
+	}
+	policyReview, err := newTidyPolicyReview(repoRoot, project, policyTargets)
+	if err != nil {
+		return err
+	}
 	if interactive {
 		items := selectorItemsForTidy(infos, force)
 		reviewRepo := repoRoot
@@ -1212,7 +1220,7 @@ func tidyWorkspaces(repoRoot string, cfg config, project string, infos []workspa
 		}
 		byPolicyHandle := mapInfosByHandle(infos)
 		selected, opts, err := runSelector(selectorOptions{Title: "Tidy Workspaces", Mode: selectorMulti, Items: items, Tidy: true, ForceEnabled: force, AllowForceToggle: true, ReviewTidy: review, SetPolicy: func(handle, policy string) error {
-			return setWorkspacePolicies(repoRoot, project, []workspaceInfo{byPolicyHandle[handle]}, policy)
+			return policyReview.setPolicy(byPolicyHandle[handle], policy)
 		}})
 		if err != nil {
 			return err
@@ -1280,6 +1288,7 @@ func tidyWorkspaces(repoRoot string, cfg config, project string, infos []workspa
 		return err
 	}
 	protection.reviewedOperation = reviewedOperation
+	protection.tidyPolicy = policyReview
 	closed, closeErr := closeWorkspacesWithProtection(mainInfo.Path, targets, len(forcedTargets) > 0, yes, true, protection)
 	for _, path := range closed {
 		fmt.Fprintln(stdoutWriter, path)
@@ -3221,6 +3230,7 @@ func markers(info workspaceInfo) []string {
 }
 
 type closeProtectionContext struct {
+	tidyPolicy        *tidyPolicyReview
 	reviewedOperation string
 	closingHandles    map[string]struct{}
 	protectorHandles  []string
@@ -3427,6 +3437,9 @@ func validateWorkspaceRepositoryIdentity(repoPath string, info workspaceInfo) er
 
 func closeWorkspacesWithProtection(repoPath string, targets []workspaceInfo, force bool, yes bool, cleanupEmptyHeads bool, protection closeProtectionContext) ([]string, error) {
 	closed := []string{}
+	// Graph revalidation rebuilds protection. Retain Tidy's independent intent
+	// review through both that rebuild and any outside-layout consent prompt.
+	policyReview := protection.tidyPolicy
 	if err := validateUniqueCloseTargets(targets); err != nil {
 		return closed, err
 	}
@@ -3466,6 +3479,11 @@ func closeWorkspacesWithProtection(repoPath string, targets []workspaceInfo, for
 		}
 		if len(unsafe) > 0 {
 			return closed, fmt.Errorf("%s not normally closable against surviving Workspaces", workspaceSummary(unsafe))
+		}
+	}
+	if policyReview != nil {
+		if err := policyReview.revalidate(targets); err != nil {
+			return closed, err
 		}
 	}
 	// Tidy's intentional empty-cursor cleanup follows the shared final guard.

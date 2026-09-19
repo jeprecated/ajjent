@@ -1513,6 +1513,7 @@ func TestForcedTidyRequiresDestructiveConfirmation(t *testing.T) {
 	if err := os.MkdirAll(workspacePath, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	createJJWorkspaceLink(t, mainPath, workspacePath)
 	infos := []workspaceInfo{
 		{Policy: policyDisposable, Ref: workspaceRef{Handle: "default"}, Path: mainPath, Main: true},
 		{Policy: policyDisposable, Ref: workspaceRef{Handle: "alpha"}, Path: workspacePath, Ahead: 1},
@@ -1530,6 +1531,9 @@ func TestForcedTidyRequiresDestructiveConfirmation(t *testing.T) {
 		return "unique-alpha\n", nil
 	})
 	cfg := config{MainWorkspace: "default"}
+	if err := setWorkspacePolicies(mainPath, "proj", infos[1:], policyDisposable); err != nil {
+		t.Fatal(err)
+	}
 	if err := tidyWorkspaces(mainPath, cfg, "proj", infos, true, false); err != nil {
 		t.Fatal(err)
 	}
@@ -1578,6 +1582,9 @@ func TestForcedTidyAbandonsAndClosesUnstackedWorkspace(t *testing.T) {
 	})
 
 	cfg := config{MainWorkspace: "default"}
+	if err := setWorkspacePolicies(mainPath, "proj", infos[1:], policyDisposable); err != nil {
+		t.Fatal(err)
+	}
 	if err := tidyWorkspaces(mainPath, cfg, "proj", infos, true, true); err != nil {
 		t.Fatal(err)
 	}

@@ -85,3 +85,54 @@ operation guards refuse drift at execution. Ignored/untrackable files and
 concurrent writes after final checks remain outside the non-atomic lifecycle
 guarantee. Explicit TUI policy edits may persist after cancellation; JJ snapshots
 may also have recorded working-copy edits. Neither authorizes deletion on cancel.
+
+## Review correction: bind cleanup intent through confirmations
+
+After approval of lifecycle revision
+`3211ecae2cf09686baa7b709157eaabd315932fb`, review identified a separate
+pre-validation safety gap: `ajj keep` during a Tidy confirmation leaves JJ's
+operation ID unchanged, so graph revalidation alone could delete a Workspace
+whose automatic-cleanup opt-in had just been revoked.
+
+Eight real `runTidy` confirmation-hook regressions were RED before the correction:
+normal/forced × canonical/external consent × Keep revocation/identity rotation.
+Every case returned nil and removed the target; the hooks independently verified
+that policy edits did not move the JJ operation ID. Identity rotation preserved
+an effective Disposable policy, ensuring the fix binds identity, not just a label.
+Initial RED run: FAIL, 6.439s. These same eight cases are now GREEN.
+
+The correction binds per-row effective policy, canonical root, identity token,
+and missing/present state before opening the selector or confirmation. The shared
+final guard retains that independent Tidy review through graph-context rebuilding,
+then checks it after graph/snapshot checks and all prompts, including external
+consent, before any empty-head cleanup, abandonment, or removal. Drift aborts with
+rerun/review guidance even under force. No store version, policy migration, new
+persistent metadata, or lock across prompts was introduced.
+
+TUI `p` validates and updates only the affected row's accepted state before
+submission. Other rows retain their original baselines. Tests cover prechecked
+rows revoked while the selector is open; manual stable Keep selection; successful
+Keep/Disposable `p` changes; persistence on cancellation; and an unrelated row's
+`p` change that must not refresh a revoked target. Selector tests exercise the
+real model, production `p` callback implementation, and guarded execution boundary,
+not terminal dispatch. Explicit Close remains independent of Tidy policy.
+
+Additional actual `runTidy --yes`/`--yes --force` hooks revoke policy during the
+final target snapshot and verify rejection without graph mutation or removal.
+Confirmation regressions also assert unchanged JJ operations, preserved visible
+payload and unique files, and no leftover-directory cleanup on refusal. Existing
+mocked cleanup tests now persist their intended Disposable fixture records rather
+than relying on a label alone; their original mutation/containment assertions stay.
+
+Correction validation:
+
+- Affected Tidy/Close/post-Stack/snapshot tests: PASS, 29.973s.
+- Policy guard, selector, explicit Close, and concurrent-policy tests under
+  `go test -race`: PASS, 13.831s.
+- `go test ./...`: PASS, 340.113s.
+- `go vet ./...`: PASS; `gofmt` validation: clean.
+
+Concurrent revocation after the final policy check remains a non-atomic residual
+limit. Existing ignored/untrackable-file and post-validation writer limitations
+remain. Full graph/diff preview is still deferred; this correction stops for
+independent review and performs no live operations or integration.
