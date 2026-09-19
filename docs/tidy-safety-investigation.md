@@ -120,8 +120,10 @@ FAIL github.com/jeprecated/ajjent/cmd/ajj 1.970s
 ```
 
 Fix: snapshot present candidates with `jj status`, explicitly disabling automatic
-stale recovery; reload graph safety before selection. Validate ownership/removal
-paths first. After all confirmations, snapshot selected candidates again and
+stale recovery; reload graph safety before selection. Following the review
+correction below, snapshot validation checks registered path/handle and repository
+identity; full deletion-containment restrictions apply only to the actual removal
+set. After all confirmations, snapshot selected candidates again and
 reject any operation change from the reviewed state, including forced actions.
 Refresh the complete protection set. Failed/stale snapshots stop the operation.
 
@@ -181,6 +183,66 @@ represented conflicts, and mutual protection across the complete closing set.
   inspects it; automatic recovery is deliberately disabled.
 - This is not a filesystem lock. Concurrent writers after the final check,
   ignored files, and files JJ declines to track remain outside the guarantee.
-  Post-Stack closing helpers were not redesigned; generic list/Stack behavior
-  remains unchanged.
+  Post-Stack Closing remains an outstanding data-loss path: `closeStackInputs`
+  calls `closeWorkspaces` without a `reviewedOperation`, bypassing the new
+  snapshot/review guard. This investigation does **not** claim all Closing paths
+  are fixed. Extending the guard to that confirmation boundary requires a
+  separately scoped change; generic list/Stack behavior remains unchanged.
 - No integration, installation, release, or live lifecycle cleanup was performed.
+
+## Independent review correction: snapshot validation is not deletion validation
+
+Reviewer `c456d9c7` identified an introduced regression in payload
+`a23b3bede1571feeb9bafe40afa5561bd9027987`: pre-selection snapshot validation
+applied full deletion-containment checks to every candidate. A human parent with
+unique work containing a safely closable child consequently blocked `runTidy`
+and `runClose --all` before the unsafe parent could be excluded from selection.
+The existing nested-removal test invoked `tidyWorkspaces` directly and did not
+exercise this command-entry preflight.
+
+Added `TestLifecycleSelectionAllowsUnsafeParentWithClosableNestedChild`, which
+uses the real command entry points and actual JJ repositories. It covers both
+commands with recorded parent-only work and with an unsnapshotted parent edit.
+The latter proves the parent is inspected rather than merely skipped: its stored
+graph initially appears safe, but the recorded edit must keep it out of the
+closing set while the child closes.
+
+RED against the reviewed payload (four subtests, 1.780s):
+
+```text
+--- FAIL: TestLifecycleSelectionAllowsUnsafeParentWithClosableNestedChild
+  tidy: unselected nested parent blocked safe child: ... contains registered Workspace "child"
+  close-all: unselected nested parent blocked safe child: ... contains registered Workspace "child"
+  tidy-unrecorded: unselected nested parent blocked safe child: ... contains registered Workspace "child"
+  close-all-unrecorded: unselected nested parent blocked safe child: ... contains registered Workspace "child"
+```
+
+Correction: validate the registered handle/path and active shared repository
+identity for **every** present candidate before running **any** `status` command.
+Do not apply deletion-containment restrictions while inspecting candidates. Full
+containment, active-Workspace and repository-owner deletion guards remain on the
+actual removal set. Repository identity validation is extracted and shared by
+snapshot and removal checks; stale snapshot behavior and review-drift rejection
+are unchanged.
+
+`TestSnapshotCandidatesRejectWrongRegisteredPathBeforeStatus` rejects a candidate
+whose handle names one registered Workspace but whose path names its sibling.
+`TestSnapshotCandidatesRejectInvalidRepositoryBeforeAnyStatus` covers foreign
+repository replacement and broken, empty, or missing repository pointers. It
+checks that neither an earlier valid candidate nor a foreign repository acquires
+a snapshot operation. Existing actual deletion-containment tests are retained.
+The metadata rejection cases were already safe before the correction and are
+preservation tests, not claimed as new RED evidence.
+
+Validation after correction:
+
+- Four nesting regressions plus identity checks: PASS, 3.976s.
+- Affected Close/Tidy/representation/lifecycle/identity suite: PASS, 50.224s.
+- `go test ./...`: PASS, 313.918s, including the original four data-loss tests,
+  confirmation drift, stale-candidate checks and nested deletion guards.
+- `go vet ./...`: PASS.
+
+This correction is a separate descendant of the reviewed payload. No live
+repository commands, integration, installation, or lifecycle operations were
+performed during this follow-up. Post-Stack Closing remains explicitly outside
+this fix, as described in Remaining boundaries above.

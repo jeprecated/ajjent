@@ -10,9 +10,15 @@ func snapshotCloseCandidates(repoPath string, targets []workspaceInfo) error {
 	if err != nil {
 		return err
 	}
-	// Establish ownership and path safety before touching any working copy.
-	if err := validateWorkspaceRemovalTargets(repoPath, targets, protection); err != nil {
-		return err
+	// Validate every candidate before running any snapshot. Containment is a
+	// deletion restriction, not a snapshot restriction: an unselected parent
+	// may contain the safe child that the user actually wants to close.
+	for _, target := range targets {
+		if !target.Missing {
+			if err := validateWorkspaceSnapshotTarget(repoPath, target, protection.workspaceRoots); err != nil {
+				return err
+			}
+		}
 	}
 	for _, target := range targets {
 		if target.Missing {
@@ -23,6 +29,32 @@ func snapshotCloseCandidates(repoPath string, targets []workspaceInfo) error {
 		}
 	}
 	return nil
+}
+
+func validateWorkspaceSnapshotTarget(repoPath string, target workspaceInfo, refs []workspaceRef) error {
+	candidate, err := canonicalExistingDirectory(target.Path)
+	if err != nil {
+		return fmt.Errorf("resolve Workspace %q snapshot path: %w", target.Ref.Handle, err)
+	}
+	matched := false
+	for _, ref := range refs {
+		if ref.Handle != target.Ref.Handle {
+			continue
+		}
+		root := cleanWorkspaceRoot(ref.Root)
+		if root == "" {
+			return fmt.Errorf("cannot verify registered path for Workspace %q", target.Ref.Handle)
+		}
+		registered, err := canonicalExistingDirectory(root)
+		if err != nil || registered != candidate {
+			return fmt.Errorf("Workspace %q snapshot path does not match its registered path", target.Ref.Handle)
+		}
+		matched = true
+	}
+	if !matched {
+		return fmt.Errorf("cannot verify registered path for Workspace %q", target.Ref.Handle)
+	}
+	return validateWorkspaceRepositoryIdentity(repoPath, target)
 }
 
 // The reviewed operation binds both the selected heads and all their graph

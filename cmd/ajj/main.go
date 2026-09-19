@@ -3387,11 +3387,17 @@ func validateWorkspaceRemovalTarget(repoPath string, info workspaceInfo, refs []
 			return fmt.Errorf("refusing to close Workspace %q: %s contains registered Workspace %q at %s; close nested Workspaces separately first", info.Ref.Handle, info.Path, ref.Handle, root)
 		}
 	}
-	expectedRepo, err := workspaceRepositoryDirectory(current)
+	return validateWorkspaceRepositoryIdentity(repoPath, info)
+}
+
+// Shared by snapshot and removal validation. Identity alone permits inspecting
+// a Workspace; only removal validation applies containment/owner restrictions.
+func validateWorkspaceRepositoryIdentity(repoPath string, info workspaceInfo) error {
+	expectedRepo, err := workspaceRepositoryDirectory(repoPath)
 	if err != nil {
 		return fmt.Errorf("resolve active repository storage: %w", err)
 	}
-	candidateRepo, err := workspaceRepositoryDirectory(candidate)
+	candidateRepo, err := workspaceRepositoryDirectory(info.Path)
 	if err != nil {
 		return fmt.Errorf("refusing to close Workspace %q: cannot verify repository identity at %s: %w", info.Ref.Handle, info.Path, err)
 	}
