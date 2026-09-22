@@ -97,7 +97,7 @@ The graph-level normal-close safety property that every relevant mutable change 
 _Avoid_: Stacked status, empty status, self-protected
 
 **Closable Workspace**:
-A registered, present, non-main, nonconflicted Workspace that is **Represented Elsewhere** relative to the complete closing batch. A Workspace can be Main-relative unstacked yet normally Closable when a surviving parent or sibling Workspace represents its work.
+A registered, present, non-main, nonconflicted Workspace that is **Represented Elsewhere** relative to the complete closing batch. A Workspace can be Main-relative unstacked yet normally Closable when a surviving parent or sibling Workspace represents its work. Workspace conflict status is scoped to conflicted mutable commits in its own ancestor history (including its head), not unrelated siblings connected through mutable merges.
 _Avoid_: Disposable workspace, empty or Main-stacked workspace
 
 ## Relationships

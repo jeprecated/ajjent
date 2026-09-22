@@ -88,9 +88,15 @@ jj --ignore-working-copy --no-pager --color never -R "$P" --at-op "$OP" log --no
 
 Repeat for each candidate/protector. For individual safety, subtract the union
 of **all** other registered ancestors; for batch safety, exclude all selected
-registrations from that union. Inspect conflicts with
-`conflicts() & reachable(jev@, mutable())`. Immutability was checked using the
-repository's effective `immutable_heads()` alias, not inferred from bookmarks.
+registrations from that union. Historical conflict inspection used
+`conflicts() & reachable(jev@, mutable())`, which traverses parent **and child**
+edges: a positive result can belong to a sibling, not the inspected Workspace.
+Current per-Workspace conflict checks instead use
+`conflicts() & mutable() & ::jev@`; see the later
+[facsimile regression evidence](workspace-conflict-scope-evidence.md). The
+historical observations above are not a new live reinspection. Immutability was
+checked using the repository's effective `immutable_heads()` alias, not inferred
+from bookmarks.
 Read-only `debug working-copy` and operation history were also inspected; an old
 checkout operation by itself does not prove stale disk content.
 

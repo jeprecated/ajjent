@@ -2958,7 +2958,10 @@ func workspaceGraphRepoPath(repoRoot string, refs []workspaceRef, cfg config, pr
 }
 
 func workspaceHasConflictCommits(repoPath, handle string) (bool, error) {
-	return revisionMatches(repoPath, "conflicts() & reachable("+handle+"@, mutable())")
+	// Conflict status belongs to this head's mutable history, not its connected
+	// component: reachable() also traverses children into unrelated siblings.
+	// Include conflicted empty cursors and ancestors, not only relevant payloads.
+	return revisionMatches(repoPath, "conflicts() & mutable() & ::"+handle+"@")
 }
 
 func workspaceHasUnstackedCommits(repoPath, handle, mainHandle string) (bool, error) {
