@@ -77,6 +77,14 @@ nix run github:jeprecated/ajjent -- --help
                 shape = "auto";
                 conflict_strategy = "prefer-clean";
               };
+              cleanup = {
+                rules = [
+                  {
+                    match = "*summon*";
+                    policy = "disposable";
+                  }
+                ];
+              };
               create = {
                 envrc = false;
                 direnv_allow = false;
@@ -120,7 +128,7 @@ Repo-aware commands can target another checkout with either the global form `ajj
 
 ### Workspace lifecycle
 
-- `ajj create [handle]` — create a **Keep** Workspace and print its path. Add `--disposable` to opt the new Workspace into automatic Tidy. Without a Handle, picks one from `workspace_handles`. Materializes configured **Assimilated paths**: repo-relative local files, directories, or globs shared into Workspaces by symlink.
+- `ajj create [handle]` — create a Workspace and print its path. Its cleanup policy comes from the first matching `cleanup.rules` entry for its Handle (Keep when none matches). Add `--disposable` to persist an explicit Disposable record instead. Without a Handle, picks one from `workspace_handles`. Materializes configured **Assimilated paths**: repo-relative local files, directories, or globs shared into Workspaces by symlink.
 - `ajj create <source> <handle>` — create a child of an existing Workspace without opening it first. Includes the source's current working-copy content, including uncommitted edits, and prints the new Workspace path. For example, `ajj create web api` starts `api` from `web`. Cannot be combined with `--revision`.
 - `ajj create [handle] --revision <full-commit-id>` — base the new Workspace on an exact, immutable commit instead of jj's default. The value must be a full 40-character lowercase hexadecimal commit id; it is resolved against the selected repo before anything is created, passed straight through to `jj workspace add --revision`, and verified by read-back so the new working-copy change has exactly that commit as parent (on mismatch the half-created Workspace is cleaned up and the command fails). To inherit a source Workspace's dirty content, first capture its exact current commit (for example `jj -R <source> log -r @ --no-graph -T commit_id`) and pass that id.
 - `ajj create --repo PATH --request-json PATH|- --json` — strict machine create/ensure. cwd/`--repo` is the Current Workspace target; the request asserts its exact Handle/head and names one child while Ajj configuration owns the destination. Replaying the request reconciles desired provider state and returns `ready`, `partial`, `not-created`, or `conflict`. By default it does **not** prove which actor created a matching Workspace. The opt-in `noCleanup` mode below requires retained creation evidence; neither mode advertises `recoverByOperationId`.
@@ -154,8 +162,10 @@ Both receipt schemas echo the selected option, bound by `evidenceDigest`. Safe m
 Persist and replay exact request bytes; never silently remove the option or alter the request to bypass a conflict. Keep collector setup disabled or provider-local files ignored; safe creation still performs configured file setup, but not `direnv allow`. It creates `.envrc`/links exclusively and preserves existing regular files (even identical) or mismatching links as setup conflicts instead of replacing them. Assimilated symlinks remain live links to Main-local content, not immutable checkpoint evidence. See [ADR 0014](docs/adr/0014-add-non-destructive-machine-create.md) for durability, compatibility, limitations and recovery. Human/default legacy creation without retained safe records is unchanged.
 
 - `ajj open [handle]` — print an existing Workspace path. With no Handle, opens the built-in selector. Opening never creates. It also repairs configured Assimilated path symlinks.
-- `ajj keep <handle...>` — persist **Keep** policy: never select these Workspaces automatically for Tidy. Existing/unmarked Workspaces already default to Keep.
-- `ajj disposable <handle...>` — explicitly opt present Workspaces into automatic Tidy. This is cleanup intent, **not** evidence that work is safe to close. Missing registrations cannot opt in because their identity is unavailable.
+- `ajj keep <handle...>` — persist an explicit **Keep** policy that overrides any matching cleanup rule: never select these Workspaces automatically for Tidy. Existing/unmatched Workspaces already default to Keep.
+- `ajj disposable <handle...>` — explicitly opt present Workspaces into automatic Tidy, overriding any matching rule. This is cleanup intent, **not** evidence that work is safe to close. Missing registrations cannot opt in because their identity is unavailable.
+
+`cleanup.rules` in config are ordered handle-glob defaults (`match` uses Go `path.Match`, case-sensitive; `policy` is `keep` or `disposable`). The first matching rule wins; explicit `ajj keep`/`ajj disposable` records are identity-bound (handle + canonical root + token) and override every rule; unmatched Workspaces stay Keep. Rules apply to present, valid, registered Workspaces only — missing directories or `.jj` metadata never match a rule. Ordinary `ajj create` follows the rules for its Handle; `--disposable` writes an explicit record. Malformed patterns or policies fail config load before any mutation. Rule or explicit-policy changes during a Tidy confirmation window abort the run for re-review; graph/snapshot safety always remains authoritative.
 
 - `ajj close [handle...]` — normally close registered, present, non-main, nonconflicted Workspaces whose relevant mutable changes are represented by surviving registered Workspace heads, then print the Main Workspace path for shell wrappers. Each explicit Handle must appear exactly once.
 - `ajj close --all` — close all normally Closable Workspaces that remain safe when the complete selected closing set is excluded from protection.
@@ -347,7 +357,7 @@ ajj --repo "$MAIN" disposable A
 ajj --repo "$MAIN" tidy --yes
 ```
 
-Normal close/tidy computes **Represented Elsewhere** against surviving registered Workspace heads outside the complete closing set, so a batch cannot protect itself. Missing-directory registered survivors still protect reachable work. Tidy may forget selected missing registrations without abandoning their visible changes. A registered directory without `.jj` metadata is also missing: Tidy shows `missing` / `forget-registration` and preserves the directory and all leftovers (such as `.devenv`). Existing but broken metadata or foreign repository pointers still fail ownership validation; `--force` does not bypass it. Automatic Tidy never selects Current, and configured Main is never closable.
+Normal close/tidy computes **Represented Elsewhere** against surviving registered Workspace heads outside the complete closing set, so a batch cannot protect itself. Missing-directory registered survivors still protect reachable work. Tidy may forget selected missing registrations without abandoning their visible changes. A registered directory without `.jj` metadata is also missing: Tidy shows `missing` / `forget-registration` and preserves the directory and all leftovers (such as `.devenv`). Existing but broken metadata or foreign repository pointers still fail ownership validation; `--force` does not bypass it. Automatic Tidy selects only eligible Disposable Workspaces — from an explicit identity-bound record or a matching cleanup rule — and never selects Current; configured Main is never closable and never matches a rule opt-in.
 
 Discover the exact schemas, strategies, dispositions, operation-id pattern, jj minimum, and byte/count limits without a repository:
 
@@ -436,6 +446,10 @@ stack:
 create:
   envrc: false
   direnv_allow: false
+cleanup:
+  rules:
+    - match: "*summon*"
+      policy: disposable
 ```
 
 Supported handle strategies:

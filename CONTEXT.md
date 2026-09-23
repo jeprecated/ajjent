@@ -73,11 +73,14 @@ Closing a Workspace while also abandoning its unique mutable changes.
 _Avoid_: Discarding
 
 **Tidying**:
-Batch-closing selected normally Closable Workspaces, forgetting stale registrations whose Workspace paths or `.jj` metadata are missing (preserving any leftover directory), and cleaning up empty leftovers that no longer represent active Workspaces. Automatic Tidying selects only normally Closable, explicitly Disposable non-Current Workspaces; Keep and missing registrations require manual selection; the Current Workspace remains unavailable. Visible empty/unstacked/stacked status remains Main-relative and is not itself the close-safety decision.
+Batch-closing selected normally Closable Workspaces, forgetting stale registrations whose Workspace paths or `.jj` metadata are missing (preserving any leftover directory), and cleaning up empty leftovers that no longer represent active Workspaces. Automatic Tidying selects only normally Closable, Disposable non-Current Workspaces — from an explicit identity-bound record or the first matching `cleanup.rules` handle glob; Keep and missing registrations require manual selection; the Current Workspace remains unavailable. Visible empty/unstacked/stacked status remains Main-relative and is not itself the close-safety decision.
 _Avoid_: Implicitly abandoning unique changes
 
 **Keep Workspace**:
-A Workspace whose persistent cleanup policy excludes it from automatic Tidying. Keep is the default for new, existing/unmarked, and identity-unavailable Workspaces. Explicit Closing or manual Tidy selection is still allowed under normal graph checks.
+A Workspace whose persistent cleanup policy excludes it from automatic Tidying. Keep is the default for new, existing/unmarked, identity-unavailable, and rule-unmatched Workspaces. Explicit Closing or manual Tidy selection is still allowed under normal graph checks.
+
+**Cleanup Rule**:
+An ordered `cleanup.rules` config entry `{match, policy}` matching present, valid, registered Workspace Handles with a Go `path.Match` glob. The first match wins; explicit identity-bound Keep/Disposable records override every rule; malformed rules fail config load before any mutation. Rules never match Main, Current, or missing Workspaces and are never graph-safety evidence.
 _Avoid_: Immutable Workspace, forbidden to close
 
 **Disposable Workspace**:
@@ -132,7 +135,7 @@ _Avoid_: Disposable workspace, empty or Main-stacked workspace
 - Batch **Closing** excludes every selected Workspace from the protection set, so selected Workspaces cannot mutually authorize their own removal.
 - Missing-directory but registered surviving Workspaces still protect reachable work. **Tidying** may forget a selected missing registration without Closing or abandoning its surviving visible changes.
 - **Tidying** automatically selects only normally **Closable Disposable Workspaces**, excluding Main and Current. Keep and missing registrations remain manually selectable. Contradictory selected batches block submission rather than silently filtering targets. Zero checked rows and cancellation do not delete, abandon, or clean leftovers.
-- Keep/Disposable policy is persisted locally per shared repository and Project, separate from NextIndex/Undo. Disposable records bind Handle, root, and a Workspace-local identity token. Identity-unavailable Workspaces default Keep and cannot be newly marked Disposable; policy discovery never creates tokens. Policy changes do not change JJ history, and explicit TUI policy actions persist even on cancel. No name/origin inference or machine-create schema changes are involved.
+- Keep/Disposable policy is persisted locally per shared repository and Project, separate from NextIndex/Undo. Explicit records (both Disposable and Keep) bind Handle, root, and a Workspace-local identity token, so a reused Handle does not inherit them; a recreated Handle may intentionally match a config rule again. Identity-unavailable Workspaces default Keep and cannot be newly marked Disposable; policy discovery never creates tokens. `cleanup.rules` are validated handle-glob defaults recomputed from merged config during every Tidy revalidation window. Policy changes do not change JJ history, and explicit TUI policy actions persist even on cancel. No origin inference or machine-create schema changes are involved.
 - **Forced Tidying** may also close selected unstacked or conflicted **Workspaces** by abandoning their unique mutable changes.
 - Machine integration journals live under the configured **Main Workspace** as local path-bound state, but configured Main is not an implicit integration target.
 - A Jujutsu repository may have many **Workspaces**.

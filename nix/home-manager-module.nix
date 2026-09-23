@@ -67,6 +67,9 @@ in {
           envrc = false;
           direnv_allow = false;
         };
+        cleanup = {
+          rules = [ ];
+        };
       };
       description = "Contents of ~/.config/ajj/config.yaml";
       example = {
@@ -89,6 +92,14 @@ in {
         create = {
           envrc = false;
           direnv_allow = false;
+        };
+        cleanup = {
+          rules = [
+            {
+              match = "*summon*";
+              policy = "disposable";
+            }
+          ];
         };
       };
     };

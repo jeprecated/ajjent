@@ -86,3 +86,27 @@ No origin tracking, provider schema fields, or external Summon opt-in are added.
 Existing graph safety still permits representation in non-Main surviving Workspaces. Snapshotting can record
 edits before cancellation. Ignored/untrackable files and concurrent writes after
 final validation remain outside the non-atomic lifecycle guarantee.
+
+## Cleanup rules as configurable defaults
+
+Operators may declare ordered handle-glob defaults in config:
+
+```yaml
+cleanup:
+  rules:
+    - match: "*summon*"
+      policy: disposable
+```
+
+`match` uses Go `path.Match` (case-sensitive); `policy` is `keep` or
+`disposable`; the first matching rule wins. Rules are defaults for present,
+valid, registered Workspaces only: they never match Main, Current, or missing
+Workspaces, and they are never graph-safety evidence. Explicit `ajj keep` /
+`ajj disposable` records are identity-bound (handle + canonical root + token)
+and override every rule, so a reused Handle inherits no record while it may
+intentionally match a rule again. Malformed rules fail config load before any
+mutation. Ordinary `create` follows the rules for its Handle; `--disposable`
+persists an explicit record. Tidy's confirmation windows recompute effective
+rule policy from merged config and treat any relevant rule change as drift.
+No default rule ships in this repository; naming patterns are the operator's
+explicit configuration choice, not a built-in heuristic.

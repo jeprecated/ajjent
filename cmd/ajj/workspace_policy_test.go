@@ -62,7 +62,7 @@ func policyInfosForTest(t *testing.T, repo, project string) []workspaceInfo {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := loadWorkspacePolicies(repo, project, infos); err != nil {
+	if err := loadWorkspacePolicies(repo, project, cfg.Cleanup.Rules, infos); err != nil {
 		t.Fatal(err)
 	}
 	return infos

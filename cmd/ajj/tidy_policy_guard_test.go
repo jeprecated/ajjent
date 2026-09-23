@@ -124,7 +124,11 @@ func TestTidySelectorPolicyReviewBoundary(t *testing.T) {
 			}
 			infos := policyInfosForTest(t, repo, "proj")
 			info := mapInfosByHandle(infos)["alpha"]
-			review, err := newTidyPolicyReview(repo, "proj", infos)
+			reviewCfg, err := loadConfig(repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			review, err := newTidyPolicyReview(repo, "proj", reviewCfg.Cleanup.Rules, infos)
 			if err != nil {
 				t.Fatal(err)
 			}

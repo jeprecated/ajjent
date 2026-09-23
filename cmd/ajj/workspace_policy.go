@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -26,6 +27,7 @@ type workspacePolicyRecord struct {
 type workspacePolicyStore struct {
 	Version    int                              `json:"version"`
 	Disposable map[string]workspacePolicyRecord `json:"disposable"`
+	Keep       map[string]workspacePolicyRecord `json:"keep,omitempty"`
 }
 
 func policyStorePath(repo, project string) (string, error) {
@@ -64,6 +66,14 @@ func readPolicyStore(path string) (workspacePolicyStore, error) {
 		if validateWorkspaceHandle(handle) != nil || !filepath.IsAbs(r.Root) || !validPolicyToken(r.Token) {
 			return empty, errors.New("invalid Workspace policy record")
 		}
+		if _, also := st.Keep[handle]; also {
+			return empty, errors.New("Workspace has conflicting policy records")
+		}
+	}
+	for handle, r := range st.Keep {
+		if validateWorkspaceHandle(handle) != nil || !filepath.IsAbs(r.Root) || !validPolicyToken(r.Token) {
+			return empty, errors.New("invalid Workspace policy record")
+		}
 	}
 	return st, nil
 }
@@ -95,29 +105,47 @@ func readPolicyToken(path string) (string, error) {
 	return token, nil
 }
 
-func workspacePolicy(st workspacePolicyStore, info workspaceInfo) (string, error) {
-	r, ok := st.Disposable[info.Ref.Handle]
-	if !ok || info.Missing {
-		return policyKeep, nil
+// matchCleanupRule returns the first rule whose pattern matches the Handle.
+// Rules are validated at config load; a defensively invalid pattern never matches.
+func matchCleanupRule(rules []cleanupRule, handle string) (cleanupRule, bool) {
+	for _, rule := range rules {
+		if matched, err := path.Match(rule.Match, handle); err == nil && matched {
+			return rule, true
+		}
+	}
+	return cleanupRule{}, false
+}
+
+// Effective policy: explicit identity-bound records win over cleanup rules,
+// rules are Handle-glob defaults for present valid registrations, and anything
+// else stays Keep. Discovery never creates tokens or the store.
+func workspacePolicy(st workspacePolicyStore, rules []cleanupRule, info workspaceInfo) (string, string, error) {
+	if info.Missing {
+		return policyKeep, "", nil
 	}
 	root, err := canonicalExistingDirectory(info.Path)
 	if err != nil {
-		return "", err
-	}
-	if r.Root != root {
-		return policyKeep, nil
+		return "", "", err
 	}
 	token, err := readPolicyToken(filepath.Join(root, ".jj", policyTokenFile))
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	if token != "" && token == r.Token {
-		return policyDisposable, nil
+	if token != "" {
+		if r, ok := st.Disposable[info.Ref.Handle]; ok && r.Root == root && r.Token == token {
+			return policyDisposable, "", nil
+		}
+		if r, ok := st.Keep[info.Ref.Handle]; ok && r.Root == root && r.Token == token {
+			return policyKeep, "", nil
+		}
 	}
-	return policyKeep, nil
+	if rule, ok := matchCleanupRule(rules, info.Ref.Handle); ok {
+		return rule.Policy, rule.Match, nil
+	}
+	return policyKeep, "", nil
 }
 
-func loadWorkspacePolicies(repo, project string, infos []workspaceInfo) error {
+func loadWorkspacePolicies(repo, project string, rules []cleanupRule, infos []workspaceInfo) error {
 	path, err := policyStorePath(repo, project)
 	if err != nil {
 		return err
@@ -127,7 +155,7 @@ func loadWorkspacePolicies(repo, project string, infos []workspaceInfo) error {
 		return err
 	}
 	for i := range infos {
-		p, err := workspacePolicy(st, infos[i])
+		p, _, err := workspacePolicy(st, rules, infos[i])
 		if err != nil {
 			return fmt.Errorf("Workspace %q policy: %w", infos[i].Ref.Handle, err)
 		}
@@ -187,10 +215,24 @@ func setWorkspacePolicies(repo, project string, targets []workspaceInfo, policy 
 			}
 		}
 	}
+	if st.Keep == nil {
+		st.Keep = map[string]workspacePolicyRecord{}
+	}
 	for _, target := range targets {
+		// Explicit records override cleanup rules for exactly this identity.
+		// Keep for a missing registration has no identity to bind, so it clears
+		// any Disposable record instead; its effective policy is already Keep.
 		if policy == policyKeep {
 			delete(st.Disposable, target.Ref.Handle)
-			continue
+			if target.Main || target.Missing {
+				delete(st.Keep, target.Ref.Handle)
+				continue
+			}
+			if err := validateWorkspaceSnapshotTarget(repo, target, refs); err != nil {
+				return err
+			}
+		} else {
+			delete(st.Keep, target.Ref.Handle)
 		}
 		root, err := canonicalExistingDirectory(target.Path)
 		if err != nil {
@@ -221,7 +263,11 @@ func setWorkspacePolicies(repo, project string, targets []workspaceInfo, policy 
 				return err
 			}
 		}
-		st.Disposable[target.Ref.Handle] = workspacePolicyRecord{Root: root, Token: token}
+		if policy == policyKeep {
+			st.Keep[target.Ref.Handle] = workspacePolicyRecord{Root: root, Token: token}
+		} else {
+			st.Disposable[target.Ref.Handle] = workspacePolicyRecord{Root: root, Token: token}
+		}
 	}
 	data, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {

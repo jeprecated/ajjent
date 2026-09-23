@@ -63,6 +63,19 @@ type config struct {
 	Projects           map[string]projectConfig `yaml:"projects"`
 	Stack              stackConfig              `yaml:"stack"`
 	Create             createSetup              `yaml:"create"`
+	Cleanup            cleanupConfig            `yaml:"cleanup"`
+}
+
+// Cleanup rules are handle-glob defaults, never safety evidence. The first
+// matching rule wins; explicit identity-bound policies override every rule;
+// unmatched Workspaces stay Keep. Missing Workspaces can never match a rule.
+type cleanupConfig struct {
+	Rules []cleanupRule `yaml:"rules"`
+}
+
+type cleanupRule struct {
+	Match  string `yaml:"match"`
+	Policy string `yaml:"policy"`
 }
 
 type projectConfig struct {
@@ -1121,7 +1134,7 @@ func runTidy(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := loadWorkspacePolicies(repoRoot, project, infos); err != nil {
+	if err := loadWorkspacePolicies(repoRoot, project, cfg.Cleanup.Rules, infos); err != nil {
 		return err
 	}
 	candidates := []workspaceInfo{}
@@ -1141,7 +1154,7 @@ func runTidy(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := loadWorkspacePolicies(repoRoot, project, infos); err != nil {
+	if err := loadWorkspacePolicies(repoRoot, project, cfg.Cleanup.Rules, infos); err != nil {
 		return err
 	}
 	if err := tidyWorkspaces(repoRoot, cfg, project, infos, force, yes, reviewedOperation); err != nil {
@@ -1212,7 +1225,7 @@ func tidyWorkspaces(repoRoot string, cfg config, project string, infos []workspa
 	if interactive {
 		policyTargets = infos
 	}
-	policyReview, err := newTidyPolicyReview(repoRoot, project, policyTargets)
+	policyReview, err := newTidyPolicyReview(repoRoot, project, cfg.Cleanup.Rules, policyTargets)
 	if err != nil {
 		return err
 	}
@@ -2654,6 +2667,11 @@ func loadConfig(repoRoot string) (config, error) {
 	if err := validateStackConfig(merged.Stack); err != nil {
 		return config{}, err
 	}
+	rules, err := validateCleanupRules(merged.Cleanup.Rules)
+	if err != nil {
+		return config{}, err
+	}
+	merged.Cleanup.Rules = rules
 	if strings.TrimSpace(merged.Project) != "" {
 		if err := validateSlug("project", merged.Project); err != nil {
 			return config{}, err
@@ -2749,6 +2767,11 @@ func mergeConfigFile(dst *config, path string) error {
 	if src.Create.DirenvAllow {
 		dst.Create.DirenvAllow = true
 	}
+	// Like workspace_handles: a present cleanup section replaces earlier rules
+	// wholesale, so local config can remove a global default.
+	if src.Cleanup.Rules != nil {
+		dst.Cleanup.Rules = append([]cleanupRule(nil), src.Cleanup.Rules...)
+	}
 	return nil
 }
 
@@ -2763,6 +2786,32 @@ func validateStackConfig(cfg stackConfig) error {
 		return err
 	}
 	return nil
+}
+
+// validateCleanupRules trims and normalizes rule policies to the internal
+// Keep/Disposable vocabulary before any Workspace can be selected or mutated.
+func validateCleanupRules(rules []cleanupRule) ([]cleanupRule, error) {
+	out := make([]cleanupRule, 0, len(rules))
+	for i, rule := range rules {
+		match := strings.TrimSpace(rule.Match)
+		if match == "" {
+			return nil, fmt.Errorf("invalid cleanup rule %d: match must not be empty", i+1)
+		}
+		if _, err := pathpkg.Match(match, "probe"); err != nil {
+			return nil, fmt.Errorf("invalid cleanup rule %d: bad match pattern %q: %w", i+1, match, err)
+		}
+		switch policy := strings.TrimSpace(rule.Policy); policy {
+		case "keep":
+			rule.Policy = policyKeep
+		case "disposable":
+			rule.Policy = policyDisposable
+		default:
+			return nil, fmt.Errorf("invalid cleanup rule %d: policy %q must be \"keep\" or \"disposable\"", i+1, policy)
+		}
+		rule.Match = match
+		out = append(out, rule)
+	}
+	return out, nil
 }
 
 func applyStackOverrides(cfg *config, rebaseMode, shape, conflictStrategy string) {
