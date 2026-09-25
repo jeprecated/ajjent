@@ -130,21 +130,29 @@ func TestLifecycleFailsClosedOnRealStaleCandidate(t *testing.T) {
 		t.Run(command, func(t *testing.T) {
 			mainPath, humanPath, _ := setupMutuallyRepresentedCloseRepo(t)
 			runJJ(t, "-R", mainPath, "new", "alpha@-")
-			markDisposableForTest(t, mainPath, "alpha", "bravo")
+			// Tidy scopes stale refusal per Workspace; only the stale candidate
+			// is Disposable here so the graph must stay untouched.
+			markDisposableForTest(t, mainPath, "alpha")
 			writeTrackedCommit(t, mainPath, "main-only.txt", "advance main tree")
 			runJJ(t, "-R", mainPath, "rebase", "-r", "alpha@", "-d", "default@")
 			// Even a user configuration enabling stale recovery must not silently
 			// rewrite a candidate working directory during lifecycle inspection.
 			runJJ(t, "-R", mainPath, "config", "set", "--repo", "snapshot.auto-update-stale", "true")
 			before := currentOperationIDFullForTest(t, mainPath)
-			_, _, err := captureOutput(func() error {
+			_, diagnostics, err := captureOutput(func() error {
 				if command == "close" {
 					return runClose([]string{"alpha", "--repo", mainPath, "--yes"})
 				}
 				return runTidy([]string{"--repo", mainPath, "--yes"})
 			})
-			if err == nil || !strings.Contains(err.Error(), "stale") || !exists(humanPath) {
-				t.Fatalf("must retain stale candidate: %v", err)
+			if command == "close" && (err == nil || !strings.Contains(err.Error(), "stale")) {
+				t.Fatalf("explicit Close must fail closed on a stale Workspace: %v", err)
+			}
+			if command == "tidy" && (err != nil || !strings.Contains(diagnostics, "Skipping stale Workspace alpha") || !strings.Contains(diagnostics, "workspace update-stale")) {
+				t.Fatalf("Tidy must skip (not close or recover) the stale Workspace: %v\n%s", err, diagnostics)
+			}
+			if !exists(humanPath) || !workspaceRegistered(t, mainPath, "alpha") {
+				t.Fatal("must retain stale candidate directory and registration")
 			}
 			if after := currentOperationIDFullForTest(t, mainPath); after != before {
 				t.Fatal("stale refusal changed graph")
@@ -171,5 +179,42 @@ func TestCancelledCloseSnapshotsButDoesNotAbandonOrRemove(t *testing.T) {
 	}
 	if jjRevsetCount(t, mainPath, "alpha@ & ~empty()") != 1 {
 		t.Fatal("new work must have been snapshotted, not abandoned")
+	}
+}
+
+// One stale Workspace must not make Tidy unusable: it is skipped (never
+// recovered, closed, or forgotten) while another safe Disposable still closes.
+func TestTidySkipsStaleWorkspaceAndClosesOtherSafeDisposable(t *testing.T) {
+	mainPath, stalePath, bravoPath := setupMutuallyRepresentedCloseRepo(t)
+	runJJ(t, "-R", mainPath, "new", "alpha@-")
+	markDisposableForTest(t, mainPath, "alpha", "bravo")
+	writeTrackedCommit(t, mainPath, "main-only.txt", "advance main tree")
+	runJJ(t, "-R", mainPath, "rebase", "-r", "alpha@", "-d", "default@")
+	changeID := func() string {
+		out, err := commandCaptureFn("jj", "-R", mainPath, "--ignore-working-copy", "--color=never", "--no-pager", "log", "--no-graph", "-r", "alpha@", "-T", "change_id")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSpace(out)
+	}
+	staleChange := changeID()
+	_, diagnostics, err := captureOutput(func() error { return runTidy([]string{"--repo", mainPath, "--yes"}) })
+	if err != nil {
+		t.Fatalf("one stale Workspace aborted Tidy: %v\n%s", err, diagnostics)
+	}
+	if !strings.Contains(diagnostics, "Skipping stale Workspace alpha") || !strings.Contains(diagnostics, "jj -R "+stalePath+" workspace update-stale") {
+		t.Fatalf("missing stale skip warning:\n%s", diagnostics)
+	}
+	if exists(bravoPath) || workspaceRegistered(t, mainPath, "bravo") {
+		t.Fatal("safe Disposable bravo was not closed")
+	}
+	// Main-side empty-ancestor cleanup may rebase the head (same change), but
+	// the stale Workspace is never closed, abandoned, or forgotten.
+	if !exists(stalePath) || !workspaceRegistered(t, mainPath, "alpha") || changeID() != staleChange {
+		t.Fatal("stale Workspace was closed or abandoned")
+	}
+	// No automatic stale recovery happened.
+	if _, err := commandCaptureFn("jj", "-R", stalePath, "--config=snapshot.auto-update-stale=false", "--color=never", "--no-pager", "status"); !isStaleWorkingCopyError(err) {
+		t.Fatalf("stale Workspace was recovered or changed: %v", err)
 	}
 }

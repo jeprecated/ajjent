@@ -219,15 +219,6 @@ func TestNormalCloseBatchCannotUseClosingWorkspacesAsMutualProtectors(t *testing
 		}
 	}
 	if _, _, err := captureOutput(func() error {
-		return runTidy([]string{"--repo", defaultPath, "--yes"})
-	}); err == nil || !strings.Contains(err.Error(), "batch blocked") {
-		t.Fatalf("automatic tidy must report contradictory batch: %v", err)
-	}
-	if !workspacePathExists(alphaPath) || !workspacePathExists(bravoPath) {
-		t.Fatal("automatic tidy let selected Workspaces mutually authorize deletion")
-	}
-
-	if _, _, err := captureOutput(func() error {
 		return runClose([]string{"alpha", "bravo", "--repo", defaultPath, "--yes"})
 	}); err == nil || !strings.Contains(err.Error(), "not normally closable") {
 		t.Fatalf("mutually protected batch unexpectedly closed: %v", err)
@@ -236,10 +227,16 @@ func TestNormalCloseBatchCannotUseClosingWorkspacesAsMutualProtectors(t *testing
 		t.Fatal("rejected batch mutated a selected Workspace directory")
 	}
 
-	if _, _, err := captureOutput(func() error {
-		return runClose([]string{"alpha", "--repo", defaultPath, "--yes"})
-	}); err != nil {
-		t.Fatalf("sequential close with surviving bravo protector failed: %v", err)
+	// Automatic Tidy never lets selected Workspaces mutually authorize
+	// deletion: it closes only the greedy safe subset (alpha, protected by the
+	// surviving bravo) and leaves bravo for manual review.
+	if _, diagnostics, err := captureOutput(func() error {
+		return runTidy([]string{"--repo", defaultPath, "--yes"})
+	}); err != nil || !strings.Contains(diagnostics, "Left for manual review") {
+		t.Fatalf("automatic tidy must close only the safe subset: %v\n%s", err, diagnostics)
+	}
+	if workspacePathExists(alphaPath) || !workspacePathExists(bravoPath) {
+		t.Fatal("automatic tidy must close exactly alpha and keep its protector bravo")
 	}
 	if _, _, err := captureOutput(func() error {
 		return runClose([]string{"bravo", "--repo", defaultPath, "--yes"})

@@ -259,13 +259,21 @@ func (m selectorModel) tidyPreviewView() string {
 	if m.notice != "" {
 		footer = m.notice + " | v back"
 	}
-	if m.problem != "" {
-		footer = m.problem
+	blocked := m.problem != ""
+	if blocked {
+		footer = tidyBlockedPrefix + strings.TrimPrefix(m.problem, tidyBlockedPrefix)
+	}
+	if len(rows)+1 > m.height && blocked {
+		// Keep a blocked Enter visible even in a tiny terminal.
+		rows = rows[:max(0, m.height-1)]
 	}
 	rows = append(rows, footer)
 	rows = rows[:min(len(rows), m.height)]
 	for i := range rows {
 		rows[i] = clipTidyPreviewLine(sanitizeTidyPreview(rows[i]), m.width)
+	}
+	if blocked {
+		rows[len(rows)-1] = selectorStyles().Warn.Render(rows[len(rows)-1])
 	}
 	return strings.Join(rows, "\n")
 }

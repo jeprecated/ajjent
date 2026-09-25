@@ -350,3 +350,19 @@ candidates continue to fail closed with no automatic recovery. Lifecycle intent,
 individual-versus-batch selector feedback, force-toggle behavior, and zero-box
 submission remain for later separately reviewed work. This safety stage stops
 for independent review before implementing those changes.
+
+## Follow-up (2026-09-25): self-blocking selection and stale scope
+
+- Automatic Tidy preselection used per-row representation, so two Disposables
+  protected only by each other were both preselected and Enter silently
+  no-oped (and `--yes` failed "Tidy batch blocked"). Preselection is now greedy
+  in row order against the pinned batch review; `--yes` closes the greedy safe
+  subset, names the rows left for manual review, and still rechecks the chosen
+  set with live jj before closing. Manual contradictory batches still block,
+  now with a visible `Enter blocked:` line.
+- One stale Workspace no longer aborts Tidy. Only a snapshot error containing
+  "working copy is stale" is scoped to that Workspace: it is disabled, never
+  selectable (even with force), and never recovered. Other snapshot errors
+  still abort. Final revalidation snapshots only the actual targets, so a stale
+  non-target cannot block, and a stale target still fails closed. `ajj close`
+  of a stale Workspace is unchanged.

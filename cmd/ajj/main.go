@@ -123,8 +123,11 @@ type workspaceInfo struct {
 	Current              bool
 	Main                 bool
 	External             bool
-	Ahead                int
-	Behind               int
+	// Stale is set only by Tidy when this Workspace's lifecycle snapshot
+	// failed because its working copy is stale. It is never closed.
+	Stale  bool
+	Ahead  int
+	Behind int
 }
 
 const (
@@ -1143,7 +1146,10 @@ func runTidy(args []string) error {
 			candidates = append(candidates, info)
 		}
 	}
-	if err := snapshotCloseCandidates(repoRoot, candidates); err != nil {
+	// A stale candidate is excluded from this Tidy (never recovered or closed)
+	// instead of aborting the whole batch; other snapshot failures still abort.
+	stale, err := snapshotTidyCandidates(repoRoot, candidates)
+	if err != nil {
 		return err
 	}
 	reviewedOperation, err := currentOperationID(repoRoot)
@@ -1156,6 +1162,9 @@ func runTidy(args []string) error {
 	}
 	if err := loadWorkspacePolicies(repoRoot, project, cfg.Cleanup.Rules, infos); err != nil {
 		return err
+	}
+	for i := range infos {
+		infos[i].Stale = stale[infos[i].Ref.Handle] && !infos[i].Main && !infos[i].Current && !infos[i].Missing
 	}
 	if err := tidyWorkspaces(repoRoot, cfg, project, infos, force, yes, reviewedOperation); err != nil {
 		if errors.Is(err, errTidyCancelled) {
@@ -1229,18 +1238,25 @@ func tidyWorkspaces(repoRoot string, cfg config, project string, infos []workspa
 	if err != nil {
 		return err
 	}
+	reviewRepo := repoRoot
+	if main, ok := mapInfosByHandle(infos)[cfg.MainWorkspace]; ok && !main.Missing {
+		reviewRepo = main.Path
+	}
 	if interactive {
 		items := selectorItemsForTidy(infos, force)
-		reviewRepo := repoRoot
-		if main, ok := mapInfosByHandle(infos)[cfg.MainWorkspace]; ok && !main.Missing {
-			reviewRepo = main.Path
-		}
 		review, err := tidyGraphReview(reviewRepo, infos, reviewedOperation)
 		if err != nil {
 			return err
 		}
+		// Automatic selection must never block itself: rows that are only
+		// protected by other preselected rows start unchecked.
+		items, left := preselectSafeTidyBatch(items, review.review, force)
+		notice := ""
+		if len(left) > 0 {
+			notice = tidyLeftUncheckedNotice(left)
+		}
 		byPolicyHandle := mapInfosByHandle(infos)
-		selected, opts, err := runSelector(selectorOptions{Title: "Tidy Workspaces", Mode: selectorMulti, Items: items, Tidy: true, ForceEnabled: force, AllowForceToggle: true, ReviewTidy: review.review, PreviewTidy: review.preview, SetPolicy: func(handle, policy string) error {
+		selected, opts, err := runSelector(selectorOptions{Title: "Tidy Workspaces", Mode: selectorMulti, Items: items, Tidy: true, ForceEnabled: force, AllowForceToggle: true, Notice: notice, ReviewTidy: review.review, PreviewTidy: review.preview, SetPolicy: func(handle, policy string) error {
 			return policyReview.setPolicy(byPolicyHandle[handle], policy)
 		}})
 		if err != nil {
@@ -1254,10 +1270,14 @@ func tidyWorkspaces(repoRoot string, cfg config, project string, infos []workspa
 		targets = targets[:0]
 		for _, item := range selected {
 			info, ok := byHandle[item.Handle]
-			if !ok || info.Main || info.Current || (!info.Missing && !force && !isClosable(info)) {
+			if !ok || info.Main || info.Current || info.Stale || (!info.Missing && !force && !isClosable(info)) {
 				continue
 			}
 			targets = append(targets, info)
+		}
+	} else {
+		for _, info := range staleWorkspaceInfos(infos) {
+			fmt.Fprintf(stderrWriter, "%s\n", cliStylesForWriter(stderrWriter).Warn.Render(fmt.Sprintf("Skipping stale Workspace %s: %s", info.Ref.Handle, staleWorkspaceHint(info))))
 		}
 	}
 	if err := validateUniqueCloseTargets(targets); err != nil {
@@ -1273,6 +1293,24 @@ func tidyWorkspaces(repoRoot string, cfg config, project string, infos []workspa
 	unsafeTargets, err := normallyUnclosableTargets(mainInfo.Path, targets)
 	if err != nil {
 		return err
+	}
+	if !interactive && !force && len(unsafeTargets) > 0 {
+		// Automatic selection must not block itself: Disposables protected only
+		// by other closing Disposables are left for manual review. The greedy
+		// safe subset is rechecked against live jj below before anything closes.
+		review, err := tidyGraphReview(reviewRepo, infos, reviewedOperation)
+		if err != nil {
+			return err
+		}
+		kept, left := review.safeTidyTargets(targets, force)
+		if len(left) > 0 {
+			fmt.Fprintf(stderrWriter, "%s\n", cliStylesForWriter(stderrWriter).Warn.Render("Left for manual review (only protected by other closing Workspaces; selected Workspaces can't protect each other): "+workspaceHandleList(left)))
+		}
+		targets = kept
+		unsafeTargets, err = normallyUnclosableTargets(mainInfo.Path, targets)
+		if err != nil {
+			return err
+		}
 	}
 	if !force && len(unsafeTargets) > 0 {
 		return fmt.Errorf("Tidy batch blocked: %s not represented outside the complete closing set; uncheck a protector or target and review again", workspaceSummary(unsafeTargets))
@@ -1329,7 +1367,7 @@ func tidyWorkspaces(repoRoot string, cfg config, project string, infos []workspa
 func tidyTargets(infos []workspaceInfo, force bool) []workspaceInfo {
 	targets := []workspaceInfo{}
 	for _, info := range infos {
-		if info.Main || info.Current || info.Policy != policyDisposable {
+		if info.Main || info.Current || info.Stale || info.Policy != policyDisposable {
 			continue
 		}
 		if info.Missing || force || isClosable(info) {
@@ -1886,7 +1924,7 @@ func runStack(args []string) (retErr error) {
 			return errors.New("stack requires Workspace Handles or --all when not running in a terminal")
 		}
 		items := selectorItemsForStack(infos)
-		selected, opts, err := runSelector(selectorOptions{Title: "Stack Workspaces", Mode: selectorMulti, Items: items, AllDefault: true, StackOptions: cfg.Stack})
+		selected, opts, err := runSelector(selectorOptions{Title: "Stack Workspaces", Mode: selectorMulti, Items: items, AllDefault: true, AllowStackOptions: true, StackOptions: cfg.Stack})
 		if err != nil {
 			return err
 		}
@@ -5325,6 +5363,8 @@ type selectorItem struct {
 	Disabled         bool
 	All              bool
 	Selected         bool
+	// Stale rows (Tidy only) are never selectable, even with force.
+	Stale bool
 }
 
 type selectorOptions struct {
@@ -5341,7 +5381,11 @@ type selectorOptions struct {
 	AllowRoleToggle  bool
 	MoveToMain       bool
 	Tidy             bool
-	StackOptions     stackConfig
+	// AllowStackOptions binds s/r/c to cycle StackOptions; otherwise those
+	// letters are ordinary filter input.
+	AllowStackOptions bool
+	StackOptions      stackConfig
+	Notice            string
 }
 
 type selectorResult struct {
@@ -5366,14 +5410,16 @@ type selectorModel struct {
 	selectedOrder []int
 	selectedRoles map[int]string
 	filter        string
+	filterMode    bool
+	showHelp      bool
 	result        selectorResult
 	cancel        bool
 	width         int
 	height        int
 }
 
-func runSelector(opts selectorOptions) ([]selectorItem, selectorOptions, error) {
-	model := selectorModel{opts: opts, selected: map[int]bool{}, selectedRoles: map[int]string{}, width: 100}
+func newSelectorModel(opts selectorOptions) selectorModel {
+	model := selectorModel{opts: opts, selected: map[int]bool{}, selectedRoles: map[int]string{}, width: 100, notice: opts.Notice}
 	for i, item := range opts.Items {
 		if item.Selected && !item.Disabled && !item.All {
 			model.selected[i] = true
@@ -5383,6 +5429,11 @@ func runSelector(opts selectorOptions) ([]selectorItem, selectorOptions, error) 
 		}
 	}
 	model.refreshTidyReview()
+	return model
+}
+
+func runSelector(opts selectorOptions) ([]selectorItem, selectorOptions, error) {
+	model := newSelectorModel(opts)
 	program := tea.NewProgram(model, tea.WithInput(stdinReader), tea.WithOutput(stderrWriter))
 	out, err := program.Run()
 	if err != nil {
@@ -5414,15 +5465,24 @@ func (m selectorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "ctrl+c", "esc":
+		key := msg.String()
+		// ctrl+a is not a letter, so it works in filter mode too without
+		// taking anything away from filter input.
+		if key == "ctrl+a" {
+			m.toggleAllVisible()
+			break
+		}
+		if m.filterMode && key != "ctrl+c" {
+			m.updateFilterMode(msg)
+			break
+		}
+		switch key {
+		case "ctrl+c", "esc", "q":
 			m.stopPreview()
 			m.cancel = true
 			return m, tea.Quit
-		case "q":
-			m.stopPreview()
-			m.cancel = true
-			return m, tea.Quit
+		case "/":
+			m.filterMode = true
 		case "up", "k":
 			if m.cursor > 0 {
 				m.cursor--
@@ -5432,14 +5492,13 @@ func (m selectorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cursor++
 			}
 		case "backspace":
-			if len(m.filter) > 0 {
-				m.filter = m.filter[:len(m.filter)-1]
-				m.cursor = 0
-			}
+			m.backspaceFilter()
 		case " ":
 			if m.opts.Mode == selectorMulti {
 				visible := m.visibleItems()
 				if m.cursor >= 0 && m.cursor < len(visible) {
+					// A notice describes the selection it was made for.
+					m.notice = ""
 					m.toggleSelection(visible[m.cursor])
 					if m.cursor < len(visible)-1 {
 						m.cursor++
@@ -5453,74 +5512,209 @@ func (m selectorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.stopPreview()
 			return m.submit(), tea.Quit
-		case "v":
-			if m.opts.Tidy {
-				m.previewOpen = !m.previewOpen
-			} else {
-				m.filter += "v"
-				m.cursor = 0
-			}
 		case "pgdown", "pgup":
 			if m.previewOpen {
 				step := max(1, m.height-5)
-				if msg.String() == "pgup" {
+				if key == "pgup" {
 					step = -step
 				}
 				m.previewOffset = max(0, min(m.previewOffset+step, len(strings.Split(m.previewText, "\n"))-max(1, m.height-5)))
 			}
-		case "p":
-			if m.opts.Tidy {
-				m.toggleTidyPolicy()
-			} else {
-				m.filter += "p"
-				m.cursor = 0
-			}
-		case "f":
-			if m.opts.AllowForceToggle {
-				m.opts.ForceEnabled = !m.opts.ForceEnabled
-				for i := range m.opts.Items {
-					item := &m.opts.Items[i]
-					if item.All {
-						continue
-					}
-					if m.opts.Tidy {
-						item.Disabled = itemHasMarker(*item, "current") || itemHasMarker(*item, "main") || (!m.opts.ForceEnabled && !item.NormallyClosable && item.Status != "missing")
-					} else if m.opts.ForceEnabled {
-						item.Disabled = item.Status == "missing"
-					} else {
-						item.Disabled = item.Status == "missing" || !item.NormallyClosable
-					}
-					if item.Disabled {
-						delete(m.selected, i)
-					}
-				}
-			}
-		case "s":
-			m.opts.StackOptions.Shape = cycle(m.opts.StackOptions.Shape, []string{"auto", "linear", "merge"})
-		case "r":
-			m.opts.StackOptions.RebaseMode = cycle(m.opts.StackOptions.RebaseMode, []string{"auto", "branch", "revision"})
-		case "c":
-			m.opts.StackOptions.ConflictStrategy = cycle(m.opts.StackOptions.ConflictStrategy, []string{"prefer-clean", "off"})
-		case "a":
-			if m.opts.AllowRoleToggle {
-				visible := m.visibleItems()
-				if m.cursor >= 0 && m.cursor < len(visible) {
-					m.toggleSelectedRole(visible[m.cursor])
-				}
-			}
 		default:
-			if len(msg.String()) == 1 {
-				r := []rune(msg.String())[0]
-				if unicode.IsPrint(r) {
-					m.filter += msg.String()
-					m.cursor = 0
-				}
+			if !m.handleCommandKey(key) {
+				m.typeFilter(msg)
 			}
 		}
 	}
 	m.refreshTidyReview()
 	cmd := m.requestTidyPreview()
 	return m, cmd
+}
+
+// handleCommandKey handles letter commands that are bound only for selectors
+// that use them. Unbound letters return false and become filter input.
+func (m *selectorModel) handleCommandKey(key string) bool {
+	switch key {
+	case "v":
+		if !m.opts.Tidy {
+			return false
+		}
+		m.previewOpen = !m.previewOpen
+	case "?":
+		if !m.opts.Tidy {
+			return false
+		}
+		m.showHelp = !m.showHelp
+	case "p":
+		if !m.opts.Tidy {
+			return false
+		}
+		m.toggleTidyPolicy()
+	case "f":
+		if !m.opts.AllowForceToggle {
+			return false
+		}
+		m.toggleForce()
+	case "s", "r", "c":
+		if !m.opts.AllowStackOptions {
+			return false
+		}
+		switch key {
+		case "s":
+			m.opts.StackOptions.Shape = cycle(m.opts.StackOptions.Shape, []string{"auto", "linear", "merge"})
+		case "r":
+			m.opts.StackOptions.RebaseMode = cycle(m.opts.StackOptions.RebaseMode, []string{"auto", "branch", "revision"})
+		case "c":
+			m.opts.StackOptions.ConflictStrategy = cycle(m.opts.StackOptions.ConflictStrategy, []string{"prefer-clean", "off"})
+		}
+	case "a":
+		if !m.opts.AllowRoleToggle {
+			return false
+		}
+		visible := m.visibleItems()
+		if m.cursor >= 0 && m.cursor < len(visible) {
+			m.toggleSelectedRole(visible[m.cursor])
+		}
+	default:
+		return false
+	}
+	return true
+}
+
+// toggleAllVisible selects every selectable visible row, or deselects them
+// all when they are already all selected. Hidden rows are untouched. In Tidy
+// without force, rows are added greedily (visible order) only while the batch
+// still passes the same review, so select-all never self-blocks.
+func (m *selectorModel) toggleAllVisible() {
+	if m.opts.Mode != selectorMulti {
+		return
+	}
+	candidates := []int{}
+	allSelected := true
+	for _, idx := range m.visibleItems() {
+		item := m.opts.Items[idx]
+		if item.Disabled || item.All || item.Stale {
+			continue
+		}
+		candidates = append(candidates, idx)
+		if !m.selected[idx] {
+			allSelected = false
+		}
+	}
+	if len(candidates) == 0 {
+		return
+	}
+	m.notice = ""
+	if allSelected {
+		for _, idx := range candidates {
+			m.toggleSelection(idx)
+		}
+		return
+	}
+	if !m.opts.Tidy || m.opts.ReviewTidy == nil {
+		for _, idx := range candidates {
+			if !m.selected[idx] {
+				m.toggleSelection(idx)
+			}
+		}
+		return
+	}
+	// Greedy on top of the existing selection, which is never changed. If
+	// that selection is already blocked no addition can be judged safe.
+	current := m.selectedItems()
+	if _, err := m.opts.ReviewTidy(current, m.opts.ForceEnabled); err != nil {
+		m.notice = "ctrl+a added nothing: the checked batch is already blocked; uncheck rows or press f first"
+		return
+	}
+	added := []int{}
+	left := []string{}
+	for _, idx := range candidates {
+		if m.selected[idx] {
+			continue
+		}
+		trial := append(append([]selectorItem{}, current...), m.opts.Items[idx])
+		if _, err := m.opts.ReviewTidy(trial, m.opts.ForceEnabled); err != nil {
+			left = append(left, m.opts.Items[idx].Handle)
+			continue
+		}
+		current = trial
+		added = append(added, idx)
+	}
+	for _, idx := range added {
+		m.toggleSelection(idx)
+	}
+	if len(left) > 0 {
+		m.notice = tidyLeftUncheckedNotice(left)
+	}
+}
+
+func tidyLeftUncheckedNotice(handles []string) string {
+	return "Left unchecked (only protected by other checked rows): " + strings.Join(handles, ", ")
+}
+
+func (m *selectorModel) toggleForce() {
+	m.notice = ""
+	m.opts.ForceEnabled = !m.opts.ForceEnabled
+	for i := range m.opts.Items {
+		item := &m.opts.Items[i]
+		if item.All {
+			continue
+		}
+		if m.opts.Tidy {
+			item.Disabled = item.Stale || itemHasMarker(*item, "current") || itemHasMarker(*item, "main") || (!m.opts.ForceEnabled && !item.NormallyClosable && item.Status != "missing")
+		} else if m.opts.ForceEnabled {
+			item.Disabled = item.Status == "missing"
+		} else {
+			item.Disabled = item.Status == "missing" || !item.NormallyClosable
+		}
+		if item.Disabled {
+			delete(m.selected, i)
+		}
+	}
+}
+
+// updateFilterMode is the explicit "/" filter input: every printable key,
+// including command letters and space, edits the filter. Enter or Esc leave
+// filter mode (keeping the filter); they never submit or quit.
+func (m *selectorModel) updateFilterMode(msg tea.KeyMsg) {
+	switch msg.String() {
+	case "esc", "enter":
+		m.filterMode = false
+	case "backspace":
+		m.backspaceFilter()
+	default:
+		m.typeFilter(msg)
+	}
+}
+
+func (m *selectorModel) typeFilter(msg tea.KeyMsg) {
+	text := ""
+	switch msg.Type {
+	case tea.KeySpace:
+		text = " "
+	case tea.KeyRunes:
+		if msg.Alt {
+			return
+		}
+		for _, r := range msg.Runes {
+			if unicode.IsPrint(r) {
+				text += string(r)
+			}
+		}
+	}
+	if text == "" {
+		return
+	}
+	m.filter += text
+	m.cursor = 0
+}
+
+func (m *selectorModel) backspaceFilter() {
+	if len(m.filter) > 0 {
+		runes := []rune(m.filter)
+		m.filter = string(runes[:len(runes)-1])
+		m.cursor = 0
+	}
 }
 
 func (m *selectorModel) toggleSelection(idx int) {
@@ -5687,33 +5881,45 @@ func (m selectorModel) View() string {
 	if m.opts.Tidy && m.previewOpen {
 		return m.tidyPreviewView()
 	}
-	var b strings.Builder
 	styles := selectorStyles()
 	if m.height <= 0 {
 		return clipSelectorLine(styles.Title.Render(m.opts.Title), m.width)
+	}
+	if m.opts.Tidy {
+		return m.tidyView(styles)
 	}
 	visible := m.visibleItems()
 	cursor := m.cursor
 	if cursor >= len(visible) && len(visible) > 0 {
 		cursor = len(visible) - 1
 	}
-	shown, first := selectorViewport(visible, cursor, m.selectorItemRows())
+	showFilter := m.filter != "" || m.filterMode
+	// Priority when the terminal is short: title, one row, footer, hint,
+	// legend, filter. Chrome is dropped rather than exceeding the height.
+	rowBudget, include := fitSelectorChrome(m.height, true, true, true, showFilter)
+	showFooter, showHint, showLegend, showFilterLine := include[0], include[1], include[2], include[3]
+	shown, first := selectorViewport(visible, cursor, rowBudget)
+	if rowBudget == 0 {
+		shown = nil
+	}
+	lines := []string{}
 	title := m.opts.Title
 	if len(shown) < len(visible) {
 		title += fmt.Sprintf(" (%d-%d/%d)", first+1, first+len(shown), len(visible))
 	}
-	fmt.Fprintln(&b, clipSelectorLine(styles.Title.Render(title), m.width))
-	fmt.Fprintln(&b, clipSelectorLine(styles.Help.Render(selectorHint(m.opts)), m.width))
-	if m.filter != "" {
-		fmt.Fprintln(&b, clipSelectorLine(styles.Help.Render("filter: "+m.filter), m.width))
+	lines = append(lines, styles.Title.Render(title))
+	if showHint {
+		lines = append(lines, styles.Help.Render(selectorHint(m.opts)))
+	}
+	if showFilterLine {
+		lines = append(lines, styles.Help.Render(m.filterLine()))
 	}
 	widths := selectorColumnWidthsForItems(m.opts.Items, visible)
-	if len(visible) == 0 {
-		fmt.Fprintln(&b, clipSelectorLine(styles.Disabled.Render("No matching Workspaces"), m.width))
+	if len(visible) == 0 && rowBudget > 0 {
+		lines = append(lines, styles.Disabled.Render("No matching Workspaces"))
 	}
 	for row, idx := range shown {
 		item := m.opts.Items[idx]
-		displayItem := item
 		pointer := "  "
 		if first+row == cursor {
 			pointer = "> "
@@ -5729,56 +5935,245 @@ func (m selectorModel) View() string {
 				}
 			}
 		}
-		line := formatSelectorItemLine(pointer, mark, displayItem, widths)
+		lines = append(lines, m.styleSelectorRow(styles, item, first+row == cursor, formatSelectorItemLine(pointer, mark, item, widths)))
+	}
+	if showLegend {
+		lines = append(lines, styles.Help.Render(selectorLegend(m.opts)))
+	}
+	if showFooter {
+		footer := "↑/↓ move  / filter  enter choose  q quit"
+		if m.opts.Mode == selectorMulti {
+			footer = "↑/↓ move  space toggle/next  ctrl+a all shown  enter submit selected  / filter  q quit"
+		}
+		if m.filterMode {
+			footer = "filter: typing edits the filter  ctrl+a all shown  enter/esc done  backspace delete"
+		}
+		if m.opts.AllowForceToggle {
+			footer += fmt.Sprintf("  f force:%v", m.opts.ForceEnabled)
+		}
+		if m.opts.AllowRoleToggle {
+			footer += "  a toggle payload/follow-only"
+		}
+		if m.opts.AllowStackOptions {
+			footer += fmt.Sprintf("  s shape:%s  r rebase:%s  c conflicts:%s", emptyDefault(m.opts.StackOptions.Shape, "auto"), emptyDefault(m.opts.StackOptions.RebaseMode, "auto"), emptyDefault(m.opts.StackOptions.ConflictStrategy, "prefer-clean"))
+		}
+		lines = append(lines, styles.Help.Render(footer))
+	}
+	return joinSelectorLines(lines, m.width, m.height)
+}
+
+// fitSelectorChrome returns the item-row budget for a view with a title plus
+// optional chrome lines listed in priority order. An optional line is shown
+// only while at least one item row remains, so the view never exceeds height.
+func fitSelectorChrome(height int, optional ...bool) (int, []bool) {
+	include := make([]bool, len(optional))
+	rows := max(0, height-1)
+	for i, want := range optional {
+		if want && rows >= 2 {
+			include[i] = true
+			rows--
+		}
+	}
+	return rows, include
+}
+
+// joinSelectorLines clips every line to the terminal width and never returns
+// more than height lines. Bubble Tea counts a trailing newline as an extra
+// empty row and drops rows from the top when the buffer exceeds the terminal
+// height, so no trailing newline is emitted.
+func joinSelectorLines(lines []string, width, height int) string {
+	if height > 0 && len(lines) > height {
+		lines = lines[:height]
+	}
+	for i := range lines {
+		lines[i] = clipSelectorLine(lines[i], width)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m selectorModel) styleSelectorRow(styles styles, item selectorItem, highlighted bool, line string) string {
+	switch {
+	case item.Disabled:
+		return styles.Disabled.Render(line)
+	case highlighted:
+		return styles.Selected.Render(line)
+	case itemHasMarker(item, "main"):
+		return styles.Main.Render(line)
+	default:
+		return styleStatus(styles, item.Status, line)
+	}
+}
+
+func (m selectorModel) filterLine() string {
+	if m.filterMode {
+		return "filter: " + m.filter + "▏"
+	}
+	return "filter: " + m.filter
+}
+
+func (m selectorModel) tidyView(styles styles) string {
+	visible := m.visibleItems()
+	cursor := m.cursor
+	if cursor >= len(visible) && len(visible) > 0 {
+		cursor = len(visible) - 1
+	}
+	force := "off"
+	if m.opts.ForceEnabled {
+		force = "ON"
+	}
+	title := fmt.Sprintf("%s — %d selected / %d  (force %s)", m.opts.Title, len(m.selectedItems()), len(m.opts.Items), force)
+	if m.showHelp {
+		// A blocked Enter replaces the footer and outranks help text.
+		rowBudget, include := fitSelectorChrome(m.height, true)
+		if m.problem != "" && m.height >= 2 {
+			rowBudget, include = m.height-2, []bool{true}
+		}
+		lines := []string{styles.Title.Render(title)}
+		help := wrapSelectorText(tidyHelpText(m.opts), m.width)
+		lines = append(lines, help[:min(len(help), rowBudget)]...)
+		if include[0] {
+			footer := styles.Help.Render("? back to list  q quit")
+			if m.problem != "" {
+				footer = m.tidyDetailLine(styles, nil, 0, true)
+			}
+			lines = append(lines, footer)
+		}
+		return joinSelectorLines(lines, m.width, m.height)
+	}
+	showFilter := m.filter != "" || m.filterMode
+	// The detail line carries the Enter-blocked reason, so it outranks rows:
+	// title, detail, one row, notice, footer, filter. A notice gets its own
+	// line so row details stay visible while it persists.
+	rows := max(0, m.height-1)
+	showDetail := rows >= 1
+	if showDetail {
+		rows--
+	}
+	rowBudget, include := fitSelectorChrome(rows+1, m.notice != "", true, showFilter)
+	showNotice, showFooter, showFilterLine := include[0], include[1], include[2]
+	shown, first := selectorViewport(visible, cursor, rowBudget)
+	if rowBudget == 0 {
+		shown = nil
+	}
+	if len(shown) < len(visible) {
+		title += fmt.Sprintf("  %d-%d/%d", first+1, first+len(shown), len(visible))
+	}
+	lines := []string{styles.Title.Render(title)}
+	if showFilterLine {
+		lines = append(lines, styles.Help.Render(m.filterLine()))
+	}
+	if len(visible) == 0 && rowBudget > 0 {
+		lines = append(lines, styles.Disabled.Render("No matching Workspaces"))
+	}
+	widths := tidyColumnWidths(m.opts.Items, visible)
+	for row, idx := range shown {
+		item := m.opts.Items[idx]
+		pointer := "  "
+		if first+row == cursor {
+			pointer = "> "
+		}
+		mark := "[ ] "
 		if item.Disabled {
-			line = styles.Disabled.Render(line)
-		} else if first+row == cursor {
-			line = styles.Selected.Render(line)
-		} else if itemHasMarker(item, "main") {
-			line = styles.Main.Render(line)
-		} else {
-			line = styleStatus(styles, item.Status, line)
+			mark = "[-] "
+		} else if m.selected[idx] {
+			mark = "[x] "
 		}
-		fmt.Fprintln(&b, clipSelectorLine(line, m.width))
+		line := pointer + mark + padVisible(item.Policy, widths.Policy) + " " + padVisible(item.Handle, widths.Handle) + " " + padVisible(item.Status, widths.Status) + " " + item.Markers
+		lines = append(lines, m.styleSelectorRow(styles, item, first+row == cursor, strings.TrimRight(line, " ")))
 	}
-	if m.opts.Tidy {
-		detail := "No Workspace highlighted"
-		if len(visible) > 0 {
-			item := m.opts.Items[visible[cursor]]
-			detail = item.Handle + ": " + m.evidence[item.Handle]
+	if showDetail {
+		lines = append(lines, m.tidyDetailLine(styles, visible, cursor, !showNotice))
+	}
+	if showNotice {
+		lines = append(lines, styles.Help.Render(m.notice))
+	}
+	if showFooter {
+		footer := "space toggle  enter tidy  / filter  p Keep/Disposable  f force  v preview  ctrl+a all shown  ? help  q quit"
+		if m.filterMode {
+			footer = "filter: typing edits the filter  ctrl+a all shown  enter/esc done  backspace delete"
 		}
-		fmt.Fprintln(&b, clipSelectorLine(styles.Help.Render(detail), m.width))
-		message := m.notice
-		if m.problem != "" {
-			message = m.problem
+		lines = append(lines, styles.Help.Render(footer))
+	}
+	return joinSelectorLines(lines, m.width, m.height)
+}
+
+func tidyColumnWidths(items []selectorItem, visible []int) selectorColumnWidths {
+	widths := selectorColumnWidths{}
+	for _, idx := range visible {
+		if idx < 0 || idx >= len(items) {
+			continue
 		}
-		if message == "" {
-			message = "Keep is never automatic; Space explicitly selects. p persists policy even on cancel."
+		item := items[idx]
+		widths.Policy = max(widths.Policy, lipgloss.Width(item.Policy))
+		widths.Handle = max(widths.Handle, lipgloss.Width(item.Handle))
+		widths.Status = max(widths.Status, lipgloss.Width(item.Status))
+	}
+	return widths
+}
+
+// tidyDetailLine is the single Tidy status line: a blocked Enter first (warn
+// style, actionable text before handle lists), then a notice, then the
+// highlighted row's graph evidence and path.
+func (m selectorModel) tidyDetailLine(styles styles, visible []int, cursor int, includeNotice bool) string {
+	if m.problem != "" {
+		return styles.Warn.Render(tidyBlockedPrefix + strings.TrimPrefix(m.problem, tidyBlockedPrefix))
+	}
+	if includeNotice && m.notice != "" {
+		return styles.Help.Render(m.notice)
+	}
+	if len(visible) == 0 || cursor < 0 || cursor >= len(visible) {
+		return styles.Help.Render("No Workspace highlighted")
+	}
+	item := m.opts.Items[visible[cursor]]
+	if item.Stale {
+		return styles.Warn.Render(item.Handle + ": " + staleWorkspaceHint(workspaceInfo{Path: item.Path}))
+	}
+	detail := item.Handle + ": " + emptyDefault(m.evidence[item.Handle], item.Safety)
+	if item.Path != "" {
+		detail += " · " + item.Path
+	}
+	return styles.Help.Render(detail)
+}
+
+const tidyBlockedPrefix = "Enter blocked: "
+
+func tidyHelpText(opts selectorOptions) []string {
+	return []string{
+		selectorHint(opts),
+		selectorLegend(opts),
+		"Keep is never automatic; Space explicitly selects. p persists policy even on cancel.",
+		"Status is Main-relative; selected rows can't protect each other. Enter stays blocked until the checked batch is safe or force is on; automatic preselection leaves rows unchecked that only other checked rows protect.",
+		"Stale rows are never closed: run the shown `jj workspace update-stale` command, then rerun ajj tidy.",
+		"Keys: ↑/↓ or j/k move, space toggle/next, ctrl+a select/deselect all shown rows (only rows the batch review accepts; also in filter mode), enter tidy, / filter (enter/esc finish; every key types), backspace edit filter, p Keep/Disposable, f force, v preview (PgUp/PgDn scroll), ? help, q/esc quit.",
+	}
+}
+
+// wrapSelectorText word-wraps paragraphs to width (lines longer than width
+// are clipped later by joinSelectorLines).
+func wrapSelectorText(paragraphs []string, width int) []string {
+	out := []string{}
+	for _, paragraph := range paragraphs {
+		if width <= 0 {
+			out = append(out, paragraph)
+			continue
 		}
-		fmt.Fprintln(&b, clipSelectorLine(styles.Help.Render(message), m.width))
+		line := ""
+		for _, word := range strings.Fields(paragraph) {
+			if line != "" && lipgloss.Width(line)+1+lipgloss.Width(word) > width {
+				out = append(out, line)
+				line = ""
+			}
+			if line == "" {
+				line = word
+			} else {
+				line += " " + word
+			}
+		}
+		if line != "" {
+			out = append(out, line)
+		}
 	}
-	fmt.Fprintln(&b, clipSelectorLine(styles.Help.Render(selectorLegend(m.opts)), m.width))
-	footer := "↑/↓ move  type filter  enter choose  q quit"
-	if m.opts.Mode == selectorMulti {
-		footer = "↑/↓ move  space toggle/next  enter submit selected  type filter  q quit"
-	}
-	if m.opts.AllowForceToggle {
-		footer += fmt.Sprintf("  f force:%v", m.opts.ForceEnabled)
-	}
-	if m.opts.Tidy {
-		footer += "  p Keep/Disposable (persist)  v preview"
-	}
-	if m.opts.AllowRoleToggle {
-		footer += "  a toggle payload/follow-only"
-	}
-	if m.opts.StackOptions.Shape != "" || m.opts.StackOptions.RebaseMode != "" || m.opts.StackOptions.ConflictStrategy != "" {
-		footer += fmt.Sprintf("  s shape:%s  r rebase:%s  c conflicts:%s", emptyDefault(m.opts.StackOptions.Shape, "auto"), emptyDefault(m.opts.StackOptions.RebaseMode, "auto"), emptyDefault(m.opts.StackOptions.ConflictStrategy, "prefer-clean"))
-	}
-	fmt.Fprintln(&b, clipSelectorLine(styles.Help.Render(footer), m.width))
-	// Bubble Tea counts a trailing newline as an extra empty buffer row and
-	// drops rows from the top when the buffer exceeds the terminal height.
-	// Returning exactly the budgeted rows keeps the title and viewport visible.
-	return strings.TrimSuffix(b.String(), "\n")
+	return out
 }
 
 func clipSelectorLine(line string, width int) string {
@@ -5786,20 +6181,6 @@ func clipSelectorLine(line string, width int) string {
 		return line
 	}
 	return lipgloss.NewStyle().MaxWidth(width).Render(line)
-}
-
-func (m selectorModel) selectorItemRows() int {
-	if m.height <= 0 {
-		return 0
-	}
-	chromeRows := 4 // title, hint, legend, and footer
-	if m.opts.Tidy {
-		chromeRows += 2
-	}
-	if m.filter != "" {
-		chromeRows++
-	}
-	return max(1, m.height-chromeRows)
 }
 
 func selectorViewport(visible []int, cursor int, limit int) ([]int, int) {
@@ -5882,7 +6263,7 @@ func selectorLegend(opts selectorOptions) string {
 
 func selectorHint(opts selectorOptions) string {
 	if opts.Mode == selectorSingle {
-		return "Choose the Workspace to open. Type to filter by handle, status, marker, or path."
+		return "Choose the Workspace to open. Type (or press / to type any key) to filter by handle, status, marker, or path."
 	}
 	if opts.OrderedSelection {
 		return "Choose Line Stacking order. Space toggles and advances in selection order; press a on a selected row to toggle payload/follow-only. The target Workspace is disabled."
@@ -5899,7 +6280,7 @@ func selectorHint(opts selectorOptions) string {
 	if opts.AllowForceToggle {
 		return "Choose Workspaces to close. Normal close requires representation outside the complete closing set; Press f for Forced Closing."
 	}
-	return "Choose Workspaces. Type to filter by handle, status, marker, or path."
+	return "Choose Workspaces. Type (or press / to type any key) to filter by handle, status, marker, or path; ctrl+a toggles all shown rows."
 }
 
 func (m selectorModel) visibleItems() []int {
@@ -5974,8 +6355,12 @@ func selectorItemsForTidy(infos []workspaceInfo, force bool) []selectorItem {
 			continue
 		}
 		tidy := isClosable(info) || info.Missing
-		disabled := info.Current || (!force && !tidy)
-		items = append(items, selectorItem{Handle: info.Ref.Handle, Path: info.Path, Status: statusLabel(info), Policy: emptyDefault(info.Policy, policyKeep), Safety: workspaceCloseSafetyLabel(info), NormallyClosable: isClosable(info), Markers: strings.Join(markers(info), ","), Disabled: disabled, Selected: info.Policy == policyDisposable && (tidy || force) && !info.Current})
+		disabled := info.Current || info.Stale || (!force && !tidy)
+		status := statusLabel(info)
+		if info.Stale {
+			status = "stale"
+		}
+		items = append(items, selectorItem{Handle: info.Ref.Handle, Path: info.Path, Status: status, Policy: emptyDefault(info.Policy, policyKeep), Safety: workspaceCloseSafetyLabel(info), NormallyClosable: isClosable(info), Markers: strings.Join(markers(info), ","), Disabled: disabled, Stale: info.Stale, Selected: info.Policy == policyDisposable && (tidy || force) && !info.Current && !info.Stale})
 	}
 	return items
 }
@@ -6016,7 +6401,7 @@ func markerPresent(markers []string, needle string) bool {
 	return false
 }
 
-type styles struct{ Title, Selected, Disabled, Help, Conflict, Stacked, Empty, Missing, Unstacked, Marker, Main lipgloss.Style }
+type styles struct{ Title, Selected, Disabled, Help, Warn, Conflict, Stacked, Empty, Missing, Unstacked, Marker, Main lipgloss.Style }
 
 func selectorStyles() styles {
 	return selectorStylesForWriter(stderrWriter)
@@ -6029,13 +6414,14 @@ func selectorStylesForWriter(w io.Writer) styles {
 func selectorStylesForRenderer(r *lipgloss.Renderer, noColor bool) styles {
 	base := r.NewStyle()
 	if noColor {
-		return styles{Title: base.Bold(true), Selected: base.Bold(true), Disabled: base.Faint(true), Help: base.Faint(true), Conflict: base, Stacked: base, Empty: base, Missing: base, Unstacked: base, Marker: base, Main: base.Bold(true)}
+		return styles{Title: base.Bold(true), Selected: base.Bold(true), Disabled: base.Faint(true), Help: base.Faint(true), Warn: base.Bold(true), Conflict: base, Stacked: base, Empty: base, Missing: base, Unstacked: base, Marker: base, Main: base.Bold(true)}
 	}
 	return styles{
 		Title:     r.NewStyle().Bold(true).Foreground(lipgloss.Color("63")),
 		Selected:  r.NewStyle().Bold(true).Foreground(lipgloss.Color("212")),
 		Disabled:  r.NewStyle().Faint(true),
 		Help:      r.NewStyle().Faint(true),
+		Warn:      r.NewStyle().Bold(true).Foreground(lipgloss.Color("208")),
 		Conflict:  r.NewStyle().Foreground(lipgloss.Color("196")),
 		Stacked:   r.NewStyle().Foreground(lipgloss.Color("42")),
 		Empty:     r.NewStyle().Foreground(lipgloss.Color("244")),

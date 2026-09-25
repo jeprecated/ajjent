@@ -262,7 +262,7 @@ func TestTidyPolicyActionPersistsOnCancelAndManualKeepSelection(t *testing.T) {
 	}
 }
 
-func TestTidyBatchMutualProtectionBlocksSubmitUntilProtectorSurvives(t *testing.T) {
+func TestTidyBatchMutualProtectionBlocksManualSubmitAndAutoClosesSafeSubset(t *testing.T) {
 	repo, _, _ := setupMutuallyRepresentedCloseRepo(t)
 	markDisposableForTest(t, repo, "alpha", "bravo")
 	infos := policyInfosForTest(t, repo, "proj")
@@ -273,8 +273,12 @@ func TestTidyBatchMutualProtectionBlocksSubmitUntilProtectorSurvives(t *testing.
 	m := selectorModel{opts: selectorOptions{Tidy: true, Mode: selectorMulti, Items: selectorItemsForTidy(infos, false), ReviewTidy: review.review}, selected: map[int]bool{0: true, 1: true}}
 	out, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = out.(selectorModel)
-	if cmd != nil || !strings.Contains(m.problem, "Batch blocked") {
+	if cmd != nil || !strings.Contains(m.problem, "can't protect each other") {
 		t.Fatal("mutually protected batch submitted")
+	}
+	m.width, m.height = 80, 10
+	if !strings.Contains(m.View(), "Enter blocked: uncheck") {
+		t.Fatalf("blocked Enter is not visible:\n%s", m.View())
 	}
 	m.toggleSelection(1)
 	out, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -282,8 +286,14 @@ func TestTidyBatchMutualProtectionBlocksSubmitUntilProtectorSurvives(t *testing.
 	if cmd == nil || len(m.result.Items) != 1 || !strings.Contains(m.evidence["alpha"], "bravo") {
 		t.Fatalf("survivor not explained: %+v", m.evidence)
 	}
-	if _, _, err := captureOutput(func() error { return runTidy([]string{"--repo", repo, "--yes"}) }); err == nil || !strings.Contains(err.Error(), "batch blocked") {
-		t.Fatalf("automatic contradictory batch silently filtered: %v", err)
+	// Non-interactive automatic Tidy closes the greedy safe subset instead of
+	// blocking itself: alpha (first) closes while bravo survives to protect it.
+	_, diagnostics, err := captureOutput(func() error { return runTidy([]string{"--repo", repo, "--yes"}) })
+	if err != nil || !strings.Contains(diagnostics, "Left for manual review") || !strings.Contains(diagnostics, "bravo") {
+		t.Fatalf("automatic mutual pair was not reduced to a safe subset: %v\n%s", err, diagnostics)
+	}
+	if workspaceRegistered(t, repo, "alpha") || !workspaceRegistered(t, repo, "bravo") {
+		t.Fatal("expected exactly alpha closed and bravo kept as its surviving protector")
 	}
 }
 

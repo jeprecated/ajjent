@@ -1,14 +1,50 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // Snapshot only lifecycle candidates, not every Workspace inspected by list or
 // Stack. Graph queries intentionally ignore working copies; without this step,
 // a represented cursor can conceal unrecorded files that removal would destroy.
 func snapshotCloseCandidates(repoPath string, targets []workspaceInfo) error {
+	_, err := snapshotLifecycleCandidates(repoPath, targets, false)
+	return err
+}
+
+// snapshotTidyCandidates scopes the stale fail-closed contract per Workspace:
+// a candidate whose snapshot fails because its working copy is stale is
+// reported (and must then be excluded from every Tidy selection) instead of
+// aborting the whole Tidy. Nothing is recovered automatically. Any other
+// snapshot failure still aborts.
+func snapshotTidyCandidates(repoPath string, targets []workspaceInfo) (map[string]bool, error) {
+	return snapshotLifecycleCandidates(repoPath, targets, true)
+}
+
+func isStaleWorkingCopyError(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "working copy is stale")
+}
+
+func staleWorkspaceInfos(infos []workspaceInfo) []workspaceInfo {
+	stale := []workspaceInfo{}
+	for _, info := range infos {
+		if info.Stale {
+			stale = append(stale, info)
+		}
+	}
+	return stale
+}
+
+func staleWorkspaceHint(info workspaceInfo) string {
+	return "stale — run: jj -R " + info.Path + " workspace update-stale"
+}
+
+func snapshotLifecycleCandidates(repoPath string, targets []workspaceInfo, tolerateStale bool) (map[string]bool, error) {
+	stale := map[string]bool{}
 	protection, err := newCloseProtectionContext(repoPath, targets)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// Validate every candidate before running any snapshot. Containment is a
 	// deletion restriction, not a snapshot restriction: an unselected parent
@@ -16,7 +52,7 @@ func snapshotCloseCandidates(repoPath string, targets []workspaceInfo) error {
 	for _, target := range targets {
 		if !target.Missing {
 			if err := validateWorkspaceSnapshotTarget(repoPath, target, protection.workspaceRoots); err != nil {
-				return err
+				return nil, err
 			}
 		}
 	}
@@ -25,10 +61,14 @@ func snapshotCloseCandidates(repoPath string, targets []workspaceInfo) error {
 			continue
 		}
 		if _, err := commandCaptureFn("jj", "-R", target.Path, "--config=snapshot.auto-update-stale=false", "--color=never", "--no-pager", "status"); err != nil {
-			return fmt.Errorf("snapshot Workspace %q before Closing: %w; inspect the Workspace and retry (no automatic stale recovery)", target.Ref.Handle, err)
+			if tolerateStale && isStaleWorkingCopyError(err) {
+				stale[target.Ref.Handle] = true
+				continue
+			}
+			return nil, fmt.Errorf("snapshot Workspace %q before Closing: %w; inspect the Workspace and retry (no automatic stale recovery)", target.Ref.Handle, err)
 		}
 	}
-	return nil
+	return stale, nil
 }
 
 func validateWorkspaceSnapshotTarget(repoPath string, target workspaceInfo, refs []workspaceRef) error {

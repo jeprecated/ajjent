@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Multi-select TUIs: `ctrl+a` selects every shown (filtered) selectable row, or deselects them when all are already selected; it also works inside `/` filter mode. In Tidy it adds rows greedily only while the batch review still passes (all rows under force), names rows it left unchecked, and never selects stale rows.
 - Machine create accepts optional `child.baseCommit` independently of the Current Workspace's `target.expectedHeadCommit` drift guard. Capabilities v3 advertises `create.explicitBaseCommit`; receipts echo the explicit base and verify the child's sole parent against it. Omitted-base requests and human create retain their previous behavior.
 - `ajj undo` safely restores the latest recorded Stack, Line Stack, or Move-to-Main operation. It snapshots the current Workspace, refuses when the exact Jujutsu operation has advanced, prints the manual `jj op restore <id>` escape hatch, and consumes a successful undo record.
 - `ajj create --request-json ... --json` adds a strict Current-Workspace machine ensure/reconcile boundary with path-free `ready`, `partial`, `not-created`, and `conflict` receipts. Explicit `ajj-capabilities-v2` negotiation advertises state reconciliation without claiming exactly-once creator provenance or operation-ID recovery; human create behavior remains unchanged.
@@ -25,6 +26,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- `ajj tidy` automatic selection can no longer block itself: Disposables protected only by other preselected Disposables start unchecked (greedy, in row order), and `--yes` closes the safe subset and names the rest instead of failing "Tidy batch blocked". A blocked Enter is now shown as a warning-styled `Enter blocked:` line.
+- One stale Workspace no longer aborts `ajj tidy`: it is shown disabled with its `jj -R <path> workspace update-stale` hint (a warning under `--yes`) and is never selected, recovered, or closed, while other Workspaces can still be tidied.
+- Selector filtering no longer swallows letters bound to commands that selector does not use (e.g. typing "summon" in Tidy); `/` enters an explicit filter mode where every key types.
+- The Tidy selector is compact (counts in the title, one detail line, one key footer, `?` for the full explanation) and, like every selector, never renders taller or wider than the terminal.
 - Tidy classifies registered directories without `.jj` metadata as `missing` / `forget-registration`, preserving leftover contents such as `.devenv` and visible changes, even with `--force`.
 - Closing verifies that each directory's `.jj/repo` metadata resolves to the active repository's shared storage before deletion. Foreign repositories and existing but broken metadata are refused, including with `--force`; directories without `.jj` metadata are forget-only during Tidy.
 - Closing refuses directories containing the active, repository-owning, or another registered Workspace, even with `--force`. Nested Workspaces must be closed separately, children first; Tidy validates this before abandoning empty heads. Relative repository pointers are resolved from their physical directory.

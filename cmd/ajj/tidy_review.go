@@ -96,9 +96,58 @@ func (r *tidyGraphEvidence) review(selected []selectorItem, force bool) (map[str
 		}
 	}
 	if len(blocked) > 0 {
-		return evidence, fmt.Errorf("Batch blocked: %s; uncheck a protector/target, or explicitly enable force. Selected rows cannot protect each other", strings.Join(blocked, ", "))
+		return evidence, fmt.Errorf("uncheck a row or press f to force; selected rows can't protect each other: %s", strings.Join(blocked, ", "))
 	}
 	return evidence, nil
+}
+
+// preselectSafeTidyBatch keeps the automatic (preselected) Tidy batch
+// submittable. Rows that are individually represented elsewhere can still
+// protect only each other; the batch review refuses that, so candidates are
+// accepted greedily, in item order, only while the growing batch still passes
+// the same review. Rejected rows are left unchecked (never silently closed) and
+// returned so the caller can explain them. Force semantics are unchanged: the
+// review accepts every candidate under force.
+func preselectSafeTidyBatch(items []selectorItem, review func([]selectorItem, bool) (map[string]string, error), force bool) ([]selectorItem, []string) {
+	if review == nil {
+		return items, nil
+	}
+	accepted := []selectorItem{}
+	left := []string{}
+	for i := range items {
+		item := items[i]
+		if !item.Selected || item.Disabled || item.All {
+			continue
+		}
+		trial := append(append([]selectorItem{}, accepted...), item)
+		if _, err := review(trial, force); err != nil {
+			items[i].Selected = false
+			left = append(left, item.Handle)
+			continue
+		}
+		accepted = trial
+	}
+	return items, left
+}
+
+// safeTidyTargets applies the same greedy rule to non-interactive Tidy using
+// the pinned graph evidence. The caller still revalidates the chosen set with
+// the live jj-backed batch checks before anything is closed.
+func (r *tidyGraphEvidence) safeTidyTargets(targets []workspaceInfo, force bool) ([]workspaceInfo, []workspaceInfo) {
+	items := make([]selectorItem, 0, len(targets))
+	for _, target := range targets {
+		items = append(items, selectorItem{Handle: target.Ref.Handle, Selected: true})
+	}
+	items, _ = preselectSafeTidyBatch(items, r.review, force)
+	kept, left := []workspaceInfo{}, []workspaceInfo{}
+	for i, target := range targets {
+		if items[i].Selected {
+			kept = append(kept, target)
+		} else {
+			left = append(left, target)
+		}
+	}
+	return kept, left
 }
 
 func (m *selectorModel) refreshTidyReview() {
@@ -120,6 +169,7 @@ func (m *selectorModel) toggleTidyPolicy() {
 	if m.cursor < 0 || m.cursor >= len(visible) {
 		return
 	}
+	m.notice = ""
 	idx := visible[m.cursor]
 	item := &m.opts.Items[idx]
 	if itemHasMarker(*item, "current") || itemHasMarker(*item, "main") {

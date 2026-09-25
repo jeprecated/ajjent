@@ -121,6 +121,14 @@ func TestTidyShowsSafetySeparatelyFromMainRelativeStatus(t *testing.T) {
 	if !strings.Contains(selectorLegend(selectorOptions{Tidy: true}), "closing set") {
 		t.Fatal("legend must qualify individual safety against complete closing set")
 	}
+	// The Tidy view folds safety into the single detail line, not a column.
+	items[1].Path = "/ws/unique"
+	m := newSelectorModel(selectorOptions{Title: "Tidy Workspaces", Mode: selectorMulti, Items: items, Tidy: true})
+	m.width, m.height, m.cursor = 120, 10, 1
+	view := m.View()
+	if !strings.Contains(view, "unique: requires-force · /ws/unique") || strings.Count(view, "/ws/unique") != 1 {
+		t.Fatalf("detail line must carry safety and path:\n%s", view)
+	}
 }
 
 func TestClosePartialFailureReportsCompletedAndUnattemptedTargets(t *testing.T) {
