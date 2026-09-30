@@ -992,3 +992,33 @@ func jjLogOrEmpty(repoPath string, revset string) string {
 	}
 	return string(out)
 }
+
+func TestRunStackRebaseSkipsFallbackWhenShapesShareDestinations(t *testing.T) {
+	withCommandCapture(t, func(name string, args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		switch {
+		case strings.Contains(joined, "conflicts() & @"):
+			return "conflicted\n", nil
+		case strings.Contains(joined, "commit_id"):
+			return "abc123\n", nil
+		}
+		return "delta-parent\n", nil
+	})
+	calls := []string{}
+	withCommandToStderr(t, func(name string, args ...string) error {
+		calls = append(calls, strings.Join(args, " "))
+		return nil
+	})
+	conflicted, err := runStackRebase("/repo", []string{"delta"}, stackConfig{RebaseMode: "branch", Shape: "auto", ConflictStrategy: "prefer-clean"})
+	if err != nil || !conflicted {
+		t.Fatalf("expected conflicted result without error, conflicted=%v err=%v", conflicted, err)
+	}
+	for _, call := range calls {
+		if strings.Contains(call, " undo") {
+			t.Fatalf("expected no fallback retry when shapes share destinations, calls=%v", calls)
+		}
+	}
+	if len(calls) != 1 {
+		t.Fatalf("expected a single rebase attempt, calls=%v", calls)
+	}
+}

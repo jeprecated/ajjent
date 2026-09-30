@@ -3766,49 +3766,91 @@ func runStackRebase(mainPath string, inputs []string, stack stackConfig) (bool, 
 	if err != nil {
 		return false, err
 	}
-	conflicted, err := runStackRebaseAttempt(mainPath, inputs, resolvedMode, reason, resolvedShape, shapeReason, baseDestinations)
-	if err != nil {
-		return false, err
-	}
-	finalConflicted := conflicted
 	requestedShape := strings.TrimSpace(strings.ToLower(stack.Shape))
 	if requestedShape == "" {
 		requestedShape = "auto"
 	}
-	if resolvedConflictStrategy == "prefer-clean" && conflicted && requestedShape == "auto" {
+	fallbackEligible := resolvedConflictStrategy == "prefer-clean" && requestedShape == "auto"
+	// Resolve the alternative shape against the pre-rebase graph. When both shapes
+	// name the same destination commits, a retry would recreate the identical commit
+	// (jj rejects that as "Newly-created commit ... already exists") and can never
+	// produce a cleaner result, so the fallback is skipped.
+	alternativeResolvedShape, alternativeShapeReason, alternativeDestinations := "", "", []string(nil)
+	if fallbackEligible {
 		alternativeShape := "merge"
 		if resolvedShape == "merge" {
 			alternativeShape = "linear"
 		}
-		alternativeResolvedShape, alternativeShapeReason, alternativeDestinations, altErr := resolveStackShape(mainPath, inputs, alternativeShape)
+		shape, shapeReasonAlt, dests, altErr := resolveStackShape(mainPath, inputs, alternativeShape)
 		if altErr == nil {
-			fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Conflict fallback: undo and retry with %s", alternativeResolvedShape))
-			if err := commandToStderrFn("jj", "-R", mainPath, "undo"); err != nil {
-				return false, err
-			}
-			alternativeConflicted, err := runStackRebaseAttempt(mainPath, inputs, resolvedMode, reason, alternativeResolvedShape, alternativeShapeReason, alternativeDestinations)
+			same, err := sameRevisionSet(mainPath, baseDestinations, dests)
 			if err != nil {
 				return false, err
 			}
-			finalConflicted = alternativeConflicted
-			if alternativeConflicted && alternativeResolvedShape == "linear" {
-				fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Both strategies conflicted; keeping merge shape"))
-				if err := commandToStderrFn("jj", "-R", mainPath, "undo"); err != nil {
-					return false, err
-				}
-				mergeShape, mergeReason, mergeDestinations, err := resolveStackShape(mainPath, inputs, "merge")
-				if err != nil {
-					return false, err
-				}
-				mergeConflicted, err := runStackRebaseAttempt(mainPath, inputs, resolvedMode, reason, mergeShape, mergeReason, mergeDestinations)
-				if err != nil {
-					return false, err
-				}
-				finalConflicted = mergeConflicted
+			if same {
+				fallbackEligible = false
+			} else {
+				alternativeResolvedShape, alternativeShapeReason, alternativeDestinations = shape, shapeReasonAlt, dests
 			}
+		} else {
+			fallbackEligible = false
 		}
 	}
-	return finalConflicted, nil
+	conflicted, err := runStackRebaseAttempt(mainPath, inputs, resolvedMode, reason, resolvedShape, shapeReason, baseDestinations)
+	if err != nil {
+		return false, err
+	}
+	if !conflicted || !fallbackEligible {
+		if conflicted && resolvedConflictStrategy == "prefer-clean" && requestedShape == "auto" {
+			fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Conflict fallback skipped: no alternative shape with different destinations"))
+		}
+		return conflicted, nil
+	}
+	firstOpID, err := currentOperationID(mainPath)
+	if err != nil {
+		return false, err
+	}
+	fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Conflict fallback: undo and retry with %s", alternativeResolvedShape))
+	if err := commandToStderrFn("jj", "-R", mainPath, "undo"); err != nil {
+		return false, err
+	}
+	alternativeConflicted, err := runStackRebaseAttempt(mainPath, inputs, resolvedMode, reason, alternativeResolvedShape, alternativeShapeReason, alternativeDestinations)
+	if err != nil {
+		return false, err
+	}
+	if alternativeConflicted && alternativeResolvedShape == "linear" {
+		// Restore the recorded merge result rather than re-running the identical
+		// rebase, which jj would reject as an already-existing commit.
+		fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Both strategies conflicted; keeping merge shape"))
+		if err := commandToStderrFn("jj", "-R", mainPath, "op", "restore", firstOpID); err != nil {
+			return false, err
+		}
+		return workingCopyHasConflicts(mainPath)
+	}
+	return alternativeConflicted, nil
+}
+
+// sameRevisionSet reports whether two revset lists resolve to the same commits.
+func sameRevisionSet(repoPath string, a, b []string) (bool, error) {
+	aIDs, err := revisionCommitIDs(repoPath, revsetUnion(a))
+	if err != nil {
+		return false, err
+	}
+	bIDs, err := revisionCommitIDs(repoPath, revsetUnion(b))
+	if err != nil {
+		return false, err
+	}
+	sort.Strings(aIDs)
+	sort.Strings(bIDs)
+	return strings.Join(aIDs, ",") == strings.Join(bIDs, ","), nil
+}
+
+func revisionCommitIDs(repoPath, revset string) ([]string, error) {
+	out, err := commandCaptureFn("jj", "-R", repoPath, "--ignore-working-copy", "log", "-r", revset, "--no-graph", "-T", "commit_id ++ \"\\n\"")
+	if err != nil {
+		return nil, err
+	}
+	return uniqueNonEmptyStrings(strings.Split(out, "\n")), nil
 }
 
 func eligibleForSingleInputTidyProbe(inputs []string, stack stackConfig, conflictStrategy string) bool {
