@@ -30,6 +30,23 @@ go install github.com/jeprecated/ajjent/cmd/ajj@latest
 
 This installs a binary named `ajj`. Make sure your Go bin directory is on `PATH`.
 
+### macOS
+
+Ajjent runs natively on Apple Silicon and Intel Macs. Install with Go, a release
+binary, or Nix, with Jujutsu on `PATH` (0.41.0 or newer; machine create
+with `noCleanup` requires exactly 0.43.0).
+
+For the default macOS zsh, add this to `~/.zshrc` after setting up `PATH`:
+
+```zsh
+eval "$(ajj shell-init zsh)"
+```
+
+This lets `ajj create`, `open`, `close`, and `main` change the current shell's
+directory. Configuration uses `~/.config/ajj/config.yaml` unless
+`XDG_CONFIG_HOME` is set. With Home Manager, use `aarch64-darwin` on Apple Silicon
+or `x86_64-darwin` on Intel; the module also installs the shell integration.
+
 ### Release binary
 
 Download the `ajjent` archive for your platform from GitHub Releases; it contains the `ajj` binary. Release binaries are produced by GoReleaser for Linux and macOS on amd64 and arm64.

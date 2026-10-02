@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -89,6 +90,8 @@ func TestIntegrationCLILockContentionAndReleaseAfterProcessDeath(t *testing.T) {
 	paths := setupRealStackRepo(t)
 	stateDir := filepath.Join(paths.defaultPath, ".ajj", "integrations")
 	cmd := exec.Command(os.Args[0], "-test.run=^TestIntegrationLockHelperProcess$")
+	var helperStderr bytes.Buffer
+	cmd.Stderr = &helperStderr
 	cmd.Env = append(os.Environ(), "AJJ_TEST_LOCK_STATE_DIR="+stateDir)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -113,7 +116,9 @@ func TestIntegrationCLILockContentionAndReleaseAfterProcessDeath(t *testing.T) {
 		return runIntegrate([]string{"--repo", paths.speedPath, "--request-json", "-"})
 	})
 	if err == nil {
-		t.Fatal("CLI unexpectedly acquired a lock held by another process")
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		t.Fatalf("CLI unexpectedly acquired a lock held by another process; helper stderr: %s", helperStderr.String())
 	}
 	if got := decodeIntegrationReceipt(t, out); got.Error == nil || got.Error.Code != integrationErrorOperationInProgress {
 		t.Fatalf("CLI lock contention returned the wrong result: %+v", got)
@@ -144,7 +149,11 @@ func TestIntegrationLockHelperProcess(t *testing.T) {
 	defer lock.Close()
 	fmt.Fprintln(os.Stdout, "locked")
 	_ = os.Stdout.Sync()
-	select {}
+	// Keep a timer pending so the runtime does not treat this helper as a
+	// deadlock and release the lock before the parent kills the process.
+	for {
+		time.Sleep(time.Hour)
+	}
 }
 
 func TestIntegrationOperationRecordAtomicRoundTripAndCorruption(t *testing.T) {

@@ -24,7 +24,7 @@
         apps.ajj = ajjApp;
 
         devShells.default = pkgs.mkShell {
-          packages = with pkgs; [ go gopls gotools ];
+          packages = with pkgs; [ go gopls gotools jujutsu ];
         };
       })
     // {
