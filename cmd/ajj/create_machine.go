@@ -58,12 +58,25 @@ func runCreateMachine(args []string) error {
 	}
 	if request.NoCleanup {
 		version, err := jjVersionFn()
-		if err != nil || strings.TrimSpace(version) != "jj "+createNoCleanupJJVersion {
+		if err != nil || !supportsNoCleanupJJVersion(version) {
 			return fmt.Errorf("noCleanup requires tested jj version %s", createNoCleanupJJVersion)
 		}
 	}
 	return reconcileCreateRequest(repo, request, digest, receiptSchema)
 }
+
+func supportsNoCleanupJJVersion(version string) bool {
+	// Nix omits the revision; official release binaries append the exact
+	// v0.43.0 tag commit. Do not accept arbitrary development revisions.
+	switch strings.TrimSpace(version) {
+	case "jj " + createNoCleanupJJVersion,
+		"jj " + createNoCleanupJJVersion + "-89f62ede8c1c611eaf134c0c49252efd65c7945d":
+		return true
+	default:
+		return false
+	}
+}
+
 func readCreateRequestSource(source string) ([]byte, error) {
 	var r io.Reader
 	var c io.Closer

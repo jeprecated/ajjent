@@ -26,6 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Machine create with `noCleanup` accepts the official Jujutsu 0.43.0 release binary's version string, including its exact release commit suffix, while continuing to reject untested development builds.
 - macOS filesystem aliases (such as `/var` and `/private/var`) now identify the same Current Workspace without an unnecessary Jujutsu snapshot, classify workspace layout correctly, and keep assimilation from replacing Main Workspace files through an alias. Development shells and Linux/macOS CI include Jujutsu 0.43.0 for the version-bound machine create tests.
 - The recursive integration tour runs with macOS's bundled Bash 3.2 and refuses macOS temporary and user-directory roots.
 - `ajj tidy` automatic selection can no longer block itself: Disposables protected only by other preselected Disposables start unchecked (greedy, in row order), and `--yes` closes the safe subset and names the rest instead of failing "Tidy batch blocked". A blocked Enter is now shown as a warning-styled `Enter blocked:` line.
