@@ -27,6 +27,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Machine create with `noCleanup` accepts the official Jujutsu 0.43.0 release binary's version string, including its exact release commit suffix, while continuing to reject untested development builds.
+- macOS filesystem aliases (such as `/var` and `/private/var`) now identify the same Current Workspace without an unnecessary Jujutsu snapshot, classify workspace layout correctly, and keep assimilation from replacing Main Workspace files through an alias. Development shells and Linux/macOS CI include Jujutsu 0.43.0 for the version-bound machine create tests.
+- The recursive integration tour runs with macOS's bundled Bash 3.2 and refuses macOS temporary and user-directory roots.
 - `ajj tidy` automatic selection can no longer block itself: Disposables protected only by other preselected Disposables start unchecked (greedy, in row order), and `--yes` closes the safe subset and names the rest instead of failing "Tidy batch blocked". A blocked Enter is now shown as a warning-styled `Enter blocked:` line.
 - One stale Workspace no longer aborts `ajj tidy`: it is shown disabled (a warning under `--yes` that names `jj -R <path> workspace update-stale` and `--update-stale`) and is never selected or closed until you update it with **u** or `--update-stale`, while other Workspaces can still be tidied.
 - Selectors no longer mix commands and filtering (typing "summon" in Tidy used to filter some letters and run others). Keys are now modal in every selector: in normal mode letters are commands only — an unbound letter shows `press / to filter` and Backspace no longer edits the filter; `/` enters filter mode, where every printable key types, ↑/↓ still move, and Enter/Esc finish while keeping the filter. Esc in normal mode clears an applied filter before it quits.

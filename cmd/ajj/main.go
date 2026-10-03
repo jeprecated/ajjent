@@ -2792,7 +2792,7 @@ func loadConfig(repoRoot string) (config, error) {
 		}
 	}
 	localRoots := []string{repoRoot}
-	if defaultRoot, ok := resolveDefaultWorkspaceRoot(repoRoot); ok && filepath.Clean(defaultRoot) != filepath.Clean(repoRoot) {
+	if defaultRoot, ok := resolveDefaultWorkspaceRoot(repoRoot); ok && !sameDirectoryPath(defaultRoot, repoRoot) {
 		localRoots = []string{defaultRoot, repoRoot}
 	}
 	for _, root := range localRoots {
@@ -3087,7 +3087,7 @@ func workspaceInfosForRefs(repoRoot string, cfg config, project string, refs []w
 			info.Missing = true
 		}
 		canonical := filepath.Clean(filepath.Join(cfg.WorkspacesRoot, project, ref.Handle))
-		info.External = !info.Missing && filepath.Clean(path) != canonical && !info.Main
+		info.External = !info.Missing && !sameDirectoryPath(path, canonical) && !info.Main
 		info.Conflict, err = workspaceHasConflictCommits(graphRepoPath, ref.Handle)
 		if err != nil {
 			return nil, fmt.Errorf("probe conflict status for Workspace %q from %s: %w", ref.Handle, graphRepoPath, err)
@@ -4723,7 +4723,7 @@ func materializeAssimilatedFolderSymlinks(mainPath string, workspacePath string,
 func materializeAssimilatedFolderSymlinksMode(mainPath string, workspacePath string, cfg config, project string, noReplace bool) ([]assimilatedSymlink, error) {
 	mainPath = filepath.Clean(mainPath)
 	workspacePath = filepath.Clean(workspacePath)
-	if mainPath == workspacePath {
+	if sameDirectoryPath(mainPath, workspacePath) {
 		return nil, nil
 	}
 	paths, err := expandAssimilatedPaths(mainPath, effectiveAssimilatedPaths(cfg, project))
@@ -5079,11 +5079,29 @@ func listWorkspaceRefs(repoRoot string) ([]workspaceRef, error) {
 	return refs, nil
 }
 
+// sameDirectoryPath accepts filesystem aliases such as macOS /var and
+// /private/var, symlinked workspace roots, and case variants on case-insensitive
+// volumes. Keep lexical equality for unavailable paths; different paths only
+// match when both can be verified as the same existing directory.
+func sameDirectoryPath(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	if filepath.Clean(a) == filepath.Clean(b) {
+		return true
+	}
+	aInfo, err := os.Stat(a)
+	if err != nil || !aInfo.IsDir() {
+		return false
+	}
+	bInfo, err := os.Stat(b)
+	return err == nil && bInfo.IsDir() && os.SameFile(aInfo, bInfo)
+}
+
 func currentWorkspaceHandle(repoRoot string, refs []workspaceRef) (string, error) {
-	cleanRepoRoot := filepath.Clean(repoRoot)
 	rootMatches := []string{}
 	for _, ref := range refs {
-		if strings.TrimSpace(ref.Root) != "" && filepath.Clean(ref.Root) == cleanRepoRoot {
+		if root := cleanWorkspaceRoot(ref.Root); root != "" && sameDirectoryPath(root, repoRoot) {
 			rootMatches = append(rootMatches, ref.Handle)
 		}
 	}

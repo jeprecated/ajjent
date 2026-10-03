@@ -7,7 +7,7 @@ Thanks for helping improve Ajjent (`ajj`). This project is a Go CLI for Jujutsu 
 Prerequisites:
 
 - Go 1.24 or newer
-- `jj` (Jujutsu) on `PATH` for integration tests
+- `jj` (Jujutsu) 0.43.0 on `PATH` for the full integration suite, including the version-bound `noCleanup` tests
 - Optional: Nix/devenv for the pinned development shell
 
 Common local flow:
@@ -15,13 +15,13 @@ Common local flow:
 ```bash
 go build ./...
 go vet ./...
-go test ./...
+go test -timeout 20m ./...
 gofmt -l cmd/ajj
 ```
 
 `gofmt -l cmd/ajj` should print nothing before you send a change.
 
-With the devenv/Nix shell:
+The devenv and flake development shells include the tested Jujutsu version on Linux and macOS. With devenv:
 
 ```bash
 devenv shell
@@ -30,7 +30,11 @@ test
 fmt
 ```
 
-You can also run `install-local` in the devenv shell to build `./bin/ajj` from the current checkout and print a short help preview.
+You can also run `install-local` in the devenv shell to install the current checkout at `${XDG_BIN_HOME:-$HOME/.local/bin}/ajj` and print a short help preview.
+
+The tests use physical temporary paths so fixture assertions agree with Jujutsu on macOS (`/tmp` and `/var` are symlinks). Explicit alias tests cover Current Workspace detection, layout classification, and assimilation through symlinked paths.
+
+The full suite exercises real Jujutsu processes and crash recovery. CI, devenv, and Nix allow twenty minutes because it can exceed Go's default ten-minute timeout on macOS.
 
 ## Code layout
 

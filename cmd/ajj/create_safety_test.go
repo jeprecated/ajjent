@@ -504,12 +504,25 @@ func TestNoCleanupNeverTrustsDirenv(t *testing.T) {
 	}
 }
 
+func TestNoCleanupAcceptsOfficialReleaseVersion(t *testing.T) {
+	_, repo := setupSafeCreateRepo(t)
+	request := safeCreateRequest(t, repo)
+	oldVersion := jjVersionFn
+	t.Cleanup(func() { jjVersionFn = oldVersion })
+	jjVersionFn = func() (string, error) {
+		return "jj 0.43.0-89f62ede8c1c611eaf134c0c49252efd65c7945d\n", nil
+	}
+	if receipt := runMachineCreateForTest(t, repo, request); receipt.Status != createStatusReady {
+		t.Fatalf("official release was not accepted: %+v", receipt)
+	}
+}
+
 func TestNoCleanupRejectsUntestedJJBeforeEffects(t *testing.T) {
 	root, repo := setupSafeCreateRepo(t)
 	request := safeCreateRequest(t, repo)
 	oldVersion, oldIn := jjVersionFn, stdinReader
 	t.Cleanup(func() { jjVersionFn, stdinReader = oldVersion, oldIn })
-	for _, version := range []string{"jj 0.41.0", "jj 0.42.0", "jj 0.44.0", "jj 0.43.0-dev", "invalid"} {
+	for _, version := range []string{"jj 0.41.0", "jj 0.42.0", "jj 0.44.0", "jj 0.43.0-dev", "jj 0.43.0-" + strings.Repeat("a", 40), "jj 0.43.0-89f62ede8c1c611eaf134c0c49252efd65c7945d-dirty", "invalid"} {
 		jjVersionFn = func() (string, error) { return version, nil }
 		stdinReader = strings.NewReader(string(request))
 		out, _, err := captureOutput(func() error { return runCreateMachine([]string{"--repo", repo, "--request-json", "-", "--json"}) })

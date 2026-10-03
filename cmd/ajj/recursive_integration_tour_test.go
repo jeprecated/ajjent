@@ -50,7 +50,7 @@ func TestRecursiveIntegrationTourSetupAndGuideContract(t *testing.T) {
 	if err := os.WriteFile(invalidAjj, []byte("#!"+tourTestBashPath(t)+"\nexit 2\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	invalidSetup := exec.Command("bash", script, "--root", invalidRoot, "--ajj", invalidAjj)
+	invalidSetup := exec.Command(tourTestBashPath(t), script, "--root", invalidRoot, "--ajj", invalidAjj)
 	invalidOut, err := invalidSetup.CombinedOutput()
 	if err == nil || !strings.Contains(string(invalidOut), "does not provide machine capabilities") {
 		t.Fatalf("setup accepted incompatible Ajj or returned an unclear error: err=%v output=%s", err, invalidOut)
@@ -91,7 +91,7 @@ func TestRecursiveIntegrationTourSetupAndGuideContract(t *testing.T) {
 		t.Fatal("README recursive integration section does not prominently link the committed tour")
 	}
 
-	refusal := exec.Command("bash", script, "--root", root, "--ajj", binary)
+	refusal := exec.Command(tourTestBashPath(t), script, "--root", root, "--ajj", binary)
 	refusalOut, err := refusal.CombinedOutput()
 	if err == nil {
 		t.Fatal("tour setup silently replaced an existing fixture without --force")
@@ -117,7 +117,7 @@ func TestRecursiveIntegrationTourSetupAndGuideContract(t *testing.T) {
 	if err := os.Mkdir(buildStaging, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	buildSetup := exec.Command("bash", script, "--root", buildRoot)
+	buildSetup := exec.Command(tourTestBashPath(t), script, "--root", buildRoot)
 	buildSetup.Env = append(os.Environ(), "TMPDIR="+buildStaging)
 	buildOut, err := buildSetup.CombinedOutput()
 	if err != nil {
@@ -170,7 +170,7 @@ chmod +x "$out"
 	if err := os.WriteFile(filepath.Join(fakeBin, "go"), []byte(fakeGo), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("bash", script, "--root", root)
+	cmd := exec.Command(tourTestBashPath(t), script, "--root", root)
 	cmd.Env = append(os.Environ(), "PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"), "TMPDIR="+staging)
 	out, err := cmd.CombinedOutput()
 	if err == nil || !strings.Contains(string(out), "incompatible capabilities schema") {
@@ -211,7 +211,7 @@ exit 42
 	if err := os.WriteFile(fakeAjj, []byte(fake), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	failed := exec.Command("bash", script, "--root", root, "--ajj", fakeAjj, "--force")
+	failed := exec.Command(tourTestBashPath(t), script, "--root", root, "--ajj", fakeAjj, "--force")
 	out, err := failed.CombinedOutput()
 	if err == nil || !strings.Contains(string(out), "injected first create failure") {
 		t.Fatalf("fixture-create injection did not fail as expected: err=%v output=%s", err, out)
@@ -300,7 +300,7 @@ func assertTourRejectsSyntheticSourceAncestor(t *testing.T, script, binary strin
 
 func assertTourRootRejected(t *testing.T, script, binary, root, message string) {
 	t.Helper()
-	cmd := exec.Command("bash", script, "--root", root, "--ajj", binary, "--force")
+	cmd := exec.Command(tourTestBashPath(t), script, "--root", root, "--ajj", binary, "--force")
 	out, err := cmd.CombinedOutput()
 	if err == nil || !strings.Contains(string(out), message) {
 		t.Fatalf("unsafe root %q was not rejected with %q: err=%v output=%s", root, message, err, out)
@@ -309,6 +309,10 @@ func assertTourRootRejected(t *testing.T, script, binary, root, message string) 
 
 func tourTestBashPath(t *testing.T) string {
 	t.Helper()
+	// Exercise the bundled Bash 3.2 even when Nix or Homebrew provides Bash 5.
+	if runtime.GOOS == "darwin" {
+		return "/bin/bash"
+	}
 	path, err := exec.LookPath("bash")
 	if err != nil {
 		t.Fatal(err)
@@ -322,7 +326,7 @@ func runTourSetup(t *testing.T, script, root, binary string, force, returnOutput
 	if force {
 		args = append(args, "--force")
 	}
-	cmd := exec.Command("bash", args...)
+	cmd := exec.Command(tourTestBashPath(t), args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("run tour setup: %v\n%s", err, out)
@@ -335,7 +339,7 @@ func runTourSetup(t *testing.T, script, root, binary string, force, returnOutput
 
 func runTourShell(t *testing.T, root, body string) string {
 	t.Helper()
-	cmd := exec.Command("bash", "-c", `set -euo pipefail; source "$1/env.sh"; `+body, "tour-test", root)
+	cmd := exec.Command(tourTestBashPath(t), "-c", `set -euo pipefail; source "$1/env.sh"; `+body, "tour-test", root)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("run tour helper %q: %v\n%s", body, err, out)

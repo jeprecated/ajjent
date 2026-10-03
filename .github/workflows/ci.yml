@@ -28,30 +28,28 @@ jobs:
           go-version: '1.24.x'
           cache: true
 
-      - name: Install jj (Linux)
-        if: runner.os == 'Linux'
+      - name: Install tested jj
         shell: bash
         run: |
           set -euo pipefail
-          jj_version=0.41.0
-          case "$(uname -m)" in
-            x86_64) target=x86_64-unknown-linux-musl ;;
-            aarch64|arm64) target=aarch64-unknown-linux-musl ;;
-            *) echo "unsupported runner architecture: $(uname -m)" >&2; exit 1 ;;
+          # noCleanup verifies an exact version-specific operation sequence.
+          jj_version=0.43.0
+          case "$(uname -s)-$(uname -m)" in
+            Linux-x86_64) target=x86_64-unknown-linux-musl ;;
+            Linux-aarch64|Linux-arm64) target=aarch64-unknown-linux-musl ;;
+            Darwin-x86_64) target=x86_64-apple-darwin ;;
+            Darwin-arm64) target=aarch64-apple-darwin ;;
+            *) echo "unsupported runner: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
           esac
           curl -L --fail -o jj.tar.gz "https://github.com/jj-vcs/jj/releases/download/v${jj_version}/jj-v${jj_version}-${target}.tar.gz"
           mkdir -p jj-dist
           tar -xzf jj.tar.gz -C jj-dist
           jj_bin="$(find jj-dist -type f -name jj -perm -u+x | head -n 1)"
           test -n "$jj_bin"
-          sudo install -m 0755 "$jj_bin" /usr/local/bin/jj
-          jj --version
-
-      - name: Install jj (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install jj
-          jj --version
+          mkdir -p "$RUNNER_TEMP/ajj-test-bin"
+          install -m 0755 "$jj_bin" "$RUNNER_TEMP/ajj-test-bin/jj"
+          echo "$RUNNER_TEMP/ajj-test-bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/ajj-test-bin/jj" --version
 
       - name: Build
         run: go build ./...
@@ -67,4 +65,4 @@ jobs:
           test ! -s /tmp/gofmt.out
 
       - name: Test
-        run: go test ./...
+        run: go test -timeout 20m ./...

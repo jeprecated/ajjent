@@ -24,6 +24,7 @@ buildGoModule {
     "main.version=${version}"
   ];
   doCheck = true;
+  checkFlags = [ "-timeout=20m" ];
   nativeCheckInputs = [ jujutsu ];
 
   nativeBuildInputs = [ makeWrapper ];

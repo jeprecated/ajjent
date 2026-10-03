@@ -93,6 +93,7 @@ require_command cp
 require_command rm
 require_command mkdir
 require_command mktemp
+require_command tr
 
 JJ_VERSION_OUTPUT=$(jj --version 2>/dev/null) || fail "could not execute jj --version"
 if [[ ! $JJ_VERSION_OUTPUT =~ ([0-9]+)\.([0-9]+)(\.[0-9]+)? ]]; then
@@ -120,7 +121,7 @@ esac
 while [[ $TOUR_ROOT != / && $TOUR_ROOT == */ ]]; do
   TOUR_ROOT=${TOUR_ROOT%/}
 done
-[[ ! -L $TOUR_ROOT ]] || fail "refusing symbolic link fixture root: $TOUR_ROOT"
+[[ ! -L $TOUR_ROOT ]] || fail "refusing unsafe fixture root (symbolic link): $TOUR_ROOT"
 TOUR_NAME=$(basename -- "$TOUR_ROOT")
 case $TOUR_NAME in
   ''|.|..|/) fail "refusing unsafe fixture root: $TOUR_ROOT" ;;
@@ -131,7 +132,7 @@ TOUR_PARENT=$(cd -- "$TOUR_PARENT" && pwd -P)
 while [[ $TOUR_PARENT == //* ]]; do TOUR_PARENT=${TOUR_PARENT#/}; done
 TOUR_ROOT=$TOUR_PARENT/$TOUR_NAME
 while [[ $TOUR_ROOT == //* ]]; do TOUR_ROOT=${TOUR_ROOT#/}; done
-[[ ! -L $TOUR_ROOT ]] || fail "refusing symbolic link fixture root: $TOUR_ROOT"
+[[ ! -L $TOUR_ROOT ]] || fail "refusing unsafe fixture root (symbolic link): $TOUR_ROOT"
 
 HOME_ROOT=$HOME
 if [[ -d $HOME_ROOT ]]; then
@@ -139,7 +140,7 @@ if [[ -d $HOME_ROOT ]]; then
   while [[ $HOME_ROOT == //* ]]; do HOME_ROOT=${HOME_ROOT#/}; done
 fi
 case $TOUR_ROOT in
-  /|/tmp|/home|"$HOME_ROOT") fail "refusing unsafe fixture root: $TOUR_ROOT" ;;
+  /|/tmp|/private/tmp|/home|/Users|"$HOME_ROOT") fail "refusing unsafe fixture root: $TOUR_ROOT" ;;
 esac
 if [[ $TOUR_ROOT == "$REPO_ROOT" ]]; then
   fail "refusing unsafe fixture root inside source checkout: $TOUR_ROOT"
@@ -266,7 +267,7 @@ run_quiet jj -R "$A" commit -m 'A: target advanced after child creation'
 
 create_payload() {
   local handle=$1 path=$2 word=$3 filename
-  filename=${handle,,}.txt
+  filename=$(printf '%s' "$handle" | tr '[:upper:]' '[:lower:]').txt
   printf '%s payload from %s.\n' "$word" "$handle" > "$path/$filename"
   run_quiet jj -R "$path" file track "root:$filename"
   run_quiet jj -R "$path" commit -m "$handle: independent payload"

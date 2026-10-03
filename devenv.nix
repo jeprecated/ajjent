@@ -4,12 +4,13 @@
   languages.go.enable = true;
 
   packages = [
+    pkgs.jujutsu
     pkgs.gopls
     pkgs.gotools
   ];
 
   scripts.fmt.exec = "go fmt ./...";
-  scripts.test.exec = "go test ./...";
+  scripts.test.exec = "go test -timeout 20m ./...";
   scripts.build.exec = ''
     mkdir -p ./bin
     go build -o ./bin/ajj ./cmd/ajj
@@ -31,6 +32,6 @@
   '';
 
   enterTest = ''
-    go test ./...
+    go test -timeout 20m ./...
   '';
 }
