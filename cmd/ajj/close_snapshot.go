@@ -16,10 +16,53 @@ func snapshotCloseCandidates(repoPath string, targets []workspaceInfo) error {
 // snapshotTidyCandidates scopes the stale fail-closed contract per Workspace:
 // a candidate whose snapshot fails because its working copy is stale is
 // reported (and must then be excluded from every Tidy selection) instead of
-// aborting the whole Tidy. Nothing is recovered automatically. Any other
-// snapshot failure still aborts.
+// aborting the whole Tidy. Nothing is recovered automatically: only the
+// user's explicit `u` key or --update-stale runs update-stale, followed by a
+// complete new review. Any other snapshot failure still aborts.
 func snapshotTidyCandidates(repoPath string, targets []workspaceInfo) (map[string]bool, error) {
 	return snapshotLifecycleCandidates(repoPath, targets, true)
+}
+
+// staleUpdateReport is what jj said about one `workspace update-stale` run.
+type staleUpdateReport struct {
+	// output is jj's complete report (stdout and stderr) of a successful run.
+	output string
+	err    error
+}
+
+// updateStaleWorkspaces is the user-requested recovery the stale hint names,
+// `jj -R <path> workspace update-stale`, for each given stale Workspace. It is
+// reached only from Tidy's `u` key or --update-stale, never automatically, and
+// the caller must rebuild the whole review afterwards. Each path is validated
+// against its registration and the shared repository first, as for a
+// snapshot. Both callers run it outside a live selector. jj's whole report
+// is kept, success included, because it is the only place jj says that it
+// first snapshotted on-disk edits of the stale copy into a divergent commit;
+// the caller must show that and keep such a Workspace out of automatic
+// selection. A failure is recorded for that Workspace only; the others still
+// update.
+func updateStaleWorkspaces(repoPath string, targets []workspaceInfo) (map[string]staleUpdateReport, error) {
+	reports := map[string]staleUpdateReport{}
+	if len(targets) == 0 {
+		return reports, nil
+	}
+	refs, err := listWorkspaceRefs(repoPath)
+	if err != nil {
+		return nil, err
+	}
+	for _, target := range targets {
+		if !target.Stale || target.Main || target.Current || target.Missing {
+			reports[target.Ref.Handle] = staleUpdateReport{err: fmt.Errorf("not a stale Tidy candidate")}
+			continue
+		}
+		if err := validateWorkspaceSnapshotTarget(repoPath, target, refs); err != nil {
+			reports[target.Ref.Handle] = staleUpdateReport{err: err}
+			continue
+		}
+		output, err := commandCombinedCaptureFn("jj", "-R", target.Path, "--color=never", "--no-pager", "workspace", "update-stale")
+		reports[target.Ref.Handle] = staleUpdateReport{output: output, err: err}
+	}
+	return reports, nil
 }
 
 func isStaleWorkingCopyError(err error) bool {
@@ -38,6 +81,29 @@ func staleWorkspaceInfos(infos []workspaceInfo) []workspaceInfo {
 
 func staleWorkspaceHint(info workspaceInfo) string {
 	return "stale — run: jj -R " + info.Path + " workspace update-stale"
+}
+
+// staleWorkspaceSkipHint explains a stale Workspace skipped by non-interactive
+// Tidy. --update-stale only updates Disposable Workspaces, so it is suggested
+// for those alone, and not again once it already ran.
+func staleWorkspaceSkipHint(info workspaceInfo, updateStaleRan bool) string {
+	switch {
+	case info.Policy != policyDisposable:
+		return staleWorkspaceHint(info)
+	case updateStaleRan:
+		return "still stale after --update-stale; inspect it, then run: jj -R " + info.Path + " workspace update-stale"
+	default:
+		return staleWorkspaceHint(info) + ", or rerun ajj tidy with --update-stale"
+	}
+}
+
+// tidyStaleRowDetail is the Tidy detail line for a highlighted stale row.
+func tidyStaleRowDetail(item selectorItem) string {
+	detail := item.Handle + ": stale working copy — press u to update it (jj workspace update-stale), then it can be tidied"
+	if item.Path != "" {
+		detail += " · " + item.Path
+	}
+	return detail
 }
 
 func snapshotLifecycleCandidates(repoPath string, targets []workspaceInfo, tolerateStale bool) (map[string]bool, error) {

@@ -122,57 +122,172 @@ func TestTidyStaleRowIsNeverSelectable(t *testing.T) {
 	if len(m.selectedItems()) != 0 {
 		t.Fatal("Space selected a stale row")
 	}
-	if view := m.View(); !strings.Contains(view, "stale — run: jj -R /ws/stale workspace update-stale") {
+	m = ctrlA(t, m)
+	if len(m.selectedItems()) != 0 || m.opts.Items[0].Selected {
+		t.Fatal("ctrl+a selected a stale row")
+	}
+	if out, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter}); !isQuitCmd(cmd) || len(out.(selectorModel).result.Items) != 0 {
+		t.Fatal("Enter submitted a stale row")
+	}
+	view := m.View()
+	if !strings.Contains(view, "stale: stale working copy — press u to update it (jj workspace update-stale), then it can be tidied · /ws/stale") {
 		t.Fatalf("stale hint missing:\n%s", view)
+	}
+	if !strings.Contains(view, "u update stale") {
+		t.Fatalf("u key not offered while a stale row exists:\n%s", view)
+	}
+	// Without stale rows the footer does not offer u.
+	fresh := newSelectorModel(selectorOptions{Title: "Tidy Workspaces", Mode: selectorMulti, Items: selectorItemsForTidy(infos[:1], false), Tidy: true})
+	fresh.width, fresh.height = 200, 10
+	if strings.Contains(fresh.View(), "u update stale") {
+		t.Fatal("u offered without stale rows")
 	}
 }
 
-func TestSelectorLettersFilterUnlessBound(t *testing.T) {
-	typeText := func(m selectorModel, text string) selectorModel {
-		for _, r := range text {
-			var msg tea.KeyMsg
-			if r == ' ' {
-				msg = tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}}
-			} else {
-				msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}}
-			}
-			out, cmd := m.Update(msg)
-			m = out.(selectorModel)
-			if isQuitCmd(cmd) {
-				t.Fatalf("typing %q quit the selector", text)
-			}
+func TestTidyHeldRowIsSelectedOnlyBySpace(t *testing.T) {
+	items := []selectorItem{
+		{Handle: "held", Policy: policyDisposable, NormallyClosable: true, Note: staleUpdateKeptEditsNote},
+		{Handle: "fresh", Policy: policyDisposable, NormallyClosable: true},
+	}
+	m := newSelectorModel(selectorOptions{Title: "Tidy Workspaces", Mode: selectorMulti, Items: items, Tidy: true, AllowForceToggle: true})
+	m.width, m.height = 160, 10
+	m = ctrlA(t, m)
+	if got := m.selectedItems(); len(got) != 1 || got[0].Handle != "fresh" {
+		t.Fatalf("ctrl+a must skip the held row: %+v", got)
+	}
+	out, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	m = out.(selectorModel)
+	if !m.selected[0] {
+		t.Fatal("Space must still select the held row")
+	}
+}
+
+// typeKeys sends text one key at a time and fails if any key quits.
+func typeKeys(t *testing.T, m selectorModel, text string) selectorModel {
+	t.Helper()
+	for _, r := range text {
+		msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}}
+		if r == ' ' {
+			msg = tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}}
 		}
-		return m
+		out, cmd := m.Update(msg)
+		m = out.(selectorModel)
+		if isQuitCmd(cmd) {
+			t.Fatalf("typing %q quit the selector", text)
+		}
 	}
-	items := []selectorItem{{Handle: "summon-worker"}, {Handle: "other"}}
-	// Close selector: force is bound, but s/r/c/a are not.
-	m := newSelectorModel(selectorOptions{Title: "Close Workspaces", Mode: selectorMulti, Items: items, AllowForceToggle: true})
-	if m = typeText(m, "summon"); m.filter != "summon" {
-		t.Fatalf("filter swallowed letters: %q", m.filter)
+	return m
+}
+
+func pressKey(t *testing.T, m selectorModel, key tea.KeyType) (selectorModel, tea.Cmd) {
+	t.Helper()
+	out, cmd := m.Update(tea.KeyMsg{Type: key})
+	return out.(selectorModel), cmd
+}
+
+// Every selector shares one strict key model: in normal mode keys are
+// commands only; "/" mode is the only way to edit the filter.
+func TestSelectorNormalModeKeysNeverEditFilter(t *testing.T) {
+	items := func() []selectorItem {
+		return []selectorItem{{Handle: "summon-worker", Path: "/ws/summon-worker"}, {Handle: "other", Path: "/ws/other"}, {Handle: "summon-two", Path: "/ws/summon-two"}}
 	}
-	// Stack selector binds s/r/c.
-	m = newSelectorModel(selectorOptions{Title: "Stack Workspaces", Mode: selectorMulti, Items: items, AllowStackOptions: true})
-	if m = typeText(m, "s"); m.filter != "" || m.opts.StackOptions.Shape != "linear" {
-		t.Fatalf("stack option key not bound: filter=%q shape=%q", m.filter, m.opts.StackOptions.Shape)
+	selectors := map[string]selectorOptions{
+		"open":         {Title: "Open Workspace", Mode: selectorSingle, Items: items()},
+		"close":        {Title: "Close Workspaces", Mode: selectorMulti, Items: items(), AllowForceToggle: true},
+		"stack":        {Title: "Stack Workspaces", Mode: selectorMulti, Items: items(), AllDefault: true, AllowStackOptions: true},
+		"line-stack":   {Title: "Line Stack Workspaces", Mode: selectorMulti, Items: items(), OrderedSelection: true, AllowRoleToggle: true},
+		"move-to-main": {Title: "Move Workspaces to Main", Mode: selectorMulti, Items: items(), MoveToMain: true},
+		"tidy":         {Title: "Tidy Workspaces", Mode: selectorMulti, Items: items(), Tidy: true, AllowForceToggle: true},
 	}
-	// Explicit filter mode: every printable key, including bound commands.
-	tidy := newSelectorModel(selectorOptions{Title: "Tidy Workspaces", Mode: selectorMulti, Items: items, Tidy: true, AllowForceToggle: true})
-	tidy = typeText(tidy, "/")
-	if !tidy.filterMode {
-		t.Fatal("/ did not enter filter mode")
+	for name, opts := range selectors {
+		t.Run(name, func(t *testing.T) {
+			m := newSelectorModel(opts)
+			m.width, m.height = 200, 12
+			// Unbound printable keys and backspace never touch the filter.
+			m = typeKeys(t, m, "monxyz")
+			m, _ = pressKey(t, m, tea.KeyBackspace)
+			if m.filter != "" || m.filterMode || len(m.visibleItems()) != 3 || len(m.selectedItems()) != 0 {
+				t.Fatalf("normal-mode keys edited the filter: %q mode=%v", m.filter, m.filterMode)
+			}
+			m = typeKeys(t, m, "z")
+			if view := m.View(); !strings.Contains(view, "press / to filter") {
+				t.Fatalf("unbound key gave no filter hint:\n%s", view)
+			}
+			if m = typeKeys(t, m, "j"); strings.Contains(m.View(), "press / to filter") {
+				t.Fatal("filter hint outlived the next key")
+			}
+			m.cursor = 0
+			// "/" mode: every printable key types, including command letters,
+			// j/k, q, u, and space; ↑/↓ still move; backspace edits.
+			m = typeKeys(t, m, "/")
+			if !m.filterMode {
+				t.Fatal("/ did not enter filter mode")
+			}
+			m = typeKeys(t, m, "jkqufpvsrca? x")
+			m, _ = pressKey(t, m, tea.KeyBackspace)
+			m, _ = pressKey(t, m, tea.KeyBackspace)
+			if m.filter != "jkqufpvsrca?" || m.opts.ForceEnabled || m.previewOpen || m.showHelp || m.refresh != nil || m.opts.StackOptions.Shape != "" {
+				t.Fatalf("filter mode ran commands: filter=%q force=%v preview=%v help=%v", m.filter, m.opts.ForceEnabled, m.previewOpen, m.showHelp)
+			}
+			for m.filter != "" {
+				m, _ = pressKey(t, m, tea.KeyBackspace)
+			}
+			m = typeKeys(t, m, "summon")
+			if view := m.View(); !strings.Contains(view, "/summon▏") {
+				t.Fatalf("filter mode not obvious:\n%s", view)
+			}
+			m, _ = pressKey(t, m, tea.KeyDown)
+			if m.cursor != 1 || m.filter != "summon" {
+				t.Fatalf("down in filter mode: cursor=%d filter=%q", m.cursor, m.filter)
+			}
+			m, _ = pressKey(t, m, tea.KeyUp)
+			m, _ = pressKey(t, m, tea.KeyDown)
+			// Enter leaves filter mode (keeping the filter) without submitting.
+			m, cmd := pressKey(t, m, tea.KeyEnter)
+			if isQuitCmd(cmd) || m.filterMode || m.filter != "summon" || len(m.visibleItems()) != 2 {
+				t.Fatalf("enter in filter mode: quit=%v mode=%v filter=%q", isQuitCmd(cmd), m.filterMode, m.filter)
+			}
+			if view := m.View(); !strings.Contains(view, "filter: summon (esc clears)") {
+				t.Fatalf("applied filter not shown:\n%s", view)
+			}
+			// Normal mode again: neither backspace nor letters edit it.
+			m, _ = pressKey(t, m, tea.KeyBackspace)
+			if m = typeKeys(t, m, "monxyz"); m.filter != "summon" {
+				t.Fatalf("normal mode edited an applied filter: %q", m.filter)
+			}
+			// Esc clears an applied filter first, keeping the highlighted row.
+			m, cmd = pressKey(t, m, tea.KeyEsc)
+			if isQuitCmd(cmd) || m.cancel || m.filter != "" || m.opts.Items[m.visibleItems()[m.cursor]].Handle != "summon-two" {
+				t.Fatalf("esc did not just clear the filter: quit=%v filter=%q cursor=%d", isQuitCmd(cmd), m.filter, m.cursor)
+			}
+			// Esc in filter mode only leaves filter mode.
+			m = typeKeys(t, m, "/o")
+			m, cmd = pressKey(t, m, tea.KeyEsc)
+			if isQuitCmd(cmd) || m.filterMode || m.filter != "o" {
+				t.Fatalf("esc in filter mode: quit=%v mode=%v filter=%q", isQuitCmd(cmd), m.filterMode, m.filter)
+			}
+			m, _ = pressKey(t, m, tea.KeyEsc)
+			// With no filter, esc quits; so do q and ctrl+c (even in / mode).
+			if _, cmd = pressKey(t, m, tea.KeyEsc); !isQuitCmd(cmd) {
+				t.Fatal("esc without a filter must quit")
+			}
+			if out, cmd := m.Update(runeKey("q")); !isQuitCmd(cmd) || !out.(selectorModel).cancel {
+				t.Fatal("q must quit in normal mode")
+			}
+			filtering := typeKeys(t, m, "/")
+			if _, cmd = pressKey(t, filtering, tea.KeyCtrlC); !isQuitCmd(cmd) {
+				t.Fatal("ctrl+c must quit in filter mode")
+			}
+		})
 	}
-	tidy = typeText(tidy, "qjkpvf ?sa")
-	if tidy.filter != "qjkpvf ?sa" || tidy.opts.ForceEnabled || tidy.previewOpen || tidy.showHelp {
-		t.Fatalf("filter mode ran commands: filter=%q force=%v preview=%v", tidy.filter, tidy.opts.ForceEnabled, tidy.previewOpen)
+	// Bound command letters still run in normal mode.
+	stack := newSelectorModel(selectors["stack"])
+	if stack = typeKeys(t, stack, "s"); stack.filter != "" || stack.opts.StackOptions.Shape != "linear" {
+		t.Fatalf("stack option key not bound: filter=%q shape=%q", stack.filter, stack.opts.StackOptions.Shape)
 	}
-	out, cmd := tidy.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	tidy = out.(selectorModel)
-	if isQuitCmd(cmd) || tidy.cancel || tidy.filterMode || tidy.filter != "qjkpvf ?sa" {
-		t.Fatal("esc in filter mode must only leave filter mode")
-	}
-	out, cmd = tidy.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	if !isQuitCmd(cmd) || !out.(selectorModel).cancel {
-		t.Fatal("esc outside filter mode must still cancel")
+	closeSel := newSelectorModel(selectors["close"])
+	if closeSel = typeKeys(t, closeSel, "f"); !closeSel.opts.ForceEnabled {
+		t.Fatal("f not bound in Close")
 	}
 }
 

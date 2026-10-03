@@ -202,7 +202,7 @@ func TestTidySkipsStaleWorkspaceAndClosesOtherSafeDisposable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("one stale Workspace aborted Tidy: %v\n%s", err, diagnostics)
 	}
-	if !strings.Contains(diagnostics, "Skipping stale Workspace alpha") || !strings.Contains(diagnostics, "jj -R "+stalePath+" workspace update-stale") {
+	if !strings.Contains(diagnostics, "Skipping stale Workspace alpha") || !strings.Contains(diagnostics, "jj -R "+stalePath+" workspace update-stale, or rerun ajj tidy with --update-stale") {
 		t.Fatalf("missing stale skip warning:\n%s", diagnostics)
 	}
 	if exists(bravoPath) || workspaceRegistered(t, mainPath, "bravo") {

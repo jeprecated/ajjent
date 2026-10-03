@@ -109,14 +109,40 @@ func (r *tidyGraphEvidence) review(selected []selectorItem, force bool) (map[str
 // returned so the caller can explain them. Force semantics are unchanged: the
 // review accepts every candidate under force.
 func preselectSafeTidyBatch(items []selectorItem, review func([]selectorItem, bool) (map[string]string, error), force bool) ([]selectorItem, []string) {
+	items, left, _ := extendSafeTidyBatch(items, nil, review, force)
+	return items, left
+}
+
+// extendSafeTidyBatch is preselectSafeTidyBatch on top of a fixed base: rows
+// whose Handle is in fixed keep their check unconditionally (a preserved user
+// selection is never changed), and every other checked row is accepted
+// greedily, in item order, only while base plus accepted rows still pass the
+// review. If the base is already blocked no addition can be judged safe, so
+// every other row is left unchecked and the third result is true.
+func extendSafeTidyBatch(items []selectorItem, fixed map[string]bool, review func([]selectorItem, bool) (map[string]string, error), force bool) ([]selectorItem, []string, bool) {
 	if review == nil {
-		return items, nil
+		return items, nil, false
 	}
 	accepted := []selectorItem{}
+	for _, item := range items {
+		if fixed[item.Handle] && item.Selected && !item.Disabled && !item.All {
+			accepted = append(accepted, item)
+		}
+	}
+	baseBlocked := false
+	if len(accepted) > 0 {
+		_, err := review(accepted, force)
+		baseBlocked = err != nil
+	}
 	left := []string{}
 	for i := range items {
 		item := items[i]
-		if !item.Selected || item.Disabled || item.All {
+		if !item.Selected || item.Disabled || item.All || fixed[item.Handle] {
+			continue
+		}
+		if baseBlocked {
+			items[i].Selected = false
+			left = append(left, item.Handle)
 			continue
 		}
 		trial := append(append([]selectorItem{}, accepted...), item)
@@ -127,7 +153,44 @@ func preselectSafeTidyBatch(items []selectorItem, review func([]selectorItem, bo
 		}
 		accepted = trial
 	}
-	return items, left
+	return items, left, baseBlocked
+}
+
+// restoreTidySelection re-applies a `u` refresh's preserved checks to rows
+// rebuilt from a fresh review. A preserved Handle stays checked only while its
+// row is still selectable; rows the user had left unchecked stay unchecked;
+// newly recovered rows keep their startup default (eligible Disposable rows
+// checked, Keep rows unchecked) and are then added with the startup greedy
+// rule on top of the preserved checks, so they never block the batch. The
+// returned notice names recovered rows left unchecked.
+func restoreTidySelection(items []selectorItem, recovered, preserved []string, review func([]selectorItem, bool) (map[string]string, error), force bool) ([]selectorItem, string) {
+	keep := map[string]bool{}
+	for _, handle := range preserved {
+		keep[handle] = true
+	}
+	fresh := map[string]bool{}
+	for _, handle := range recovered {
+		fresh[handle] = true
+	}
+	for i := range items {
+		item := &items[i]
+		switch {
+		case item.Disabled || item.All:
+			item.Selected = false
+		case keep[item.Handle]:
+			item.Selected = true
+		case !fresh[item.Handle]:
+			item.Selected = false
+		}
+	}
+	items, left, baseBlocked := extendSafeTidyBatch(items, keep, review, force)
+	if len(left) == 0 {
+		return items, ""
+	}
+	if baseBlocked {
+		return items, "Recovered rows left unchecked (the checked batch is already blocked): " + strings.Join(left, ", ")
+	}
+	return items, tidyLeftUncheckedNotice(left)
 }
 
 // safeTidyTargets applies the same greedy rule to non-interactive Tidy using

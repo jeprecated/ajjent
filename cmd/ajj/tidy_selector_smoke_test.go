@@ -99,8 +99,8 @@ func smokeKey(r *rand.Rand, filterMode bool) tea.KeyMsg {
 		return runeKey("/")
 	case 10:
 		letter := rune('a' + r.Intn(26))
-		if letter == 'q' && !filterMode {
-			letter = 'x' // q quits outside filter mode
+		if (letter == 'q' || letter == 'u') && !filterMode {
+			letter = 'x' // outside filter mode q quits and u ends the run for a refresh
 		}
 		return runeKey(string(letter))
 	case 11:
@@ -191,6 +191,25 @@ func TestSmokeTidySelectorRandom(t *testing.T) {
 				width, height = w2, h2
 			}
 			assertViewFits(t, m, width, height, context)
+		}
+
+		// (f) Outside filter mode, u ends the run for exactly the stale rows
+		// shown and clears the selector; with none shown it only notes it.
+		if !m.filterMode {
+			shown := []string{}
+			for _, idx := range m.visibleItems() {
+				if m.opts.Items[idx].Stale {
+					shown = append(shown, m.opts.Items[idx].Handle)
+				}
+			}
+			out, cmd := m.Update(runeKey("u"))
+			u := out.(selectorModel)
+			if len(shown) > 0 && (!isQuitCmd(cmd) || u.refresh == nil || strings.Join(u.refresh.Stale, ",") != strings.Join(shown, ",") || u.View() != "") {
+				t.Fatalf("%s: u did not request a refresh for shown stale rows %v", context, shown)
+			}
+			if len(shown) == 0 && (isQuitCmd(cmd) || u.refresh != nil) {
+				t.Fatalf("%s: u without shown stale rows ended the run", context)
+			}
 		}
 
 		// (c) A blocked Enter is always visibly explained.

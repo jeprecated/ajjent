@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	pathpkg "path"
@@ -50,6 +51,10 @@ var (
 	stdinReader              io.Reader = os.Stdin
 	stdoutWriter             io.Writer = os.Stdout
 	stderrWriter             io.Writer = os.Stderr
+	// Seams for driving the interactive Tidy loop (selector runs and `u`
+	// refreshes) in tests without a terminal.
+	canUseTUIFn   = canUseTUI
+	runSelectorFn = runSelector
 )
 
 type config struct {
@@ -1120,53 +1125,53 @@ func runWorkspacesSubdir(args []string) error {
 func runTidy(args []string) error {
 	fs := flag.NewFlagSet("tidy", flag.ContinueOnError)
 	var repoRootOverride, projectOverride, rootOverride string
-	var force, yes bool
+	var force, yes, updateStale bool
 	fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
 	fs.StringVar(&projectOverride, "project", "", "Project override")
 	fs.StringVar(&rootOverride, "workspaces-root", "", "Workspaces root override")
 	fs.BoolVar(&force, "force", false, "forced tidy: abandon unique mutable changes before closing")
 	fs.BoolVar(&yes, "yes", false, "skip confirmation")
-	if handled, err := parseCommandFlags(fs, args, "ajj tidy [options]", "Automatically select only eligible Disposable non-Current Workspaces represented by surviving registered Workspace heads; Keep and missing registrations require manual Tidy selection. TUI: v opens a bounded pinned-operation log/Main-diff preview; PgUp/PgDn scroll. Diff is not ancestry proof. --force relaxes graph safety, never Keep policy. Remove empty leftovers after completion."); handled || err != nil {
+	fs.BoolVar(&updateStale, "update-stale", false, "run jj workspace update-stale for stale Disposable Workspaces, then review them under normal rules")
+	if handled, err := parseCommandFlags(fs, args, "ajj tidy [options]", "Automatically select only eligible Disposable non-Current Workspaces represented by surviving registered Workspace heads; Keep and missing registrations require manual Tidy selection. Stale Workspaces are never selected until updated: --update-stale (or u in the TUI) runs jj workspace update-stale, then the whole review is rebuilt. TUI: v opens a bounded pinned-operation log/Main-diff preview; PgUp/PgDn scroll. Diff is not ancestry proof. --force relaxes graph safety, never Keep policy. Remove empty leftovers after completion."); handled || err != nil {
 		return err
 	}
 	repoRoot, cfg, project, err := commandContext(repoRootOverride, projectOverride, rootOverride)
 	if err != nil {
 		return err
 	}
-	infos, _, err := loadWorkspaceInfos(repoRoot, cfg, project)
+	infos, reviewedOperation, err := loadTidyReview(repoRoot, cfg, project)
 	if err != nil {
 		return err
 	}
-	if err := loadWorkspacePolicies(repoRoot, project, cfg.Cleanup.Rules, infos); err != nil {
-		return err
-	}
-	candidates := []workspaceInfo{}
-	for _, info := range infos {
-		if !info.Main && !info.Current {
-			candidates = append(candidates, info)
+	// Updated Workspaces that must never be selected or closed automatically
+	// (e.g. jj kept their on-disk edits in a divergent commit), by Handle.
+	review := map[string]string{}
+	if updateStale {
+		var held map[string]string
+		infos, reviewedOperation, held, err = updateStaleTidyCandidates(repoRoot, cfg, project, infos, reviewedOperation)
+		if err != nil {
+			return err
 		}
+		maps.Copy(review, held)
 	}
-	// A stale candidate is excluded from this Tidy (never recovered or closed)
-	// instead of aborting the whole batch; other snapshot failures still abort.
-	stale, err := snapshotTidyCandidates(repoRoot, candidates)
+	pass := tidyPass{force: force, yes: yes, updateStaleRan: updateStale, review: review}
+	for {
+		err = tidyWorkspacesPass(repoRoot, cfg, project, infos, reviewedOperation, pass)
+		var refresh *tidyRefreshRequest
+		if !errors.As(err, &refresh) {
+			break
+		}
+		// The user pressed u: update the requested stale Workspaces, then
+		// rebuild the whole review as a fresh Tidy would. Only UI state
+		// survives; every later check is bound to the new reviewed operation.
+		pass.resume, infos, reviewedOperation, err = refreshTidyAfterStaleUpdate(repoRoot, cfg, project, infos, refresh)
+		if err != nil {
+			return err
+		}
+		maps.Copy(review, pass.resume.Review)
+		pass.force = refresh.State.Force
+	}
 	if err != nil {
-		return err
-	}
-	reviewedOperation, err := currentOperationID(repoRoot)
-	if err != nil {
-		return err
-	}
-	infos, _, err = loadWorkspaceInfos(repoRoot, cfg, project)
-	if err != nil {
-		return err
-	}
-	if err := loadWorkspacePolicies(repoRoot, project, cfg.Cleanup.Rules, infos); err != nil {
-		return err
-	}
-	for i := range infos {
-		infos[i].Stale = stale[infos[i].Ref.Handle] && !infos[i].Main && !infos[i].Current && !infos[i].Missing
-	}
-	if err := tidyWorkspaces(repoRoot, cfg, project, infos, force, yes, reviewedOperation); err != nil {
 		if errors.Is(err, errTidyCancelled) {
 			return nil
 		}
@@ -1215,9 +1220,77 @@ func runTidy(args []string) error {
 	return nil
 }
 
+// loadTidyReview is the complete review a fresh Tidy starts from: snapshot
+// every non-Main non-Current candidate, pin the resulting operation, then
+// reload Workspaces and policies at it. A `u` refresh and --update-stale
+// rerun exactly this, so nothing from an earlier review is reused.
+func loadTidyReview(repoRoot string, cfg config, project string) ([]workspaceInfo, string, error) {
+	infos, _, err := loadWorkspaceInfos(repoRoot, cfg, project)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := loadWorkspacePolicies(repoRoot, project, cfg.Cleanup.Rules, infos); err != nil {
+		return nil, "", err
+	}
+	candidates := []workspaceInfo{}
+	for _, info := range infos {
+		if !info.Main && !info.Current {
+			candidates = append(candidates, info)
+		}
+	}
+	// A stale candidate is excluded from selection (never recovered
+	// automatically or closed) instead of aborting the whole batch; other
+	// snapshot failures still abort.
+	stale, err := snapshotTidyCandidates(repoRoot, candidates)
+	if err != nil {
+		return nil, "", err
+	}
+	reviewedOperation, err := currentOperationID(repoRoot)
+	if err != nil {
+		return nil, "", err
+	}
+	infos, _, err = loadWorkspaceInfos(repoRoot, cfg, project)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := loadWorkspacePolicies(repoRoot, project, cfg.Cleanup.Rules, infos); err != nil {
+		return nil, "", err
+	}
+	for i := range infos {
+		infos[i].Stale = stale[infos[i].Ref.Handle] && !infos[i].Main && !infos[i].Current && !infos[i].Missing
+	}
+	return infos, reviewedOperation, nil
+}
+
 var errTidyCancelled = errors.New("Tidy cancelled or no rows selected")
 
+// tidyPass is one review-and-select pass of Tidy. A `u` refresh ends a pass
+// early; the next pass starts from a freshly rebuilt review.
+type tidyPass struct {
+	force, yes bool
+	// updateStaleRan records that --update-stale already ran, so skip
+	// warnings for Workspaces that are still stale don't suggest it again.
+	updateStaleRan bool
+	// resume carries UI state and the stale-update outcome into the selector
+	// of a pass that follows a `u` refresh; nil for the first pass.
+	resume *tidyResume
+	// review holds updated Workspaces, by Handle, that are no longer stale
+	// but must never be selected or closed automatically (e.g. jj kept their
+	// on-disk edits in a divergent commit), with the reason. They stay
+	// manually selectable in the TUI.
+	review map[string]string
+}
+
 func tidyWorkspaces(repoRoot string, cfg config, project string, infos []workspaceInfo, force bool, yes bool, reviewedOperation string) error {
+	return tidyWorkspacesPass(repoRoot, cfg, project, infos, reviewedOperation, tidyPass{force: force, yes: yes})
+}
+
+// tidyWorkspacesPass reviews, selects, and closes against infos and the
+// operation they were reviewed at. In the TUI, pressing u returns a
+// *tidyRefreshRequest error before anything is closed; the caller updates the
+// stale Workspaces, rebuilds infos and the operation, and starts a new pass.
+func tidyWorkspacesPass(repoRoot string, cfg config, project string, infos []workspaceInfo, reviewedOperation string, pass tidyPass) error {
+	force, yes := pass.force, pass.yes
 	targets := tidyTargets(infos, force)
 	if err := validateUniqueCloseTargets(targets); err != nil {
 		return err
@@ -1229,7 +1302,7 @@ func tidyWorkspaces(repoRoot string, cfg config, project string, infos []workspa
 	if currentOperation != reviewedOperation {
 		return fmt.Errorf("Workspace graph changed after review; rerun Tidy and review the new state")
 	}
-	interactive := !yes && canUseTUI()
+	interactive := !yes && canUseTUIFn()
 	policyTargets := targets
 	if interactive {
 		policyTargets = infos
@@ -1248,15 +1321,40 @@ func tidyWorkspaces(repoRoot string, cfg config, project string, infos []workspa
 		if err != nil {
 			return err
 		}
-		// Automatic selection must never block itself: rows that are only
-		// protected by other preselected rows start unchecked.
-		items, left := preselectSafeTidyBatch(items, review.review, force)
-		notice := ""
-		if len(left) > 0 {
-			notice = tidyLeftUncheckedNotice(left)
+		notices := []string{}
+		held := []string{}
+		for i := range items {
+			if note, ok := pass.review[items[i].Handle]; ok && !items[i].Stale {
+				// Never automatic: only an explicit Space may select it.
+				items[i].Note = note
+				items[i].Selected = false
+				held = append(held, items[i].Handle)
+			}
+		}
+		var restore *tidyUIState
+		if pass.resume != nil {
+			// After a `u` refresh: keep the user's still-selectable checks and
+			// layer the recovered rows' startup preselection on top of them.
+			restore = &pass.resume.State
+			var left string
+			items, left = restoreTidySelection(items, pass.resume.Recovered, pass.resume.State.Selected, review.review, force)
+			notices = append(notices, pass.resume.Notice, left)
+		} else {
+			// Automatic selection must never block itself: rows that are only
+			// protected by other preselected rows start unchecked.
+			if len(held) > 0 {
+				notices = append(notices, "Not preselected, review first (see row detail): "+strings.Join(held, ", "))
+			}
+			var left []string
+			items, left = preselectSafeTidyBatch(items, review.review, force)
+			if len(left) > 0 {
+				notices = append(notices, tidyLeftUncheckedNotice(left))
+			}
 		}
 		byPolicyHandle := mapInfosByHandle(infos)
-		selected, opts, err := runSelector(selectorOptions{Title: "Tidy Workspaces", Mode: selectorMulti, Items: items, Tidy: true, ForceEnabled: force, AllowForceToggle: true, Notice: notice, ReviewTidy: review.review, PreviewTidy: review.preview, SetPolicy: func(handle, policy string) error {
+		// A *tidyRefreshRequest error (u) is returned as is: nothing below
+		// runs, so no review evidence from this pass outlives it.
+		selected, opts, err := runSelectorFn(selectorOptions{Title: "Tidy Workspaces", Mode: selectorMulti, Items: items, Tidy: true, ForceEnabled: force, AllowForceToggle: true, Notice: joinNotices(notices...), Restore: restore, ReviewTidy: review.review, PreviewTidy: review.preview, SetPolicy: func(handle, policy string) error {
 			return policyReview.setPolicy(byPolicyHandle[handle], policy)
 		}})
 		if err != nil {
@@ -1277,7 +1375,21 @@ func tidyWorkspaces(repoRoot string, cfg config, project string, infos []workspa
 		}
 	} else {
 		for _, info := range staleWorkspaceInfos(infos) {
-			fmt.Fprintf(stderrWriter, "%s\n", cliStylesForWriter(stderrWriter).Warn.Render(fmt.Sprintf("Skipping stale Workspace %s: %s", info.Ref.Handle, staleWorkspaceHint(info))))
+			fmt.Fprintf(stderrWriter, "%s\n", cliStylesForWriter(stderrWriter).Warn.Render(fmt.Sprintf("Skipping stale Workspace %s: %s", info.Ref.Handle, staleWorkspaceSkipHint(info, pass.updateStaleRan))))
+		}
+		// Updated Workspaces held for review are never closed automatically,
+		// with or without force.
+		kept, held := []workspaceInfo{}, []workspaceInfo{}
+		for _, target := range targets {
+			if _, ok := pass.review[target.Ref.Handle]; ok {
+				held = append(held, target)
+			} else {
+				kept = append(kept, target)
+			}
+		}
+		if len(held) > 0 {
+			fmt.Fprintf(stderrWriter, "%s\n", cliStylesForWriter(stderrWriter).Warn.Render("Left for manual review (its stale update needs review; see above): "+workspaceHandleList(held)))
+			targets = kept
 		}
 	}
 	if err := validateUniqueCloseTargets(targets); err != nil {
@@ -5405,8 +5517,12 @@ type selectorItem struct {
 	Disabled         bool
 	All              bool
 	Selected         bool
-	// Stale rows (Tidy only) are never selectable, even with force.
+	// Stale rows (Tidy only) are never selectable, even with force, until
+	// the user's `u` updates them and the whole review is rebuilt.
 	Stale bool
+	// Note (Tidy only) is a warning shown first on the row's detail line,
+	// e.g. that its stale update kept on-disk edits in a divergent commit.
+	Note string
 }
 
 type selectorOptions struct {
@@ -5423,11 +5539,14 @@ type selectorOptions struct {
 	AllowRoleToggle  bool
 	MoveToMain       bool
 	Tidy             bool
-	// AllowStackOptions binds s/r/c to cycle StackOptions; otherwise those
-	// letters are ordinary filter input.
+	// AllowStackOptions binds s/r/c to cycle StackOptions.
 	AllowStackOptions bool
 	StackOptions      stackConfig
 	Notice            string
+	// Restore reapplies the cursor, filter, and preview of a Tidy selector
+	// that ended with a `u` refresh. Checks and force arrive through Items
+	// and ForceEnabled.
+	Restore *tidyUIState
 }
 
 type selectorResult struct {
@@ -5452,12 +5571,18 @@ type selectorModel struct {
 	selectedOrder []int
 	selectedRoles map[int]string
 	filter        string
-	filterMode    bool
-	showHelp      bool
-	result        selectorResult
-	cancel        bool
-	width         int
-	height        int
+	// Keys are modal: in normal mode they are commands only; "/" enters
+	// filterMode, where every printable key edits the filter.
+	filterMode bool
+	// filterHint shows "press / to filter" after an unbound printable key.
+	filterHint bool
+	showHelp   bool
+	result     selectorResult
+	cancel     bool
+	// refresh is set when Tidy's u ends the run to update stale rows.
+	refresh *tidyRefreshRequest
+	width   int
+	height  int
 }
 
 func newSelectorModel(opts selectorOptions) selectorModel {
@@ -5468,6 +5593,20 @@ func newSelectorModel(opts selectorOptions) selectorModel {
 			if opts.OrderedSelection {
 				model.selectedOrder = append(model.selectedOrder, i)
 			}
+		}
+	}
+	if restore := opts.Restore; restore != nil {
+		model.filter = restore.Filter
+		for pos, idx := range model.visibleItems() {
+			if opts.Items[idx].Handle == restore.Cursor {
+				model.cursor = pos
+				break
+			}
+		}
+		if opts.Tidy && restore.PreviewOpen {
+			// The first message (the initial window size) requests it.
+			model.previewOpen = true
+			model.previewText = "Loading bounded read-only preview…"
 		}
 	}
 	model.refreshTidyReview()
@@ -5482,7 +5621,19 @@ func runSelector(opts selectorOptions) ([]selectorItem, selectorOptions, error) 
 		return nil, opts, err
 	}
 	m, ok := out.(selectorModel)
-	if !ok || m.cancel {
+	if !ok {
+		return nil, opts, nil
+	}
+	return m.outcome(opts)
+}
+
+// outcome converts a finished selector into runSelector's results. A Tidy
+// `u` refresh is returned as a *tidyRefreshRequest error.
+func (m selectorModel) outcome(opts selectorOptions) ([]selectorItem, selectorOptions, error) {
+	if m.refresh != nil {
+		return nil, opts, m.refresh
+	}
+	if m.cancel {
 		return nil, opts, nil
 	}
 	opts.ForceEnabled = m.result.ForceEnabled
@@ -5508,33 +5659,43 @@ func (m selectorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 	case tea.KeyMsg:
 		key := msg.String()
-		// ctrl+a is not a letter, so it works in filter mode too without
-		// taking anything away from filter input.
+		m.filterHint = false
+		// ctrl+a and ctrl+c are not printable, so they keep their meaning in
+		// filter mode too without taking anything away from filter input.
 		if key == "ctrl+a" {
 			m.toggleAllVisible()
 			break
 		}
-		if m.filterMode && key != "ctrl+c" {
+		if key == "ctrl+c" {
+			m.stopPreview()
+			m.cancel = true
+			return m, tea.Quit
+		}
+		if m.filterMode {
 			m.updateFilterMode(msg)
 			break
 		}
+		// Normal mode: keys are commands only and never edit the filter.
 		switch key {
-		case "ctrl+c", "esc", "q":
+		case "esc":
+			// An applied filter is cleared before esc quits.
+			if m.filter != "" {
+				m.clearFilter()
+				break
+			}
+			m.stopPreview()
+			m.cancel = true
+			return m, tea.Quit
+		case "q":
 			m.stopPreview()
 			m.cancel = true
 			return m, tea.Quit
 		case "/":
 			m.filterMode = true
 		case "up", "k":
-			if m.cursor > 0 {
-				m.cursor--
-			}
+			m.moveCursor(-1)
 		case "down", "j":
-			if m.cursor < len(m.visibleItems())-1 {
-				m.cursor++
-			}
-		case "backspace":
-			m.backspaceFilter()
+			m.moveCursor(1)
 		case " ":
 			if m.opts.Mode == selectorMulti {
 				visible := m.visibleItems()
@@ -5563,8 +5724,12 @@ func (m selectorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.previewOffset = max(0, min(m.previewOffset+step, len(strings.Split(m.previewText, "\n"))-max(1, m.height-5)))
 			}
 		default:
-			if !m.handleCommandKey(key) {
-				m.typeFilter(msg)
+			if !m.handleCommandKey(key) && isPrintableKey(msg) {
+				m.filterHint = true
+			}
+			if m.refresh != nil {
+				m.stopPreview()
+				return m, tea.Quit
 			}
 		}
 	}
@@ -5573,8 +5738,9 @@ func (m selectorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// handleCommandKey handles letter commands that are bound only for selectors
-// that use them. Unbound letters return false and become filter input.
+// handleCommandKey runs the normal-mode letter commands bound for this
+// selector. An unbound key returns false and does nothing: only "/" filter
+// mode edits the filter.
 func (m *selectorModel) handleCommandKey(key string) bool {
 	switch key {
 	case "v":
@@ -5582,6 +5748,11 @@ func (m *selectorModel) handleCommandKey(key string) bool {
 			return false
 		}
 		m.previewOpen = !m.previewOpen
+	case "u":
+		if !m.opts.Tidy {
+			return false
+		}
+		m.requestStaleUpdate()
 	case "?":
 		if !m.opts.Tidy {
 			return false
@@ -5635,7 +5806,8 @@ func (m *selectorModel) toggleAllVisible() {
 	allSelected := true
 	for _, idx := range m.visibleItems() {
 		item := m.opts.Items[idx]
-		if item.Disabled || item.All || item.Stale {
+		// A row held for review (Note) is selected only by an explicit Space.
+		if item.Disabled || item.All || item.Stale || item.Note != "" {
 			continue
 		}
 		candidates = append(candidates, idx)
@@ -5716,27 +5888,37 @@ func (m *selectorModel) toggleForce() {
 }
 
 // updateFilterMode is the explicit "/" filter input: every printable key,
-// including command letters and space, edits the filter. Enter or Esc leave
-// filter mode (keeping the filter); they never submit or quit.
+// including command letters, j/k, and space, edits the filter; ↑/↓ still
+// move the cursor. Enter or Esc leave filter mode (keeping the filter); they
+// never submit or quit.
 func (m *selectorModel) updateFilterMode(msg tea.KeyMsg) {
 	switch msg.String() {
 	case "esc", "enter":
 		m.filterMode = false
 	case "backspace":
 		m.backspaceFilter()
+	case "up":
+		m.moveCursor(-1)
+	case "down":
+		m.moveCursor(1)
 	default:
 		m.typeFilter(msg)
 	}
 }
 
-func (m *selectorModel) typeFilter(msg tea.KeyMsg) {
+func (m *selectorModel) moveCursor(delta int) {
+	m.cursor = max(0, min(m.cursor+delta, len(m.visibleItems())-1))
+}
+
+// printableKeyText is the text a key types in filter mode ("" if none).
+func printableKeyText(msg tea.KeyMsg) string {
 	text := ""
 	switch msg.Type {
 	case tea.KeySpace:
 		text = " "
 	case tea.KeyRunes:
 		if msg.Alt {
-			return
+			return ""
 		}
 		for _, r := range msg.Runes {
 			if unicode.IsPrint(r) {
@@ -5744,11 +5926,36 @@ func (m *selectorModel) typeFilter(msg tea.KeyMsg) {
 			}
 		}
 	}
+	return text
+}
+
+func isPrintableKey(msg tea.KeyMsg) bool {
+	return printableKeyText(msg) != ""
+}
+
+func (m *selectorModel) typeFilter(msg tea.KeyMsg) {
+	text := printableKeyText(msg)
 	if text == "" {
 		return
 	}
 	m.filter += text
 	m.cursor = 0
+}
+
+// clearFilter drops an applied filter and keeps the highlighted row.
+func (m *selectorModel) clearFilter() {
+	highlighted := -1
+	if visible := m.visibleItems(); m.cursor >= 0 && m.cursor < len(visible) {
+		highlighted = visible[m.cursor]
+	}
+	m.filter = ""
+	m.cursor = 0
+	for pos, idx := range m.visibleItems() {
+		if idx == highlighted {
+			m.cursor = pos
+			break
+		}
+	}
 }
 
 func (m *selectorModel) backspaceFilter() {
@@ -5920,6 +6127,11 @@ func selectorRoleInitial(role string) string {
 }
 
 func (m selectorModel) View() string {
+	if m.refresh != nil {
+		// Clear the inline selector; the caller reports the stale update
+		// below it and then opens the rebuilt review.
+		return ""
+	}
 	if m.opts.Tidy && m.previewOpen {
 		return m.tidyPreviewView()
 	}
@@ -5935,7 +6147,7 @@ func (m selectorModel) View() string {
 	if cursor >= len(visible) && len(visible) > 0 {
 		cursor = len(visible) - 1
 	}
-	showFilter := m.filter != "" || m.filterMode
+	showFilter := m.showFilterLine()
 	// Priority when the terminal is short: title, one row, footer, hint,
 	// legend, filter. Chrome is dropped rather than exceeding the height.
 	rowBudget, include := fitSelectorChrome(m.height, true, true, true, showFilter)
@@ -5988,16 +6200,17 @@ func (m selectorModel) View() string {
 			footer = "↑/↓ move  space toggle/next  ctrl+a all shown  enter submit selected  / filter  q quit"
 		}
 		if m.filterMode {
-			footer = "filter: typing edits the filter  ctrl+a all shown  enter/esc done  backspace delete"
-		}
-		if m.opts.AllowForceToggle {
-			footer += fmt.Sprintf("  f force:%v", m.opts.ForceEnabled)
-		}
-		if m.opts.AllowRoleToggle {
-			footer += "  a toggle payload/follow-only"
-		}
-		if m.opts.AllowStackOptions {
-			footer += fmt.Sprintf("  s shape:%s  r rebase:%s  c conflicts:%s", emptyDefault(m.opts.StackOptions.Shape, "auto"), emptyDefault(m.opts.StackOptions.RebaseMode, "auto"), emptyDefault(m.opts.StackOptions.ConflictStrategy, "prefer-clean"))
+			footer = selectorFilterModeFooter
+		} else {
+			if m.opts.AllowForceToggle {
+				footer += fmt.Sprintf("  f force:%v", m.opts.ForceEnabled)
+			}
+			if m.opts.AllowRoleToggle {
+				footer += "  a toggle payload/follow-only"
+			}
+			if m.opts.AllowStackOptions {
+				footer += fmt.Sprintf("  s shape:%s  r rebase:%s  c conflicts:%s", emptyDefault(m.opts.StackOptions.Shape, "auto"), emptyDefault(m.opts.StackOptions.RebaseMode, "auto"), emptyDefault(m.opts.StackOptions.ConflictStrategy, "prefer-clean"))
+			}
 		}
 		lines = append(lines, styles.Help.Render(footer))
 	}
@@ -6046,11 +6259,23 @@ func (m selectorModel) styleSelectorRow(styles styles, item selectorItem, highli
 	}
 }
 
+const selectorFilterModeFooter = "filter mode: keys type  ↑/↓ move  backspace delete  enter/esc done  ctrl+a all shown"
+
+func (m selectorModel) showFilterLine() bool {
+	return m.filterMode || m.filter != "" || m.filterHint
+}
+
+// filterLine makes the key mode obvious: "/text▏" while typing, the applied
+// filter otherwise, or a hint after an unbound key in normal mode.
 func (m selectorModel) filterLine() string {
-	if m.filterMode {
-		return "filter: " + m.filter + "▏"
+	switch {
+	case m.filterMode:
+		return "/" + m.filter + "▏"
+	case m.filter != "":
+		return "filter: " + m.filter + " (esc clears)"
+	default:
+		return "press / to filter"
 	}
-	return "filter: " + m.filter
 }
 
 func (m selectorModel) tidyView(styles styles) string {
@@ -6082,7 +6307,7 @@ func (m selectorModel) tidyView(styles styles) string {
 		}
 		return joinSelectorLines(lines, m.width, m.height)
 	}
-	showFilter := m.filter != "" || m.filterMode
+	showFilter := m.showFilterLine()
 	// The detail line carries the Enter-blocked reason, so it outranks rows:
 	// title, detail, one row, notice, footer, filter. A notice gets its own
 	// line so row details stay visible while it persists.
@@ -6131,8 +6356,12 @@ func (m selectorModel) tidyView(styles styles) string {
 	}
 	if showFooter {
 		footer := "space toggle  enter tidy  / filter  p Keep/Disposable  f force  v preview  ctrl+a all shown  ? help  q quit"
+		if m.hasStaleRows() {
+			// Early in the line: stale rows block tidying until updated.
+			footer = "space toggle  enter tidy  u update stale  / filter  p Keep/Disposable  f force  v preview  ctrl+a all shown  ? help  q quit"
+		}
 		if m.filterMode {
-			footer = "filter: typing edits the filter  ctrl+a all shown  enter/esc done  backspace delete"
+			footer = selectorFilterModeFooter
 		}
 		lines = append(lines, styles.Help.Render(footer))
 	}
@@ -6168,11 +6397,17 @@ func (m selectorModel) tidyDetailLine(styles styles, visible []int, cursor int, 
 	}
 	item := m.opts.Items[visible[cursor]]
 	if item.Stale {
-		return styles.Warn.Render(item.Handle + ": " + staleWorkspaceHint(workspaceInfo{Path: item.Path}))
+		return styles.Warn.Render(tidyStaleRowDetail(item))
 	}
 	detail := item.Handle + ": " + emptyDefault(m.evidence[item.Handle], item.Safety)
+	if item.Note != "" {
+		detail = item.Handle + ": " + item.Note + " · " + emptyDefault(m.evidence[item.Handle], item.Safety)
+	}
 	if item.Path != "" {
 		detail += " · " + item.Path
+	}
+	if item.Note != "" {
+		return styles.Warn.Render(detail)
 	}
 	return styles.Help.Render(detail)
 }
@@ -6185,8 +6420,8 @@ func tidyHelpText(opts selectorOptions) []string {
 		selectorLegend(opts),
 		"Keep is never automatic; Space explicitly selects. p persists policy even on cancel.",
 		"Status is Main-relative; selected rows can't protect each other. Enter stays blocked until the checked batch is safe or force is on; automatic preselection leaves rows unchecked that only other checked rows protect.",
-		"Stale rows are never closed: run the shown `jj workspace update-stale` command, then rerun ajj tidy.",
-		"Keys: ↑/↓ or j/k move, space toggle/next, ctrl+a select/deselect all shown rows (only rows the batch review accepts; also in filter mode), enter tidy, / filter (enter/esc finish; every key types), backspace edit filter, p Keep/Disposable, f force, v preview (PgUp/PgDn scroll), ? help, q/esc quit.",
+		"Stale rows can't be selected or closed, even with force, until updated. u runs `jj workspace update-stale` for every stale row shown (the filter applies), then rebuilds the whole review in place, keeping checks, cursor, filter, force, and preview; recovered Disposable rows are preselected only while the batch stays safe. update-stale first snapshots on-disk edits of a stale copy, which jj keeps in a divergent commit (jj log -r 'divergent()'); such a row is never preselected, so review it first. Nothing is updated automatically.",
+		"Keys: ↑/↓ or j/k move, space toggle/next, ctrl+a select/deselect all shown rows (only rows the batch review accepts; also in filter mode), enter tidy, u update stale rows, p Keep/Disposable, f force, v preview (PgUp/PgDn scroll), ? help, q quit, esc clear filter or quit. Letters are commands; / starts a filter where every key types (↑/↓ move, backspace deletes, enter/esc finish).",
 	}
 }
 
@@ -6305,7 +6540,7 @@ func selectorLegend(opts selectorOptions) string {
 
 func selectorHint(opts selectorOptions) string {
 	if opts.Mode == selectorSingle {
-		return "Choose the Workspace to open. Type (or press / to type any key) to filter by handle, status, marker, or path."
+		return "Choose the Workspace to open. Press / to filter by handle, status, marker, or path."
 	}
 	if opts.OrderedSelection {
 		return "Choose Line Stacking order. Space toggles and advances in selection order; press a on a selected row to toggle payload/follow-only. The target Workspace is disabled."
@@ -6322,7 +6557,7 @@ func selectorHint(opts selectorOptions) string {
 	if opts.AllowForceToggle {
 		return "Choose Workspaces to close. Normal close requires representation outside the complete closing set; Press f for Forced Closing."
 	}
-	return "Choose Workspaces. Type (or press / to type any key) to filter by handle, status, marker, or path; ctrl+a toggles all shown rows."
+	return "Choose Workspaces. Press / to filter by handle, status, marker, or path; ctrl+a toggles all shown rows."
 }
 
 func (m selectorModel) visibleItems() []int {
