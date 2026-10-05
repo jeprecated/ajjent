@@ -34,7 +34,8 @@ This installs a binary named `ajj`. Make sure your Go bin directory is on `PATH`
 
 Ajjent runs natively on Apple Silicon and Intel Macs. Install with Go, a release
 binary, or Nix, with Jujutsu on `PATH` (0.41.0 or newer; machine create
-with `noCleanup` requires exactly 0.43.0).
+with `noCleanup` requires the one release your build trusts, 0.43.0 unless the
+build set another).
 
 For the default macOS zsh, add this to `~/.zshrc` after setting up `PATH`:
 
@@ -62,6 +63,19 @@ Or run without installing:
 ```bash
 nix run github:jeprecated/ajjent -- --help
 ```
+
+The package trusts the `jujutsu` it is built with for machine create
+`noCleanup`: it links that version in, runs the test suite against the same jj
+in its check phase, and puts it first on the wrapped `ajj`'s `PATH`. A flake
+whose `ajjent` input follows its own `nixpkgs` therefore gets a build whose
+checks ran against its own jj, or no build if that jj fails them. To choose
+differently, override `jujutsu` or the trusted version:
+
+```nix
+ajjent.packages.${system}.default.override { noCleanupJjVersion = "x.y.z"; }
+```
+
+See [the trusted Jujutsu release](#trusted-jujutsu-release-for-nocleanup).
 
 ### Home Manager
 
@@ -120,9 +134,26 @@ nix run github:jeprecated/ajjent -- --help
 `ajj` shells out to `jj` (Jujutsu), which must be on `PATH`.
 
 - Minimum supported `jj`: 0.41.0
-- Tested against: 0.43.x
+- Full test suite passes against: 0.43.0 and 0.44.0
+- Against 0.45.1 machine integration (`ajj integrate`) fails with `unknown-effect` in colocated repositories, because `jj workspace update-stale` now records a `reset git head` operation after the published one; the rest of the suite passes
+- Machine create `noCleanup` trusts exactly one release per build; see [the trusted Jujutsu release](#trusted-jujutsu-release-for-nocleanup)
 
 Commands that only print help or version information do not require `jj`; repo-aware commands do.
+
+### Trusted Jujutsu release for noCleanup
+
+The ownership proof depends on the exact two operations `jj workspace add` writes, so each Ajj build trusts exactly one Jujutsu release. That release is a build setting, not a constant of Ajj:
+
+```bash
+go build -ldflags "-X github.com/jeprecated/ajjent/internal/buildcfg.NoCleanupJJVersion=<x.y.z>" ./cmd/ajj
+```
+
+- **Default: 0.43.0.** `go install`, release binaries, and a plain `go build` or `go test` trust the release CI installs.
+- **Nix: the `jujutsu` the package is built with.** `nix/package.nix` takes `noCleanupJjVersion ? jujutsu.version`; override it, or `jujutsu`, to choose differently.
+- **The build's tests are the validation.** The `TestNoCleanup*` tests run the real proof against the jj on `PATH` and fail when that jj is not the trusted release, so a build that ran its tests cannot trust a release they did not exercise. A build that skips its tests has no such evidence.
+- **Runs so far:** with jj 0.43.0 and with jj 0.44.0, each as the trusted release, the whole suite passes. With jj 0.45.1 and the setting 0.45.1, every `TestNoCleanup*` test passes and `jj workspace add` writes the same two operations, but the suite as a whole fails in machine integration (see above), so a build against 0.45.1 fails its checks.
+
+Only a plain `x.y.z` setting is honoured; anything else trusts no release and safe mode is refused. At runtime the match stays exact: `jj x.y.z` as Nix builds print it, or, for 0.43.0, the official release binary's own tag-commit suffix. Development, dirty and other-commit builds are refused.
 
 ## Quick Start
 
@@ -168,15 +199,15 @@ To branch independently of the Current Workspace's mutable head, add optional `c
 Negotiate `ajj capabilities --json --schema ajj-capabilities-v3` and require `create.explicitBaseCommit: true` before sending the field. Both receipt schemas echo an explicit `child.baseCommit`, covered by `evidenceDigest`; `checks.parentMatches` then means `child.parentCommit == child.baseCommit`, not equality with the target head. Add `--receipt-schema ajj-create-receipt-v2` to receive the private registered `child.workspaceRoot` for launching. See [ADR 0013](docs/adr/0013-separate-machine-create-base-from-target-head.md) for the request example, capture procedure, compatibility, and Summon recovery guidance.
 
 In legacy mode, `requestId` is correlation metadata, not durable creator identity. A matching existing Workspace is accepted only after Ajj verifies its configured path, repository, exact parent, fresh cursor, and provider setup. Existing contradictory state is not adopted, but legacy post-add parent verification still uses the destructive cleanup described above. `ready` is snapshot evidence linearized at the final stable Jujutsu operation read, not a lease against later direct `jj` changes; reconcile again before delayed use. A local coordinator may supply Current Workspace through an inherited Linux `/proc/self/fd/N` directory; Ajj resolves it once before loading the configured Project and Main, and exact request replay remains the recovery action after a missing create response. See [ADR 0011](docs/adr/0011-add-state-reconciled-machine-create.md).
-For collectors that must preserve every created or contradictory Workspace, negotiate capabilities v3 and require **`create.noCleanup: true`**, require the installed JJ version in **`create.noCleanupJjVersions`** (currently only `0.43.0`), then add top-level **`"noCleanup": true`** to the request (independently of `child.baseCommit`):
+For collectors that must preserve every created or contradictory Workspace, negotiate capabilities v3 and require **`create.noCleanup: true`**, require the installed JJ version in **`create.noCleanupJjVersions`** (the one release this build trusts), then add top-level **`"noCleanup": true`** to the request (independently of `child.baseCommit`):
 
 ```json
 {"schema":"ajj-create-request-v1","noCleanup":true,"requestId":"checkpoint-child-001","target":{"expectedWorkspace":"A","expectedHeadCommit":"1111111111111111111111111111111111111111"},"child":{"workspace":"A1","baseCommit":"2222222222222222222222222222222222222222"}}
 ```
 
-Both receipt schemas echo the selected option, bound by `evidenceDigest`. Safe mode never forgets/removes a child, even after partial add or failed verification, and never runs direnv trust or project hooks. Exact request/destination evidence is durably retained in shared JJ metadata before add. Only an acknowledged add with the verified two-operation JJ 0.43.0 transition and unchanged recorded child head can reconcile to ready; matching state alone is insufficient. A transient failed read-back returns `conflict` / `create-verification-failed`; exact replay can reconcile an intact child. Unacknowledged/unknown effects remain `conflict` / `create-effects-unknown` with `operator-review`, even when currently absent. Edited or contradictory children are preserved. Changed requests, reused request IDs for another child, or switching the mode off cannot bypass retained evidence (`create-evidence-conflict`). Records do not expire automatically, and missing/closed children are not automatically recreated. Unsupported JJ versions fail before intent/Workspace effects; the legacy minimum remains 0.41.0.
+Both receipt schemas echo the selected option, bound by `evidenceDigest`. Safe mode never forgets/removes a child, even after partial add or failed verification, and never runs direnv trust or project hooks. Exact request/destination evidence is durably retained in shared JJ metadata before add. Only an acknowledged add with the verified two-operation `jj workspace add` transition and unchanged recorded child head can reconcile to ready; matching state alone is insufficient. A transient failed read-back returns `conflict` / `create-verification-failed`; exact replay can reconcile an intact child. Unacknowledged/unknown effects remain `conflict` / `create-effects-unknown` with `operator-review`, even when currently absent. Edited or contradictory children are preserved. Changed requests, reused request IDs for another child, or switching the mode off cannot bypass retained evidence (`create-evidence-conflict`). Records do not expire automatically, and missing/closed children are not automatically recreated. Untrusted JJ versions fail before intent/Workspace effects, with an error naming the trusted release; the legacy minimum remains 0.41.0.
 
-Persist and replay exact request bytes; never silently remove the option or alter the request to bypass a conflict. Keep collector setup disabled or provider-local files ignored; safe creation still performs configured file setup, but not `direnv allow`. It creates `.envrc`/links exclusively and preserves existing regular files (even identical) or mismatching links as setup conflicts instead of replacing them. Assimilated symlinks remain live links to Main-local content, not immutable checkpoint evidence. See [ADR 0014](docs/adr/0014-add-non-destructive-machine-create.md) for durability, compatibility, limitations and recovery. Human/default legacy creation without retained safe records is unchanged.
+Persist and replay exact request bytes; never silently remove the option or alter the request to bypass a conflict. Keep collector setup disabled or provider-local files ignored; safe creation still performs configured file setup, but not `direnv allow`. It creates `.envrc`/links exclusively and preserves existing regular files (even identical) or mismatching links as setup conflicts instead of replacing them. Assimilated symlinks remain live links to Main-local content, not immutable checkpoint evidence. See [ADR 0014](docs/adr/0014-add-non-destructive-machine-create.md) for durability, compatibility, limitations and recovery. Human/default legacy creation without retained safe records is unchanged. Which JJ release is trusted is a build setting; see [the trusted Jujutsu release](#trusted-jujutsu-release-for-nocleanup).
 
 - `ajj open [handle]` — print an existing Workspace path. With no Handle, opens the built-in selector. Opening never creates. It also repairs configured Assimilated path symlinks.
 - `ajj keep <handle...>` — persist an explicit **Keep** policy that overrides any matching cleanup rule: never select these Workspaces automatically for Tidy. Existing/unmatched Workspaces already default to Keep.

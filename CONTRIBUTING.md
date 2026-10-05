@@ -7,7 +7,7 @@ Thanks for helping improve Ajjent (`ajj`). This project is a Go CLI for Jujutsu 
 Prerequisites:
 
 - Go 1.24 or newer
-- `jj` (Jujutsu) 0.43.0 on `PATH` for the full integration suite, including the version-bound `noCleanup` tests
+- `jj` (Jujutsu) on `PATH` for the full integration suite. The `noCleanup` tests need it to be the release the build trusts: 0.43.0 by default
 - Optional: Nix/devenv for the pinned development shell
 
 Common local flow:
@@ -21,7 +21,7 @@ gofmt -l cmd/ajj
 
 `gofmt -l cmd/ajj` should print nothing before you send a change.
 
-The devenv and flake development shells include the tested Jujutsu version on Linux and macOS. With devenv:
+The devenv and flake development shells provide Jujutsu 0.43.0 through their lock files on Linux and macOS, matching the default. With devenv:
 
 ```bash
 devenv shell
@@ -36,6 +36,25 @@ The tests use physical temporary paths so fixture assertions agree with Jujutsu 
 
 The full suite exercises real Jujutsu processes and crash recovery. CI, devenv, and Nix allow twenty minutes because it can exceed Go's default ten-minute timeout on macOS.
 
+## Testing another Jujutsu release
+
+The Jujutsu release that machine create `noCleanup` trusts is a build setting, and the test run is what validates it: the `TestNoCleanup*` tests run the real ownership proof against the `jj` on `PATH` and fail when that `jj` is not the trusted release. To test another release, put it on `PATH` and set the same value for the run:
+
+```bash
+go test -timeout 20m \
+  -ldflags "-X github.com/jeprecated/ajjent/internal/buildcfg.NoCleanupJJVersion=0.45.1" ./...
+```
+
+The Nix package does this itself with the `jujutsu` it is built with, so building the flake against another nixpkgs tests that nixpkgs' jj:
+
+```bash
+nix build --no-link --override-input nixpkgs github:NixOS/nixpkgs/<rev>
+```
+
+The source default in `internal/buildcfg`, CI's `jj_version`, and the jj in the development shells' lock files name the same release; move them together. Official release binaries print their tag commit after the version, so trusting one for another release also needs that commit in `jjOfficialReleaseCommits`.
+
+Runs so far: with jj 0.43.0 and with jj 0.44.0, each as the trusted release, the whole suite passes. With jj 0.45.1 and the setting 0.45.1 every `TestNoCleanup*` test passes, but 23 machine integration tests fail with `unknown-effect`. Since 0.45.0, `jj workspace update-stale` in a colocated workspace records a `reset git head` operation; it lands on top of the operation `ajj integrate` just published, and the check that the published operation is still current refuses it.
+
 ## Code layout
 
 The CLI is intentionally compact rather than split into many packages:
@@ -43,6 +62,7 @@ The CLI is intentionally compact rather than split into many packages:
 - `cmd/ajj/main.go` is the main implementation file, currently around 4500 lines.
 - `cmd/ajj/main_test.go` holds most unit and command tests.
 - `cmd/ajj/main_stack_integration_test.go` covers shell-out stacking behavior against real `jj` repositories.
+- `internal/buildcfg` holds link-time build settings. It is a separate package only because one `-X` linker flag has to reach both the binary and its test binary.
 
 Prefer small, well-named helpers inside the existing layout unless a change clearly creates a new boundary.
 

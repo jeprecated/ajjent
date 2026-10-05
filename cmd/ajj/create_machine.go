@@ -7,7 +7,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+
+	"github.com/jeprecated/ajjent/internal/buildcfg"
 )
 
 var createMaterializeSetupFn = materializeAssimilatedFolders
@@ -59,22 +62,54 @@ func runCreateMachine(args []string) error {
 	if request.NoCleanup {
 		version, err := jjVersionFn()
 		if err != nil || !supportsNoCleanupJJVersion(version) {
-			return fmt.Errorf("noCleanup requires tested jj version %s", createNoCleanupJJVersion)
+			return errNoCleanupUntestedJJ()
 		}
 	}
 	return reconcileCreateRequest(repo, request, digest, receiptSchema)
 }
 
-func supportsNoCleanupJJVersion(version string) bool {
-	// Nix omits the revision; official release binaries append the exact
-	// v0.43.0 tag commit. Do not accept arbitrary development revisions.
-	switch strings.TrimSpace(version) {
-	case "jj " + createNoCleanupJJVersion,
-		"jj " + createNoCleanupJJVersion + "-89f62ede8c1c611eaf134c0c49252efd65c7945d":
-		return true
-	default:
-		return false
+// Only a plain release can be trusted, so no build setting can admit a
+// development or dirty jj.
+var jjReleaseVersionRE = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
+
+// Official release binaries append their tag commit to `jj --version`; Nix
+// builds omit it. A release without an entry is trusted in its bare form only.
+var jjOfficialReleaseCommits = map[string]string{
+	"0.43.0": "89f62ede8c1c611eaf134c0c49252efd65c7945d",
+}
+
+// trustedNoCleanupJJVersions is what capabilities advertise: the release this
+// build was linked to trust for the noCleanup ownership proof (see
+// validateCreateAddEvidence), which the build's own run of these tests
+// validates. A build setting that is not a plain release trusts nothing.
+func trustedNoCleanupJJVersions() []string {
+	if !jjReleaseVersionRE.MatchString(buildcfg.NoCleanupJJVersion) {
+		return []string{}
 	}
+	return []string{buildcfg.NoCleanupJJVersion}
+}
+
+func errNoCleanupUntestedJJ() error {
+	trusted := trustedNoCleanupJJVersions()
+	if len(trusted) == 0 {
+		return errors.New("noCleanup requires a tested jj version, and this build trusts none")
+	}
+	return fmt.Errorf("noCleanup requires tested jj version %s", strings.Join(trusted, ", "))
+}
+
+func supportsNoCleanupJJVersion(version string) bool {
+	reported := strings.TrimSpace(version)
+	for _, trusted := range trustedNoCleanupJJVersions() {
+		if reported == "jj "+trusted {
+			return true
+		}
+		// Accept the trusted release's own tag commit, never another
+		// release's commit or an arbitrary development revision.
+		if commit, ok := jjOfficialReleaseCommits[trusted]; ok && reported == "jj "+trusted+"-"+commit {
+			return true
+		}
+	}
+	return false
 }
 
 func readCreateRequestSource(source string) ([]byte, error) {

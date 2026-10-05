@@ -16,7 +16,6 @@ const (
 	createReceiptSchemaV2      = "ajj-create-receipt-v2"
 	ajjCapabilitiesSchemaV2    = "ajj-capabilities-v2"
 	ajjCapabilitiesSchemaV3    = "ajj-capabilities-v3"
-	createNoCleanupJJVersion   = "0.43.0"
 	createRecoveryModel        = "state-reconciliation"
 	createStatusReady          = "ready"
 	createStatusPartial        = "partial"
@@ -144,7 +143,7 @@ func capabilitiesV2() ajjCapabilitiesV2 {
 func capabilitiesV3() ajjCapabilitiesV3 {
 	v1 := integrationCapabilities()
 	create := createCapabilityBase()
-	return ajjCapabilitiesV3{Schema: ajjCapabilitiesSchemaV3, Integrate: v1.Integrate, Create: createCapabilitiesV2{NoCleanup: true, NoCleanupJJVersions: []string{createNoCleanupJJVersion}, ExplicitBaseCommit: true, RequestSchema: create.RequestSchema, ReceiptSchemas: []string{createReceiptSchemaV1, createReceiptSchemaV2}, Executable: create.Executable, MinimumJJVersion: create.MinimumJJVersion, TargetResolution: create.TargetResolution, ExactHeadAssertion: create.ExactHeadAssertion, RecoveryModel: create.RecoveryModel, Statuses: create.Statuses, NextActions: create.NextActions, RequestIDPattern: create.RequestIDPattern, MaxRequestBytes: create.MaxRequestBytes, MaxOutputBytes: create.MaxOutputBytes, MaxErrorMessageBytes: create.MaxErrorMessageBytes}}
+	return ajjCapabilitiesV3{Schema: ajjCapabilitiesSchemaV3, Integrate: v1.Integrate, Create: createCapabilitiesV2{NoCleanup: true, NoCleanupJJVersions: trustedNoCleanupJJVersions(), ExplicitBaseCommit: true, RequestSchema: create.RequestSchema, ReceiptSchemas: []string{createReceiptSchemaV1, createReceiptSchemaV2}, Executable: create.Executable, MinimumJJVersion: create.MinimumJJVersion, TargetResolution: create.TargetResolution, ExactHeadAssertion: create.ExactHeadAssertion, RecoveryModel: create.RecoveryModel, Statuses: create.Statuses, NextActions: create.NextActions, RequestIDPattern: create.RequestIDPattern, MaxRequestBytes: create.MaxRequestBytes, MaxOutputBytes: create.MaxOutputBytes, MaxErrorMessageBytes: create.MaxErrorMessageBytes}}
 }
 func parseCreateRequestV1(data []byte) (createRequestV1, string, error) {
 	if len(bytes.TrimSpace(data)) == 0 {

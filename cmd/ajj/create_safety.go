@@ -153,7 +153,9 @@ func (s *createSafety) create(repo string, req createRequestV1) error {
 	return nil
 }
 
-// JJ 0.43.0 adds a root-based placeholder, then the requested-base cursor.
+// A trusted JJ release (buildcfg.NoCleanupJJVersion) adds a root-based
+// placeholder, then the requested-base cursor; the build's tests run this
+// proof against that jj.
 // Bind that exact two-operation transition, not a later foreign fresh cursor.
 // Operation descriptions are never authority, and other shapes fail closed.
 func validateCreateAddEvidence(repo string, r createSafetyRecord, base string) error {

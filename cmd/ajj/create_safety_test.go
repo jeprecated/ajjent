@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/jeprecated/ajjent/internal/buildcfg"
 )
 
 // Each synthetic repository has an inert HOME and explicit JJ config; even
@@ -37,6 +39,31 @@ func safeCreateRequest(t *testing.T, repo string) []byte {
 		t.Fatal(err)
 	}
 	return data
+}
+
+const noCleanupJJVersionLinkerSymbol = "github.com/jeprecated/ajjent/internal/buildcfg.NoCleanupJJVersion"
+
+func withNoCleanupJJVersion(t *testing.T, version string) {
+	t.Helper()
+	old := buildcfg.NoCleanupJJVersion
+	buildcfg.NoCleanupJJVersion = version
+	t.Cleanup(func() { buildcfg.NoCleanupJJVersion = old })
+}
+
+// The tests in this file are the build's validation of
+// buildcfg.NoCleanupJJVersion: they run the real ownership proof against the
+// jj on PATH, so that jj has to be the release this build trusts.
+func TestNoCleanupBuildTrustsTestJJ(t *testing.T) {
+	if _, err := exec.LookPath("jj"); err != nil {
+		t.Skip("jj unavailable")
+	}
+	reported, err := defaultJJVersion()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !supportsNoCleanupJJVersion(reported) {
+		t.Fatalf("jj on PATH reports %q, but this build trusts %q for noCleanup; to validate that jj, build and test with -ldflags \"-X %s=<x.y.z>\"", strings.TrimSpace(reported), buildcfg.NoCleanupJJVersion, noCleanupJJVersionLinkerSymbol)
+	}
 }
 
 func assertSafeChildRetained(t *testing.T, repo, child string, edited bool) {
@@ -336,7 +363,9 @@ func TestNoCleanupLock(t *testing.T) {
 // the legacy leg reproduces the destructive installed-version regression.
 func TestNoCleanupSourceBinaryRealJJRegression(t *testing.T) {
 	binary := filepath.Join(t.TempDir(), "ajj")
-	cmd := exec.Command("go", "build", "-o", binary, ".")
+	// A nested build does not inherit this test binary's linker flags; carry
+	// the build setting so both trust the same jj.
+	cmd := exec.Command("go", "build", "-ldflags", "-X "+noCleanupJJVersionLinkerSymbol+"="+buildcfg.NoCleanupJJVersion, "-o", binary, ".")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, out)
 	}
@@ -504,13 +533,19 @@ func TestNoCleanupNeverTrustsDirenv(t *testing.T) {
 	}
 }
 
+// The tag commit official v0.43.0 release binaries append to `jj --version`.
+const jj043ReleaseCommit = "89f62ede8c1c611eaf134c0c49252efd65c7945d"
+
+// The version gate is a string check, so the official release is pinned as the
+// trusted one here while the jj on PATH performs the add.
 func TestNoCleanupAcceptsOfficialReleaseVersion(t *testing.T) {
+	withNoCleanupJJVersion(t, "0.43.0")
 	_, repo := setupSafeCreateRepo(t)
 	request := safeCreateRequest(t, repo)
 	oldVersion := jjVersionFn
 	t.Cleanup(func() { jjVersionFn = oldVersion })
 	jjVersionFn = func() (string, error) {
-		return "jj 0.43.0-89f62ede8c1c611eaf134c0c49252efd65c7945d\n", nil
+		return "jj 0.43.0-" + jj043ReleaseCommit + "\n", nil
 	}
 	if receipt := runMachineCreateForTest(t, repo, request); receipt.Status != createStatusReady {
 		t.Fatalf("official release was not accepted: %+v", receipt)
@@ -522,12 +557,13 @@ func TestNoCleanupRejectsUntestedJJBeforeEffects(t *testing.T) {
 	request := safeCreateRequest(t, repo)
 	oldVersion, oldIn := jjVersionFn, stdinReader
 	t.Cleanup(func() { jjVersionFn, stdinReader = oldVersion, oldIn })
-	for _, version := range []string{"jj 0.41.0", "jj 0.42.0", "jj 0.44.0", "jj 0.43.0-dev", "jj 0.43.0-" + strings.Repeat("a", 40), "jj 0.43.0-89f62ede8c1c611eaf134c0c49252efd65c7945d-dirty", "invalid"} {
+	rejectBeforeEffects := func(version, wantErr string) {
+		t.Helper()
 		jjVersionFn = func() (string, error) { return version, nil }
 		stdinReader = strings.NewReader(string(request))
 		out, _, err := captureOutput(func() error { return runCreateMachine([]string{"--repo", repo, "--request-json", "-", "--json"}) })
-		if err == nil || !strings.Contains(err.Error(), "requires tested jj version 0.43.0") || out != "" {
-			t.Fatalf("accepted %q: %s %v", version, out, err)
+		if err == nil || !strings.Contains(err.Error(), wantErr) || out != "" {
+			t.Fatalf("trusting %q accepted %q: %s %v", buildcfg.NoCleanupJJVersion, version, out, err)
 		}
 		shared, err := workspaceRepositoryDirectory(repo)
 		if err != nil {
@@ -537,9 +573,44 @@ func TestNoCleanupRejectsUntestedJJBeforeEffects(t *testing.T) {
 			t.Fatal("unsupported JJ caused effects")
 		}
 	}
-	caps := capabilitiesV3().Create
-	if caps.MinimumJJVersion != "0.41.0" || len(caps.NoCleanupJJVersions) != 1 || caps.NoCleanupJJVersions[0] != "0.43.0" {
-		t.Fatalf("wrong version constraints: %+v", caps)
+	// This build's setting, a release with a known official tag commit, and a
+	// release without one.
+	for _, trusted := range uniqueNonEmptyStrings([]string{buildcfg.NoCleanupJJVersion, "0.43.0", "0.45.1"}) {
+		withNoCleanupJJVersion(t, trusted)
+		accepted := map[string]bool{"jj " + trusted: true}
+		if trusted == "0.43.0" {
+			accepted["jj 0.43.0-"+jj043ReleaseCommit] = true
+		}
+		for _, version := range []string{
+			"jj 0.41.0", "jj 0.42.0", "jj 0.43.0", "jj 0.44.0", "jj 0.45.1",
+			"jj 0.43.0-" + jj043ReleaseCommit,
+			"jj " + trusted + "-" + jj043ReleaseCommit,
+			"jj " + trusted + "-dev",
+			"jj " + trusted + "-" + strings.Repeat("a", 40),
+			"jj " + trusted + "-" + jj043ReleaseCommit + "-dirty",
+			"invalid",
+		} {
+			if accepted[version] {
+				continue
+			}
+			rejectBeforeEffects(version, "requires tested jj version "+trusted)
+		}
+		caps := capabilitiesV3().Create
+		if caps.MinimumJJVersion != "0.41.0" || len(caps.NoCleanupJJVersions) != 1 || caps.NoCleanupJJVersions[0] != trusted {
+			t.Fatalf("wrong version constraints: %+v", caps)
+		}
+	}
+	// A build setting that is not a plain release never admits a development
+	// or dirty jj: it trusts nothing.
+	for _, setting := range []string{"", "0.43", "v0.43.0", "0.43.0-dev", "0.43.0-" + jj043ReleaseCommit, "0.43.0-" + jj043ReleaseCommit + "-dirty", "0.43.0,0.45.1", " 0.43.0"} {
+		withNoCleanupJJVersion(t, setting)
+		for _, version := range []string{"jj " + setting, "jj 0.43.0", "jj 0.43.0-" + jj043ReleaseCommit, "jj 0.45.1"} {
+			rejectBeforeEffects(version, "this build trusts none")
+		}
+		data, err := json.Marshal(capabilitiesV3().Create)
+		if err != nil || !strings.Contains(string(data), `"noCleanupJjVersions":[]`) {
+			t.Fatalf("build setting %q is advertised: %s %v", setting, data, err)
+		}
 	}
 }
 

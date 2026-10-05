@@ -3,6 +3,10 @@
   buildGoModule,
   makeWrapper,
   jujutsu,
+  # The one Jujutsu release this build trusts for machine create `noCleanup`.
+  # The default is the jj that the check phase runs the tests against and that
+  # the wrapper puts first on PATH, so the trusted, tested and runtime jj agree.
+  noCleanupJjVersion ? jujutsu.version,
 }:
 
 let
@@ -22,6 +26,8 @@ buildGoModule {
     "-w"
     "-X"
     "main.version=${version}"
+    "-X"
+    "github.com/jeprecated/ajjent/internal/buildcfg.NoCleanupJJVersion=${noCleanupJjVersion}"
   ];
   doCheck = true;
   checkFlags = [ "-timeout=20m" ];
