@@ -45,9 +45,30 @@ in {
 
     package = lib.mkOption {
       type = lib.types.package;
-      default = pkgs.callPackage ./package.nix { };
-      defaultText = lib.literalExpression "pkgs.callPackage ./package.nix { }";
+      default = pkgs.callPackage ./package.nix { jujutsu = cfg.jujutsuPackage; };
+      defaultText = lib.literalExpression
+        "pkgs.callPackage ./package.nix { jujutsu = config.programs.ajjent.jujutsuPackage; }";
       description = "ajj package to install.";
+    };
+
+    jujutsuPackage = lib.mkOption {
+      type = lib.types.package;
+      default =
+        if config.programs.jujutsu.enable && config.programs.jujutsu.package != null
+        then config.programs.jujutsu.package
+        else pkgs.jujutsu;
+      defaultText = lib.literalExpression ''
+        if config.programs.jujutsu.enable && config.programs.jujutsu.package != null
+        then config.programs.jujutsu.package
+        else pkgs.jujutsu
+      '';
+      description = ''
+        Jujutsu package that ajj is built, tested and wrapped with: the default
+        package runs its test suite against this jj, trusts its version for
+        machine create `noCleanup`, and puts it first on ajj's PATH. It defaults
+        to the jj that Home Manager installs, so ajj and the user run the same
+        jj on the same repositories. It has no effect when `package` is set.
+      '';
     };
 
     settings = lib.mkOption {

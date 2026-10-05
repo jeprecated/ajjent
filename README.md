@@ -129,6 +129,11 @@ See [the trusted Jujutsu release](#trusted-jujutsu-release-for-nocleanup).
 }
 ```
 
+The module builds, tests and wraps ajj with `programs.ajjent.jujutsuPackage`.
+It defaults to `programs.jujutsu.package` when `programs.jujutsu.enable` is set,
+and to `pkgs.jujutsu` otherwise, so ajj runs the same jj as you do on the same
+repositories. Setting `programs.ajjent.package` yourself bypasses it.
+
 ## Prerequisites
 
 `ajj` shells out to `jj` (Jujutsu), which must be on `PATH`.
