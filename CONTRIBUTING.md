@@ -53,7 +53,7 @@ nix build --no-link --override-input nixpkgs github:NixOS/nixpkgs/<rev>
 
 The source default in `internal/buildcfg`, CI's `jj_version`, and the jj in the development shells' lock files name the same release; move them together. Official release binaries print their tag commit after the version, so trusting one for another release also needs that commit in `jjOfficialReleaseCommits`.
 
-Runs so far: with jj 0.43.0 and with jj 0.44.0, each as the trusted release, the whole suite passes. With jj 0.45.1 and the setting 0.45.1 every `TestNoCleanup*` test passes, but 23 machine integration tests fail with `unknown-effect`. Since 0.45.0, `jj workspace update-stale` in a colocated workspace records a `reset git head` operation; it lands on top of the operation `ajj integrate` just published, and the check that the published operation is still current refuses it.
+Runs so far: with jj 0.43.0, 0.44.0 and 0.45.1, each as the trusted release, the whole suite passes. Since 0.45.0, `jj workspace update-stale` in a colocated workspace records a Git HEAD reset as an operation on top of the one `ajj integrate` just published. Machine integration accepts such an operation only after proving that it leaves the graph as published; [ADR 0010](docs/adr/0010-add-workspace-relative-integration-protocol.md#settling-after-publication) has the rule. Its tests write a disguised operation straight into jj's operation store and skip that case where a jj release no longer stores operations as plain files.
 
 ## Code layout
 

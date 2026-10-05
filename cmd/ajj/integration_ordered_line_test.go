@@ -556,7 +556,19 @@ func TestOrderedLineRecoveryAfterCursorFileInterruptionDoesNotReplay(t *testing.
 	if err == nil || decodeIntegrationReceipt(t, out).Error == nil {
 		t.Fatalf("ordered cursor interruption did not stop after publication: err=%v out=%s", err, out)
 	}
-	publishedOperation := currentOperationIDFullForTest(t, repo)
+	// The published operation is the one the journal recorded. The operation
+	// left live by the interrupted pass is that operation or, since jj 0.45,
+	// the one operation the target's `workspace update-stale` wrote on top of
+	// it to reset Git HEAD. Recovery must add nothing to either.
+	record, found, loadErr := loadIntegrationOperationRecord(filepath.Join(repo, ".ajj", "integrations"), "ordered-cursor-recover")
+	if loadErr != nil || !found || record.GraphOperationID == "" {
+		t.Fatalf("interrupted ordered line has no published operation: found=%v err=%v", found, loadErr)
+	}
+	publishedOperation := record.GraphOperationID
+	interruptedOperation := currentOperationIDFullForTest(t, repo)
+	if followers := assertIntegrationFollowersKeepPublishedGraph(t, repo, publishedOperation, interruptedOperation); len(followers) > 1 {
+		t.Fatalf("interrupted ordered line left %d operations after the published one", len(followers))
+	}
 	integrationCursorReconcileHook = original
 	recoverOut, _, recoverErr := captureOutput(func() error {
 		return runIntegrate([]string{"--repo", repo, "--recover", "ordered-cursor-recover", "--json"})
@@ -565,7 +577,7 @@ func TestOrderedLineRecoveryAfterCursorFileInterruptionDoesNotReplay(t *testing.
 		t.Fatalf("ordered cursor recovery failed: %v\n%s", recoverErr, recoverOut)
 	}
 	receipt := decodeIntegrationReceipt(t, recoverOut)
-	if receipt.BatchDisposition != integrationBatchSucceeded || receipt.JJOperations.CommitPoint != publishedOperation || currentOperationIDFullForTest(t, repo) != publishedOperation {
+	if receipt.BatchDisposition != integrationBatchSucceeded || receipt.JJOperations.CommitPoint != publishedOperation || currentOperationIDFullForTest(t, repo) != interruptedOperation {
 		t.Fatalf("ordered cursor recovery replayed or lost commit point: %+v", receipt)
 	}
 }

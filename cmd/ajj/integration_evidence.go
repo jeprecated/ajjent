@@ -176,6 +176,173 @@ func integrationTargetCommitEvidenceAtOperation(repoPath, operationID, targetHan
 	return integrationTargetCommitEvidenceV1{CommitID: parts[0], ChangeID: parts[1], ParentCommitIDs: parents}, nil
 }
 
+// integrationGraphStateV1 is the complete graph state Ajj can read back at one
+// operation through stable machine templates: the visible heads, every
+// Workspace's working-copy commit, and every local and remote bookmark and tag
+// with its remote, tracking state and exact targets. Git HEAD is not part of
+// it. It is compared in memory and never journaled.
+type integrationGraphStateV1 struct {
+	VisibleHeads []string
+	Workspaces   []string
+	Bookmarks    []string
+	Tags         []string
+}
+
+// One row per ref. Names are JSON-escaped so a row cannot span lines or hide a
+// separator; conflicted refs keep every added and removed target.
+const integrationGraphRefTemplate = `name.escape_json() ++ "\t" ++ if(remote, remote.escape_json(), "") ++ "\t" ++ if(tracked, "tracked", "untracked") ++ "\t" ++ if(present, "present", "absent") ++ "\t" ++ if(conflict, "conflict", "normal") ++ "\t" ++ added_targets.map(|c| c.commit_id()).join(",") ++ "\t" ++ removed_targets.map(|c| c.commit_id()).join(",") ++ "\n"`
+
+func integrationGraphStateAtOperation(repoPath, operationID string) (integrationGraphStateV1, error) {
+	if !integrationFullOperationIDRE.MatchString(operationID) {
+		return integrationGraphStateV1{}, errors.New("graph-state operation id is invalid")
+	}
+	visible, err := integrationCommitIDsAtOperation(repoPath, operationID, "visible_heads()")
+	if err != nil {
+		return integrationGraphStateV1{}, err
+	}
+	if len(visible) == 0 || len(visible) > integrationMaxRepositoryEvidenceItems {
+		return integrationGraphStateV1{}, errors.New("visible-head evidence count is invalid")
+	}
+	sort.Strings(visible)
+	heads, err := integrationWorkspaceHeadsAtOperation(repoPath, operationID)
+	if err != nil {
+		return integrationGraphStateV1{}, err
+	}
+	workspaces := make([]string, 0, len(heads))
+	for _, head := range heads {
+		workspaces = append(workspaces, head.Workspace+"\t"+head.CommitID)
+	}
+	bookmarks, err := integrationGraphRefRowsAtOperation(repoPath, operationID, "bookmark")
+	if err != nil {
+		return integrationGraphStateV1{}, err
+	}
+	tags, err := integrationGraphRefRowsAtOperation(repoPath, operationID, "tag")
+	if err != nil {
+		return integrationGraphStateV1{}, err
+	}
+	return integrationGraphStateV1{VisibleHeads: visible, Workspaces: workspaces, Bookmarks: bookmarks, Tags: tags}, nil
+}
+
+func integrationGraphRefRowsAtOperation(repoPath, operationID, kind string) ([]string, error) {
+	if kind != "bookmark" && kind != "tag" {
+		return nil, errors.New("invalid ref evidence kind")
+	}
+	out, err := integrationQuery(repoPath, operationID, kind, "list", "--all-remotes", "-T", integrationGraphRefTemplate)
+	if err != nil {
+		return nil, err
+	}
+	rows := []string{}
+	for _, row := range strings.Split(out, "\n") {
+		if row == "" {
+			continue
+		}
+		if err := validateIntegrationGraphRefRow(row); err != nil {
+			return nil, err
+		}
+		rows = append(rows, row)
+		if len(rows) > integrationMaxRepositoryEvidenceItems {
+			return nil, errors.New("ref evidence count exceeds the limit")
+		}
+	}
+	sort.Strings(rows)
+	for i := 1; i < len(rows); i++ {
+		if rows[i-1] == rows[i] {
+			return nil, errors.New("ref evidence contains a duplicate")
+		}
+	}
+	return rows, nil
+}
+
+func validateIntegrationGraphRefRow(row string) error {
+	invalid := errors.New("Jujutsu returned invalid graph ref evidence")
+	fields := strings.Split(row, "\t")
+	if len(fields) != 7 {
+		return invalid
+	}
+	quoted := func(value string) bool {
+		return len(value) > 2 && strings.HasPrefix(value, `"`) && strings.HasSuffix(value, `"`)
+	}
+	if !quoted(fields[0]) || (fields[1] != "" && !quoted(fields[1])) {
+		return invalid
+	}
+	if (fields[2] != "tracked" && fields[2] != "untracked") || (fields[3] != "present" && fields[3] != "absent") || (fields[4] != "conflict" && fields[4] != "normal") {
+		return invalid
+	}
+	for _, targets := range fields[5:] {
+		if targets == "" {
+			continue
+		}
+		for _, id := range strings.Split(targets, ",") {
+			if !integrationCommitIDRE.MatchString(id) {
+				return invalid
+			}
+		}
+	}
+	return nil
+}
+
+// One `workspace update-stale` runs for the target and for each payload, so
+// at most that many operations may follow the published one.
+func integrationSettlingOperationBound(request integrationRequestV1) int {
+	return 1 + len(request.Payloads)
+}
+
+// provePublishedIntegrationSettled returns the live operation a receipt may be
+// issued for. That is the published operation itself, or an operation reached
+// from it through a bounded chain of single-parent operations that each leave
+// the graph state exactly as published. Since jj 0.45, `workspace update-stale`
+// in a colocated Workspace writes such an operation to reset Git HEAD. The
+// proof reads repository state only: an operation's description, arguments and
+// author are never consulted, and any graph difference fails closed.
+func provePublishedIntegrationSettled(repoPath string, record integrationOperationRecord, request integrationRequestV1) (string, error) {
+	if !integrationFullOperationIDRE.MatchString(record.GraphOperationID) {
+		return "", errors.New("published integration operation is unknown")
+	}
+	current, err := currentOperationFullID(repoPath)
+	if err != nil {
+		return "", err
+	}
+	if current == record.GraphOperationID {
+		return current, nil
+	}
+	published, err := integrationGraphStateAtOperation(repoPath, record.GraphOperationID)
+	if err != nil {
+		return "", err
+	}
+	bound := integrationSettlingOperationBound(request)
+	operationID := current
+	for followers := 0; operationID != record.GraphOperationID; followers++ {
+		if followers == bound {
+			return "", errors.New("more operations follow the published integration operation than Workspaces were updated")
+		}
+		evidence, err := integrationOperationEvidence(repoPath, operationID)
+		if err != nil {
+			return "", err
+		}
+		if len(evidence.ParentOperationIDs) != 1 {
+			return "", errors.New("operation after the published integration operation is not its single-parent successor")
+		}
+		state, err := integrationGraphStateAtOperation(repoPath, operationID)
+		if err != nil {
+			return "", err
+		}
+		if !reflect.DeepEqual(state, published) {
+			return "", errors.New("operation after the published integration operation changed the repository graph")
+		}
+		operationID = evidence.ParentOperationIDs[0]
+	}
+	// Bind the settled state to the journaled pre-publication evidence as well.
+	view, err := integrationRepositoryViewAtOperation(repoPath, current, request.Target.ExpectedWorkspace)
+	if err != nil || !integrationRepositoryViewsEqual(view, record.StagedRepositoryView) {
+		return "", errors.New("settled repository view differs from the staged integration evidence")
+	}
+	after, err := currentOperationFullID(repoPath)
+	if err != nil || after != current {
+		return "", errors.New("repository operation changed while proving the settled integration state")
+	}
+	return current, nil
+}
+
 func validateIntegrationRepositoryView(view integrationRepositoryViewV1) error {
 	if len(view.Workspaces) == 0 || len(view.Workspaces) > integrationMaxRepositoryEvidenceItems || len(view.VisibleHeads) > integrationMaxRepositoryEvidenceItems || len(view.Bookmarks) > integrationMaxRepositoryEvidenceItems || len(view.Tags) > integrationMaxRepositoryEvidenceItems {
 		return errors.New("integration repository evidence count is invalid")

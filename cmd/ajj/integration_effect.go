@@ -941,25 +941,30 @@ func publishDetachedIntegration(repoPath string, binding integrationStateBinding
 }
 
 func finishPublishedIntegration(repoRoot string, cfg config, project string, target integrationTargetResolution, binding integrationStateBinding, record integrationOperationRecord, request integrationRequestV1) error {
-	current, err := currentOperationFullID(target.Path)
-	if err != nil || current != record.GraphOperationID || record.TargetAdvancedState == nil {
+	// A recovery pass may meet the operations that an interrupted pass's
+	// Workspace updates left. Anything else on top of the published operation
+	// is foreign.
+	if _, err := provePublishedIntegrationSettled(target.Path, record, request); err != nil || record.TargetAdvancedState == nil {
 		return emitIntegrationFailure(record.OperationID, record.RequestDigest, request, newIntegrationProtocolError(integrationErrorUnknownEffect, "published integration graph changed before receipt"), integrationBatchUnknownEffect, integrationNextActionOperatorReview)
 	}
 	if err := updateIntegratedWorkspaceFiles(repoRoot, record.GraphOperationID, cfg, project, target.Handle, request); err != nil {
 		return emitIntegrationFailure(record.OperationID, record.RequestDigest, request, err, integrationBatchUnknownEffect, integrationNextActionRecover)
 	}
-	current, err = currentOperationFullID(target.Path)
-	if err != nil || current != record.GraphOperationID {
+	// Everything below is proved at the settled operation, which is the state
+	// the receipt is issued for, and compared with the evidence staged at the
+	// published operation. The commit point stays the published operation.
+	settled, err := provePublishedIntegrationSettled(target.Path, record, request)
+	if err != nil {
 		return emitIntegrationFailure(record.OperationID, record.RequestDigest, request, newIntegrationProtocolError(integrationErrorUnknownEffect, "workspace update changed the published integration operation"), integrationBatchUnknownEffect, integrationNextActionOperatorReview)
 	}
-	mappings, err := proveIntegrationPayloadMappingsAtOperation(target.Path, current, target.Handle, record.PreparedState)
+	mappings, err := proveIntegrationPayloadMappingsAtOperation(target.Path, settled, target.Handle, record.PreparedState)
 	if err != nil || !integrationPayloadMappingsEqual(mappings, record.StagedPayloadMappings) {
 		if err == nil {
 			err = errors.New("published payload mappings differ from the staged detached graph")
 		}
 		return emitIntegrationFailure(record.OperationID, record.RequestDigest, request, err, integrationBatchUnknownEffect, integrationNextActionOperatorReview)
 	}
-	if err := verifyIntegrationTerminalGraph(target.Path, target.Handle, record); err != nil {
+	if err := verifyIntegrationTerminalGraph(target.Path, target.Handle, settled, record); err != nil {
 		return emitIntegrationFailure(record.OperationID, record.RequestDigest, request, err, integrationBatchUnknownEffect, integrationNextActionOperatorReview)
 	}
 	record.Phase = integrationPhaseCursorsReconciled
@@ -1076,12 +1081,14 @@ func integrationPayloadMappingsEqual(left, right [][]integrationReceiptChangeV1)
 	return true
 }
 
-func verifyIntegrationTerminalGraph(repoPath, targetHandle string, record integrationOperationRecord) error {
-	if record.TargetAdvancedState == nil || record.GraphOperationID == "" {
+// settledOperationID is the operation provePublishedIntegrationSettled just
+// proved; the live operation must still be exactly that one.
+func verifyIntegrationTerminalGraph(repoPath, targetHandle, settledOperationID string, record integrationOperationRecord) error {
+	if record.TargetAdvancedState == nil || record.GraphOperationID == "" || settledOperationID == "" {
 		return newIntegrationProtocolError(integrationErrorUnknownEffect, "terminal integration graph evidence is incomplete")
 	}
 	operationID, err := currentOperationFullID(repoPath)
-	if err != nil || operationID != record.GraphOperationID || record.CommitPointOperation != record.GraphOperationID {
+	if err != nil || operationID != settledOperationID || record.CommitPointOperation != record.GraphOperationID {
 		return newIntegrationProtocolError(integrationErrorUnknownEffect, "repository operation changed before terminal integration receipt")
 	}
 	afterHead, err := integrationWorkspaceHeadCommitAtOperation(repoPath, operationID, targetHandle)

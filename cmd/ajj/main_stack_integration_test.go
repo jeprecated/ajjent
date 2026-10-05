@@ -768,6 +768,10 @@ func setupRealStackMergeRepoWithConflictingDescribedHeads(t *testing.T) realStac
 }
 
 func setupRealStackMergeRepoWithHeadStyle(t *testing.T, conflicting bool, describedHeads bool) realStackRepoPaths {
+	return setupRealStackMergeRepoWithColocation(t, conflicting, describedHeads, true)
+}
+
+func setupRealStackMergeRepoWithColocation(t *testing.T, conflicting bool, describedHeads bool, colocate bool) realStackRepoPaths {
 	t.Helper()
 	if _, err := exec.LookPath("jj"); err != nil {
 		t.Skip("jj binary not available for integration test")
@@ -779,7 +783,11 @@ func setupRealStackMergeRepoWithHeadStyle(t *testing.T, conflicting bool, descri
 	if err := os.MkdirAll(filepath.Dir(defaultPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	runJJ(t, "git", "init", "--colocate", defaultPath)
+	colocation := "--colocate"
+	if !colocate {
+		colocation = "--no-colocate"
+	}
+	runJJ(t, "git", "init", colocation, defaultPath)
 	writeConfig(t, defaultPath, strings.Join([]string{
 		"workspaces_root: " + workspacesRoot,
 		"project: proj",
