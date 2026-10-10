@@ -314,7 +314,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "disposable <handle...>", 18), "Opt into automatic Tidy; normal safety still applies")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, s.Section.Render("Stacking:"))
-	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "stack [handle...]", 18), "Stack selected Workspaces into the target Workspace; with no handles, use the selector")
+	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "stack [handle...]", 18), "Stack selected Workspaces and bookmarks into the target Workspace; with no arguments, use the selector")
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "stack --line [handle...]", 18), "Line Stack selected Workspaces in explicit order")
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "integrate", 18), "Prepare or recover an exact machine integration into the Current Workspace")
 	fmt.Fprintf(w, "  %s%s\n", paddedStyled(s.Command, "move-to-main [handle...]", 18), "Move selected tidy Workspace cursors up to the Main Workspace line")
@@ -1975,10 +1975,10 @@ func runStack(args []string) (retErr error) {
 	fs.StringVar(&rebaseMode, "rebase-mode", "", "advanced: auto, branch, revision")
 	fs.StringVar(&shape, "stack-shape", "", "advanced: auto, linear, merge")
 	fs.StringVar(&conflictStrategy, "conflict-strategy", "", "advanced: off, prefer-clean")
-	fs.BoolVar(&all, "all", false, "stack all stack-relevant Workspaces")
+	fs.BoolVar(&all, "all", false, "stack all stack-relevant Workspaces and local bookmarks")
 	fs.BoolVar(&lineStack, "line", false, "Line Stack selected Workspaces onto one ordered line")
 	fs.BoolVar(&yes, "yes", false, "skip confirmation prompts")
-	if handled, err := parseCommandFlags(fs, args, "ajj stack [handle...] [options]", "Stack selected Workspaces into the target Workspace. The target defaults to --workspace, then the current --repo/cwd Workspace, then configured main_workspace; use --line for ordered Line Stacking."); handled || err != nil {
+	if handled, err := parseCommandFlags(fs, args, "ajj stack [handle|bookmark...] [options]", "Stack selected Workspaces and bookmarks (name or name@remote) into the target Workspace. Bookmarks are used at their exact target and never moved. The target defaults to --workspace, then the current --repo/cwd Workspace, then configured main_workspace; use --line for ordered Line Stacking."); handled || err != nil {
 		return err
 	}
 	positionals := fs.Args()
@@ -2001,27 +2001,58 @@ func runStack(args []string) (retErr error) {
 		return err
 	}
 	if lineStack {
+		for _, h := range positionals {
+			if _, ok := byHandle[strings.TrimSpace(h)]; !ok && validateWorkspaceHandle(strings.TrimSpace(h)) != nil {
+				return fmt.Errorf("Line Stacking accepts Workspace Handles only; %q is not one (plain `ajj stack` accepts bookmarks)", h)
+			}
+		}
 		return runLineStack(repoRoot, cfg, infos, byHandle, target, positionals, yes)
 	}
-	inputs := []string{}
+	mainInfo := byHandle[cfg.MainWorkspace]
+	// Bookmark discovery is needed for --all, the selector, or any argument
+	// that is not a registered Workspace Handle.
+	needsBookmarks := len(positionals) == 0
+	for _, h := range positionals {
+		if _, ok := byHandle[strings.TrimSpace(h)]; !ok {
+			needsBookmarks = true
+		}
+	}
+	var sources []bookmarkSource
+	var bookmarkRefs []bookmarkRef
+	if needsBookmarks {
+		sources, bookmarkRefs, err = discoverBookmarkSources(mainInfo.Path, cfg.MainWorkspace)
+		if err != nil {
+			return err
+		}
+	}
+	inputs := []stackInput{}
 	if all {
 		for _, info := range infos {
 			if stackInputProtectedByTarget(info, target) {
 				continue
 			}
 			if isStackRelevant(info) {
-				inputs = append(inputs, info.Ref.Handle)
+				inputs = append(inputs, workspaceStackInput(info.Ref.Handle))
+			}
+		}
+		for _, source := range sources {
+			if source.inAll() {
+				inputs = append(inputs, bookmarkStackInput(source))
 			}
 		}
 	} else if len(positionals) > 0 {
 		for _, h := range positionals {
 			h = strings.TrimSpace(h)
-			if err := validateWorkspaceHandle(h); err != nil {
-				return err
-			}
 			info, ok := byHandle[h]
 			if !ok {
-				return fmt.Errorf("Workspace %q not found", h)
+				// Registered Workspace Handles win; anything else may name a
+				// bookmark (`name` or `name@remote`).
+				source, err := findBookmarkSource(sources, bookmarkRefs, h)
+				if err != nil {
+					return err
+				}
+				inputs = append(inputs, bookmarkStackInput(source))
+				continue
 			}
 			if info.Main {
 				return rejectTargetWorkspaceInput(h)
@@ -2029,27 +2060,35 @@ func runStack(args []string) (retErr error) {
 			if info.Missing {
 				return fmt.Errorf("Workspace %q path missing: %s", h, info.Path)
 			}
-			inputs = append(inputs, h)
+			inputs = append(inputs, workspaceStackInput(h))
 		}
 	} else {
 		if !canUseTUI() {
-			return errors.New("stack requires Workspace Handles or --all when not running in a terminal")
+			return errors.New("stack requires Workspace Handles, bookmarks, or --all when not running in a terminal")
 		}
-		items := selectorItemsForStack(infos)
-		selected, opts, err := runSelector(selectorOptions{Title: "Stack Workspaces", Mode: selectorMulti, Items: items, AllDefault: true, AllowStackOptions: true, StackOptions: cfg.Stack})
+		items := append(selectorItemsForStack(infos), selectorItemsForBookmarkSources(sources)...)
+		selected, opts, err := runSelector(selectorOptions{Title: "Stack Workspaces and Bookmarks", Mode: selectorMulti, Items: items, AllDefault: true, AllowStackOptions: true, StackOptions: cfg.Stack})
 		if err != nil {
 			return err
 		}
 		cfg.Stack = opts.StackOptions
+		byLabel := map[string]bookmarkSource{}
+		for _, source := range sources {
+			byLabel[source.Ref.label()] = source
+		}
 		for _, item := range selected {
-			inputs = append(inputs, item.Handle)
+			if item.Kind == selectorKindBookmark {
+				inputs = append(inputs, bookmarkStackInput(byLabel[item.Handle]))
+			} else {
+				inputs = append(inputs, workspaceStackInput(item.Handle))
+			}
 		}
 	}
-	inputs = uniqueNonEmptyStrings(inputs)
+	inputs = uniqueStackInputs(inputs)
 	if len(inputs) == 0 {
 		return errors.New("no Stack Inputs selected")
 	}
-	mainInfo := byHandle[cfg.MainWorkspace]
+	workspaceInputs := stackInputWorkspaceHandles(inputs)
 	printStackTargetResolution(target)
 	if err := validateLinearSelection(mainInfo.Path, inputs, cfg.Stack.Shape); err != nil {
 		return err
@@ -2065,7 +2104,7 @@ func runStack(args []string) (retErr error) {
 	if err != nil {
 		return err
 	}
-	describedInputHeads, err := describedStackInputHeads(mainInfo.Path, inputs)
+	describedInputHeads, err := describedStackInputHeads(mainInfo.Path, workspaceInputs)
 	if err != nil {
 		return err
 	}
@@ -2087,7 +2126,10 @@ func runStack(args []string) (retErr error) {
 	if err := finalizeStackTargetHead(mainInfo.Path, cfg.MainWorkspace, inputs, conflicted, preservedTarget); err != nil {
 		return err
 	}
-	if err := advanceStackInputWorkspaces(mainInfo, inputs, byHandle, describedInputHeads); err != nil {
+	if err := advanceStackInputWorkspaces(mainInfo, workspaceInputs, byHandle, describedInputHeads); err != nil {
+		return err
+	}
+	if err := verifyBookmarkInputsUnchanged(mainInfo.Path, inputs); err != nil {
 		return err
 	}
 	if err := commandToStderrFn("jj", "-R", mainInfo.Path, "workspace", "update-stale"); err != nil {
@@ -2097,7 +2139,7 @@ func runStack(args []string) (retErr error) {
 		updatedInfos, _, err := loadWorkspaceInfos(repoRoot, cfg, project)
 		if err == nil {
 			updated := mapInfosByHandle(updatedInfos)
-			closable := closableStackInputs(inputs, updated, target)
+			closable := closableStackInputs(workspaceInputs, updated, target)
 			if len(closable) > 0 {
 				closed, err := closeStackInputs(mainInfo.Path, closable)
 				if err != nil {
@@ -2729,11 +2771,16 @@ func shouldConfirmStackPlan(yes bool, canUseTUI bool) bool {
 	return !yes && canUseTUI
 }
 
-func stackPlanPrompt(inputs []string, stack stackConfig) string {
+func stackPlanPrompt(inputs []stackInput, stack stackConfig) string {
+	noun := "Workspaces"
+	if len(stackInputBookmarks(inputs)) > 0 {
+		noun = "Stack Inputs"
+	}
 	return fmt.Sprintf(
-		"Stack %d Workspaces: %s. Options: shape:%s rebase:%s conflicts:%s. Continue? [y/N]: ",
+		"Stack %d %s: %s. Options: shape:%s rebase:%s conflicts:%s. Continue? [y/N]: ",
 		len(inputs),
-		strings.Join(inputs, ", "),
+		noun,
+		strings.Join(stackInputLabels(inputs), ", "),
 		emptyDefault(stack.Shape, "auto"),
 		emptyDefault(stack.RebaseMode, "auto"),
 		emptyDefault(stack.ConflictStrategy, "prefer-clean"),
@@ -3816,6 +3863,14 @@ func abandonUniqueMutableChanges(repoRoot, handle string, protectorHandles []str
 		}
 		revset += " & ~(" + strings.Join(otherAncestors, " | ") + ")"
 	}
+	kept, err := revisionCount(repoRoot, revset+" & "+bookmarkProtectedRevset)
+	if err != nil {
+		return false, err
+	}
+	if kept > 0 {
+		fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Forced Closing: keep %d change(s) of %s still named by bookmarks", kept, handle))
+	}
+	revset += " & ~" + bookmarkProtectedRevset
 	has, err := revisionMatches(repoRoot, revset)
 	if err != nil {
 		return false, err
@@ -3847,14 +3902,14 @@ func detectInProgressStackTarget(mainPath string) (inProgressStackTarget, error)
 	return inProgressStackTarget{ChangeID: changes[0]}, nil
 }
 
-func runStackRebase(mainPath string, inputs []string, stack stackConfig) (bool, error) {
+func runStackRebase(mainPath string, inputs []stackInput, stack stackConfig) (bool, error) {
 	resolvedConflictStrategy, err := resolveStackConflictStrategy(stack.ConflictStrategy)
 	if err != nil {
 		return false, err
 	}
 	tidyProbeConflicted := false
 	if eligibleForSingleInputTidyProbe(inputs, stack, resolvedConflictStrategy) && jjSupportsDetachedOperations() {
-		integrated, conflicted, err := trySingleInputTidyLinearProbe(mainPath, inputs[0])
+		integrated, conflicted, err := trySingleInputTidyLinearProbe(mainPath, inputs[0].Handle)
 		if err != nil {
 			return false, err
 		}
@@ -3965,10 +4020,12 @@ func revisionCommitIDs(repoPath, revset string) ([]string, error) {
 	return uniqueNonEmptyStrings(strings.Split(out, "\n")), nil
 }
 
-func eligibleForSingleInputTidyProbe(inputs []string, stack stackConfig, conflictStrategy string) bool {
+// The probe rewrites the payload in place, which would move a bookmark input,
+// so only a lone Workspace input qualifies.
+func eligibleForSingleInputTidyProbe(inputs []stackInput, stack stackConfig, conflictStrategy string) bool {
 	shape := strings.TrimSpace(strings.ToLower(stack.Shape))
 	mode := strings.TrimSpace(strings.ToLower(stack.RebaseMode))
-	return len(uniqueNonEmptyStrings(inputs)) == 1 &&
+	return len(uniqueStackInputs(inputs)) == 1 && inputs[0].Handle != "" &&
 		(shape == "" || shape == "auto") &&
 		(mode == "" || mode == "auto") &&
 		conflictStrategy == "prefer-clean"
@@ -3992,7 +4049,9 @@ func trySingleInputTidyLinearProbe(mainPath, input string) (bool, bool, error) {
 	if len(payloadChanges) != 1 {
 		return false, false, nil
 	}
-	payloadCannotBeProbed, err := revisionMatches(mainPath, fmt.Sprintf("(immutable() | conflicts()) & %s", payloadRevset))
+	// Rewriting a bookmarked payload would move the bookmark away from its
+	// remote or published position; leave such payloads to the merge path.
+	payloadCannotBeProbed, err := revisionMatches(mainPath, fmt.Sprintf("(immutable() | conflicts() | %s) & %s", bookmarkCleanupGuardRevset, payloadRevset))
 	if err != nil {
 		return false, false, err
 	}
@@ -4093,7 +4152,7 @@ func revisionMatchesAtOperation(repoPath, operationID, revset string) (bool, err
 	return len(uniqueNonEmptyStrings(strings.Split(out, "\n"))) > 0, nil
 }
 
-func runStackRebaseAttempt(mainPath string, inputs []string, resolvedMode string, modeReason string, resolvedShape string, shapeReason string, baseDestinations []string) (bool, error) {
+func runStackRebaseAttempt(mainPath string, inputs []stackInput, resolvedMode string, modeReason string, resolvedShape string, shapeReason string, baseDestinations []string) (bool, error) {
 	rebaseFlag := "-b"
 	if resolvedMode == "revision" {
 		rebaseFlag = "-r"
@@ -4124,7 +4183,7 @@ func runStackRebaseAttempt(mainPath string, inputs []string, resolvedMode string
 	}
 	fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Stack shape: %s (%s)", resolvedShape, shapeReason))
 	fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Rebase mode: %s (%s)", resolvedMode, modeReason))
-	fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Stack Inputs: %s", strings.Join(inputs, ", ")))
+	fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Stack Inputs: %s", strings.Join(stackInputLabels(inputs), ", ")))
 	if err := commandToStderrFn("jj", cmdArgs...); err != nil {
 		return false, err
 	}
@@ -4138,7 +4197,7 @@ func runStackRebaseAttempt(mainPath string, inputs []string, resolvedMode string
 	return conflicted, nil
 }
 
-func validateLinearSelection(repoPath string, inputs []string, requested string) error {
+func validateLinearSelection(repoPath string, inputs []stackInput, requested string) error {
 	mode := strings.TrimSpace(strings.ToLower(requested))
 	if mode != "linear" {
 		return nil
@@ -4154,7 +4213,7 @@ func validateLinearSelection(repoPath string, inputs []string, requested string)
 	return nil
 }
 
-func resolveStackShape(repoPath string, inputs []string, requested string) (string, string, []string, error) {
+func resolveStackShape(repoPath string, inputs []stackInput, requested string) (string, string, []string, error) {
 	mode := strings.TrimSpace(strings.ToLower(requested))
 	if mode == "" {
 		mode = "auto"
@@ -4185,10 +4244,10 @@ func resolveStackShape(repoPath string, inputs []string, requested string) (stri
 	}
 }
 
-func stackInputPayloadRevsets(inputs []string) []string {
+func stackInputPayloadRevsets(inputs []stackInput) []string {
 	revs := make([]string, 0, len(inputs))
-	for _, name := range inputs {
-		revs = append(revs, stackInputPayloadRevset(name))
+	for _, input := range inputs {
+		revs = append(revs, input.payloadRevset())
 	}
 	return revs
 }
@@ -4263,7 +4322,7 @@ func advanceStackInputWorkspaces(target workspaceInfo, inputs []string, byHandle
 // preserves the distinction the close logic relies on: stacked payloads become ancestors
 // of Main@ (protected), while genuinely Workspace-only unstacked changes remain
 // descendants of Main@ (abandoned on force close).
-func finalizeStackTargetHead(mainPath, mainHandle string, inputs []string, conflicted bool, preservedTarget inProgressStackTarget) error {
+func finalizeStackTargetHead(mainPath, mainHandle string, inputs []stackInput, conflicted bool, preservedTarget inProgressStackTarget) error {
 	if !conflicted {
 		if err := abandonTopEmptyMutableAncestors(mainPath); err != nil {
 			return err
@@ -4325,8 +4384,8 @@ func describeCurrentMergeHead(mainPath string) (bool, error) {
 	return true, commandToStderrFn("jj", "-R", mainPath, "describe", "-m", "chore: merge")
 }
 
-func advanceMainToStackPayload(mainPath, mainHandle string, inputs []string) error {
-	inputs = uniqueNonEmptyStrings(inputs)
+func advanceMainToStackPayload(mainPath, mainHandle string, inputs []stackInput) error {
+	inputs = uniqueStackInputs(inputs)
 	if len(inputs) == 0 {
 		return nil
 	}
@@ -4567,7 +4626,8 @@ func abandonEmptyWorkspaceHeads(repoPath string, infos []workspaceInfo) (bool, e
 	}
 	// Only the conventional empty, undescribed working-copy cursor is disposable. A
 	// described empty merge is relevant history and must survive normal close/tidy.
-	revset := "empty() & description(\"\") & mutable() & (" + strings.Join(revs, " | ") + ")"
+	// A bookmarked commit is named, not a cursor: abandoning it would delete the bookmark.
+	revset := "empty() & description(\"\") & mutable() & (" + strings.Join(revs, " | ") + ") & ~" + bookmarkCleanupGuardRevset
 	hasEmpty, err := revisionMatches(repoPath, revset)
 	if err != nil {
 		return false, err
@@ -4581,7 +4641,7 @@ func abandonEmptyWorkspaceHeads(repoPath string, infos []workspaceInfo) (bool, e
 }
 
 func topEmptyMutableAncestorsRevset(target string) string {
-	return "empty() & description(\"\") & mutable() & ::" + target + " & ~" + target
+	return "empty() & description(\"\") & mutable() & ~" + bookmarkCleanupGuardRevset + " & ::" + target + " & ~" + target
 }
 
 func abandonTopEmptyMutableAncestors(repoPath string) error {
@@ -5523,18 +5583,27 @@ const (
 	selectorRoleFollow  = "follow"
 )
 
+// selectorKindBookmark marks a Stack row for a bookmark source; Workspace
+// rows leave Kind empty. Handle then holds the bookmark label.
+const selectorKindBookmark = "bookmark"
+
 type selectorItem struct {
 	Policy           string
 	NormallyClosable bool
 	Safety           string
+	Kind             string
 	Handle           string
 	Path             string
-	Status           string
-	Markers          string
-	Role             string
-	Disabled         bool
-	All              bool
-	Selected         bool
+	// Description replaces Path on rows without a directory.
+	Description string
+	Status      string
+	Markers     string
+	Role        string
+	Disabled    bool
+	All         bool
+	// ExplicitOnly rows are selectable but never submitted by the All row.
+	ExplicitOnly bool
+	Selected     bool
 	// Stale rows (Tidy only) are never selectable, even with force, until
 	// the user's `u` updates them and the whole review is rebuilt.
 	Stale bool
@@ -6078,7 +6147,7 @@ func (m selectorModel) submit() selectorModel {
 	if item.All {
 		items := []selectorItem{}
 		for _, candidate := range m.opts.Items {
-			if !candidate.All && !candidate.Disabled {
+			if !candidate.All && !candidate.Disabled && !candidate.ExplicitOnly {
 				items = append(items, candidate)
 			}
 		}
@@ -6533,6 +6602,8 @@ func formatSelectorItemLine(pointer string, mark string, item selectorItem, widt
 	}
 	if item.Path != "" {
 		line += " " + item.Path
+	} else if item.Description != "" {
+		line += " " + item.Description
 	}
 	return line
 }
@@ -6548,7 +6619,7 @@ func selectorLegend(opts selectorOptions) string {
 		return "Status: Main-relative. Safety: Represented Elsewhere; selected closing set cannot protect itself. Only Disposable rows start checked; f enables Forced Tidying."
 	}
 	if opts.AllDefault {
-		return "status: unstacked/conflict = stack-relevant; stacked/empty/missing = shown for context"
+		return "status: unstacked/conflict = stack-relevant; stacked/empty/missing = shown for context; in-trunk and remote bookmarks need explicit selection"
 	}
 	if opts.AllowForceToggle {
 		return "status: normal close requires representation by a surviving Workspace; labels remain Main-relative; missing cannot close"
@@ -6570,7 +6641,7 @@ func selectorHint(opts selectorOptions) string {
 		return "v preview | Choose Workspaces to tidy. Keep is manual-only; eligible non-Current Disposable rows start checked. Space selects; p persists policy; f enables Forced Tidying."
 	}
 	if opts.AllDefault {
-		return "Choose Stack Inputs. The All row submits every stack-relevant Workspace only when no boxes are checked. Disabled rows are shown for context."
+		return "Choose Stack Inputs. The All row submits every stack-relevant Workspace and local bookmark only when no boxes are checked. Disabled rows are shown for context."
 	}
 	if opts.AllowForceToggle {
 		return "Choose Workspaces to close. Normal close requires representation outside the complete closing set; Press f for Forced Closing."
@@ -6582,7 +6653,7 @@ func (m selectorModel) visibleItems() []int {
 	needle := strings.ToLower(strings.TrimSpace(m.filter))
 	var out []int
 	for i, item := range m.opts.Items {
-		if needle == "" || strings.Contains(strings.ToLower(item.Handle+" "+item.Path+" "+item.Status+" "+item.Markers+" "+item.Safety+" "+item.Policy), needle) {
+		if needle == "" || strings.Contains(strings.ToLower(item.Handle+" "+item.Path+" "+item.Description+" "+item.Status+" "+item.Markers+" "+item.Safety+" "+item.Policy), needle) {
 			out = append(out, i)
 		}
 	}
@@ -6748,6 +6819,10 @@ func styleStatus(s styles, status string, line string) string {
 		return s.Missing.Render(line)
 	case "unstacked":
 		return s.Unstacked.Render(line)
+	case "in-trunk":
+		return s.Stacked.Render(line)
+	case "ref-conflict":
+		return s.Conflict.Render(line)
 	default:
 		return line
 	}

@@ -41,8 +41,12 @@ A strict JSON ensure/reconcile operation that creates or verifies one child Work
 _Avoid_: Exactly-once placement, configured-Main target fallback, caller-supplied destination
 
 **Stack Inputs**:
-The selected or explicitly named Workspaces used for Stacking. For Main-targeted Stacking, Stack Inputs are non-main stack-relevant Workspaces; for Line Stacking, Stack Inputs are ordered and may include follow-only Workspaces.
+The selected or explicitly named Workspaces and Bookmark Stack Sources used for Stacking. For Main-targeted Stacking, Stack Inputs are non-main stack-relevant Workspaces and Bookmark Stack Sources; for Line Stacking, Stack Inputs are ordered Workspaces and may include follow-only Workspaces.
 _Avoid_: All workspaces
+
+**Bookmark Stack Source**:
+A local bookmark (`name`) or remote bookmark (`name@remote`) whose history has relevant changes not represented in the Stack target, used as a Stack Input at its exact target commit (ADR 0016). It has no directory, Handle, cursor, or cleanup policy, and Stack never moves, creates, deletes, tracks, or pushes it. The colocated `@git` mirror is never a source, and a remote record at its local bookmark's commit is the same source. Only local, non-`in-trunk` sources join the All row.
+_Avoid_: Branch Workspace, remote Workspace
 
 **Follow-only Workspace**:
 A selected Line Stacking Workspace whose Workspace head should advance to the final Line Stacking tip without contributing payload commits.
@@ -69,7 +73,7 @@ Intentionally ending use of a Workspace, non-destructively unless forced.
 _Avoid_: Deleting, removing, forgetting, tidying
 
 **Forced Closing**:
-Closing a Workspace while also abandoning its unique mutable changes.
+Closing a Workspace while also abandoning its unique mutable changes, except history still reachable from a local or remote bookmark.
 _Avoid_: Discarding
 
 **Tidying**:
@@ -117,6 +121,8 @@ _Avoid_: Disposable workspace, empty or Main-stacked workspace
 - **Machine Integration** always targets the **Current Workspace** selected by cwd or `--repo`; request target fields are exact assertions only.
 - Target-anchored machine `ordered-line` starts from the exact asserted Current Workspace commit and preserves it unchanged, whereas human **Line Stacking** starts from its first selected payload.
 - **Stacking** uses one or more **Stack Inputs**.
+- A **Bookmark Stack Source** contributes payload but is never advanced, Closed, Tidied, or given a policy; positional Stack arguments resolve registered **Workspace Handles** before bookmarks.
+- Automatic empty-cursor cleanup never abandons a bookmarked commit, and **Forced Closing**/**Forced Tidying** never abandon bookmark-reachable history; forgetting the bookmark is a separate explicit step.
 - Main-targeted **Stack Inputs** are non-main **Workspaces**.
 - When Main-targeted **Stacking** produces a clean Stack merge, it keeps an **In-progress Workspace Head** in the target Workspace above that merge rather than turning its changes into the merge itself.
 - When a non-main Current Workspace is the Stack target, the configured Main Workspace may participate as a cursor-sync input but is never a post-Stack Closing candidate. Post-Stack Closing names every handle/path and retains outside-layout confirmation. Closing refuses the active and repository-owning Workspace paths and directories containing any registered Workspace, even in the same closing set; close nested children separately first. Tidy validates paths before any abandonment. Before removal, a directory's `.jj/repo` must resolve to the active repository's shared storage; a registered path alone is not proof of ownership. Missing registrations, including existing directories with no `.jj` entry, are forget-only: preserve their contents and visible changes. Existing but broken `.jj` metadata and foreign repository pointers still fail removal validation. Failed root lookups never authorize deletion at a guessed path.

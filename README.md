@@ -239,7 +239,7 @@ Normal-close safety is called **Represented Elsewhere** and is intentionally dis
 
 **Stacking** means bringing selected Workspaces together for review, building, or testing.
 
-- `ajj stack [handle...]` — Stack selected Workspaces into the target Workspace.
+- `ajj stack [handle|bookmark...]` — Stack selected Workspaces and bookmarks into the target Workspace.
 - `ajj stack --workspace HANDLE [handle...]` — explicitly choose the target Workspace.
 - `ajj stack --all` — non-interactive equivalent of the selector's All row.
 - `ajj stack --line [handle...]` — Line Stack selected Workspaces onto one ordered line while leaving omitted Workspaces untouched.
@@ -256,6 +256,16 @@ Stack's All row includes Workspaces with commits ahead of the target or conflict
 - `--conflict-strategy off|prefer-clean`
 
 With the default `prefer-clean`, `auto` settings, a single divergent Workspace containing one unique non-empty payload commit is tried tidiest-first. `ajj` uses `jj --no-integrate-operation` to project inserting the payload immediately before the target Workspace head; a clean projection is integrated as a one-parent line, preserving an in-progress target head above it. A conflicted projection is not integrated and falls back directly to the merge-shaped result. Other auto cases retain the existing shape fallback, and if every available result conflicts, `ajj` keeps the merge-shaped conflicted target Workspace so the conflict can be resolved there.
+
+#### Bookmark Stack Sources
+
+Work that exists only as a jj bookmark — for example a branch made on another machine and fetched, or a branch from a Git worktree in a colocated repository — can be stacked like a Workspace. Stack lists every local bookmark and every remote bookmark (`name@remote`) whose history is not yet represented in the target Workspace; bookmarks already in the target are hidden. Positional arguments that are not registered Workspace Handles are resolved as bookmarks, so `ajj stack t3/install-cloudflare-cli dependabot/bump@origin` works without the TUI. A Workspace Handle wins when it also names a bookmark; pick the bookmark row in the selector instead.
+
+- The All row and `--all` include local bookmarks with new work. Remote bookmark rows and bookmarks whose work is already in `trunk()` (`in-trunk`, meaning the target is behind trunk) need explicit selection, so fetching other people's branches never widens an ordinary Stack.
+- Remote bookmarks at the same commit as their local bookmark are shown once, as a tracking marker on the local row; the colocated `@git` mirror is never a separate source. Conflicted bookmarks are shown disabled until resolved with `jj bookmark set`.
+- Stack uses the bookmark's exact target commit as the payload and leaves the bookmark where it is: it never moves, tracks, untracks, pushes, deletes, or creates bookmarks, and fails (pointing at `ajj undo`) if a selected local bookmark moved. Bookmark inputs skip the tidy-first probe because it rewrites the payload; they land through the merge or single-frontier rebase of the target, which never rewrites the input commits.
+- Bookmarks have no cursor or directory, so they are never advanced or offered for post-Stack Closing. `ajj stack --line`, `close`, `tidy`, `keep`, `disposable`, `move-to-main`, `open`, and `integrate` remain Workspace-only.
+- Automatic cleanup never abandons bookmarked commits: the empty-cursor cleanup skips commits a local or remote bookmark points at, and Forced Closing/Tidying keeps every change still reachable from a bookmark (it reports how many it kept). Forget the bookmark first (`jj bookmark forget`) if that work should go.
 
 #### Tidy-first Stack examples
 

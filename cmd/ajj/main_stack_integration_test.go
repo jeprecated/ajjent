@@ -24,7 +24,7 @@ func TestResolveStackShapeMergeUsesWorkspacePayloadFrontiers(t *testing.T) {
 	commandCaptureFn = func(name string, args ...string) (string, error) {
 		return "one\ntwo\n", nil
 	}
-	shape, _, dests, err := resolveStackShape("/repo", []string{"alpha", "bravo"}, "merge")
+	shape, _, dests, err := resolveStackShape("/repo", workspaceStackInputs("alpha", "bravo"), "merge")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +41,7 @@ func TestResolveStackShapeAutoLinearAndMerge(t *testing.T) {
 	commandCaptureFn = func(name string, args ...string) (string, error) {
 		return "one\n", nil
 	}
-	shape, reason, dests, err := resolveStackShape("/repo", []string{"alpha", "bravo"}, "auto")
+	shape, reason, dests, err := resolveStackShape("/repo", workspaceStackInputs("alpha", "bravo"), "auto")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestResolveStackShapeAutoLinearAndMerge(t *testing.T) {
 	commandCaptureFn = func(name string, args ...string) (string, error) {
 		return "one\ntwo\n", nil
 	}
-	shape, reason, dests, err = resolveStackShape("/repo", []string{"alpha", "bravo"}, "auto")
+	shape, reason, dests, err = resolveStackShape("/repo", workspaceStackInputs("alpha", "bravo"), "auto")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestResolveStackShapeLinearRejectsDivergence(t *testing.T) {
 	commandCaptureFn = func(name string, args ...string) (string, error) {
 		return "one\ntwo\n", nil
 	}
-	_, _, _, err := resolveStackShape("/repo", []string{"alpha", "bravo"}, "linear")
+	_, _, _, err := resolveStackShape("/repo", workspaceStackInputs("alpha", "bravo"), "linear")
 	if err == nil {
 		t.Fatal("expected linear divergence error")
 	}
@@ -89,7 +89,7 @@ func TestRunStackRebaseMergeUsesWorkspacePayloadFrontiers(t *testing.T) {
 		}
 		return nil
 	})
-	conflicted, err := runStackRebase("/repo", []string{"delta", "bravo"}, stackConfig{RebaseMode: "branch", Shape: "merge", ConflictStrategy: "off"})
+	conflicted, err := runStackRebase("/repo", workspaceStackInputs("delta", "bravo"), stackConfig{RebaseMode: "branch", Shape: "merge", ConflictStrategy: "off"})
 	if err != nil || conflicted {
 		t.Fatalf("expected clean rebase, conflicted=%v err=%v", conflicted, err)
 	}
@@ -115,7 +115,7 @@ func TestRunStackRebaseAutoLinearUsesResolvedWorkspacePayloadFrontier(t *testing
 		}
 		return nil
 	})
-	conflicted, err := runStackRebase("/repo", []string{"delta", "bravo"}, stackConfig{RebaseMode: "branch", Shape: "auto", ConflictStrategy: "off"})
+	conflicted, err := runStackRebase("/repo", workspaceStackInputs("delta", "bravo"), stackConfig{RebaseMode: "branch", Shape: "auto", ConflictStrategy: "off"})
 	if err != nil || conflicted {
 		t.Fatalf("expected clean rebase, conflicted=%v err=%v", conflicted, err)
 	}
@@ -1017,7 +1017,7 @@ func TestRunStackRebaseSkipsFallbackWhenShapesShareDestinations(t *testing.T) {
 		calls = append(calls, strings.Join(args, " "))
 		return nil
 	})
-	conflicted, err := runStackRebase("/repo", []string{"delta"}, stackConfig{RebaseMode: "branch", Shape: "auto", ConflictStrategy: "prefer-clean"})
+	conflicted, err := runStackRebase("/repo", workspaceStackInputs("delta"), stackConfig{RebaseMode: "branch", Shape: "auto", ConflictStrategy: "prefer-clean"})
 	if err != nil || !conflicted {
 		t.Fatalf("expected conflicted result without error, conflicted=%v err=%v", conflicted, err)
 	}

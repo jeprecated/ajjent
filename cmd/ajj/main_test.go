@@ -420,7 +420,7 @@ func TestCloseHelpAndGeneralUsageExplainRepresentationSafety(t *testing.T) {
 }
 
 func TestStackPlanPromptShowsExactInputsAndOptions(t *testing.T) {
-	prompt := stackPlanPrompt([]string{"alpha", "charlie"}, stackConfig{Shape: "merge", RebaseMode: "revision", ConflictStrategy: "off"})
+	prompt := stackPlanPrompt(workspaceStackInputs("alpha", "charlie"), stackConfig{Shape: "merge", RebaseMode: "revision", ConflictStrategy: "off"})
 	for _, want := range []string{"Stack 2 Workspaces", "alpha, charlie", "shape:merge", "rebase:revision", "conflicts:off"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("expected %q in prompt %q", want, prompt)
