@@ -138,10 +138,13 @@ func syntheticStackGraphState() *stackGraphState {
 		sources: []bookmarkSource{
 			{Ref: bookmarkRef{Name: "main", Present: true, Commit: commit('0')}},
 			{Ref: bookmarkRef{Name: "fix", Remote: "origin", Present: true, Commit: commit('2')}, Ahead: true},
+			// feat@origin shares bravo@'s head row.
+			{Ref: bookmarkRef{Name: "feat", Remote: "origin", Present: true, Commit: commit('b')}, Ahead: true},
 		},
 		bookmarkRefs: []bookmarkRef{
 			{Name: "main", Present: true, Commit: commit('0')},
 			{Name: "fix", Remote: "origin", Present: true, Commit: commit('2')},
+			{Name: "feat", Remote: "origin", Present: true, Commit: commit('b')},
 		},
 		log: []stackGraphLogEntry{
 			entry(id('d'), commit('d'), "d default@"),
@@ -153,11 +156,12 @@ func syntheticStackGraphState() *stackGraphState {
 			entry(id('0'), commit('0'), "0 base main"),
 		},
 		payloads: map[string]map[string]bool{
-			"default@":   {id('d'): true},
-			"alpha@":     {id('a'): true, id('1'): true},
-			"bravo@":     {id('b'): true, id('2'): true},
-			"charlie@":   {id('c'): true},
-			"fix@origin": {id('2'): true},
+			"default@":    {id('d'): true},
+			"alpha@":      {id('a'): true, id('1'): true},
+			"bravo@":      {id('b'): true, id('2'): true},
+			"charlie@":    {id('c'): true},
+			"fix@origin":  {id('2'): true},
+			"feat@origin": {id('b'): true, id('2'): true},
 		},
 		unavailable: map[string]string{},
 	}
@@ -256,17 +260,37 @@ func stackKeys(keys ...string) []tea.Msg {
 	return msgs
 }
 
-// cursorTo moves the cursor onto the entry with the given change id.
+// cursorTo moves the cursor onto the entry with the given change id: the
+// first stop on that head row in line mode, the commit in change mode.
 func (m stackGraphModel) cursorTo(t *testing.T, change string) stackGraphModel {
 	t.Helper()
-	for i, idx := range m.nodes() {
-		if m.st.log[idx].ChangeID == change {
+	if m.changeMode {
+		for i, idx := range m.nodes() {
+			if m.st.log[idx].ChangeID == change {
+				m.cursor = i
+				return m
+			}
+		}
+		t.Fatalf("change %s is not a row", change)
+		return m
+	}
+	for i, stop := range m.stops() {
+		if m.st.log[stop.entry].ChangeID == change {
 			m.cursor = i
 			return m
 		}
 	}
-	t.Fatalf("change %s is not a row", change)
+	t.Fatalf("change %s is not a head row", change)
 	return m
+}
+
+// stopLineKey names the line of the cursor's stop in line mode.
+func (m stackGraphModel) stopLineKey() string {
+	l, ok := m.lineUnderCursor()
+	if !ok {
+		return ""
+	}
+	return l.Key
 }
 
 func TestStackGraphModelHandlesBurstsOfKeys(t *testing.T) {
@@ -288,8 +312,8 @@ func TestStackGraphModelMoldsSelectionWithKeys(t *testing.T) {
 	}
 	m = m.cursorTo(t, id('a'))
 	m = stackGraphDrive(t, m, stackKey(" "))
-	if strings.Join(m.selected, ",") != "alpha@" || m.st.log[m.nodes()[m.cursor]].ChangeID != id('b') {
-		t.Fatalf("space did not select alpha@ and advance to bravo@: %v cursor=%d", m.selected, m.cursor)
+	if entry, _ := m.cursorEntry(); strings.Join(m.selected, ",") != "alpha@" || entry.ChangeID != id('b') || m.stopLineKey() != "bravo@" {
+		t.Fatalf("space did not select alpha@ and advance to bravo@: %v cursor=%d line=%s", m.selected, m.cursor, m.stopLineKey())
 	}
 	if len(backend.previews) != 1 || backend.previews[0].shape != "auto" || m.preview == nil || m.preview.stackOp != "op-alpha@" {
 		t.Fatalf("preview not requested for the selection: %+v", backend.previews)
@@ -314,11 +338,20 @@ func TestStackGraphModelMoldsSelectionWithKeys(t *testing.T) {
 	if strings.Join(m.selected, ",") != "alpha@,bravo@" {
 		t.Fatalf("J did not reorder: %v", m.selected)
 	}
-	// A payload row belongs to its line: space there toggles the line.
+	// In change mode a payload row belongs to its line: space there toggles the line.
+	m = stackGraphDrive(t, m, stackKey("c"))
+	if !m.changeMode {
+		t.Fatal("c did not enter change mode")
+	}
 	m = m.cursorTo(t, id('1'))
 	m = stackGraphDrive(t, m, stackKey(" "))
 	if strings.Join(m.selected, ",") != "bravo@" {
 		t.Fatalf("space on a payload row did not toggle its line: %v", m.selected)
+	}
+	// Space advanced to bravo's head; leaving change mode lands on that stop.
+	m = stackGraphDrive(t, m, stackKey("c"))
+	if m.changeMode || m.stopLineKey() != "bravo@" {
+		t.Fatalf("leaving change mode must land on the commit's stop: mode=%v line=%s", m.changeMode, m.stopLineKey())
 	}
 	// a selects everything stack-relevant (not the remote bookmark); again clears it.
 	m = stackGraphDrive(t, m, stackKey("a"))
@@ -1270,5 +1303,111 @@ func TestStackGraphTidyKeepsWorkspacesOutsideTheProjectLayout(t *testing.T) {
 	}
 	if _, err := os.Stat(external); err != nil {
 		t.Fatalf("external Workspace must be kept: %v", err)
+	}
+}
+
+// Line mode: j/k visit every line of work at its head row, in graph order,
+// including the target, shared head rows (one stop per line) and a line
+// nested inside another (fix@origin inside bravo@); the highlight and the
+// selection bar cover the whole line.
+func TestStackGraphLineModeNavigatesLinesOfWork(t *testing.T) {
+	m, _ := newSyntheticStackGraphModel(t)
+	if m.changeMode {
+		t.Fatal("line mode must be the default")
+	}
+	want := []string{"default@", "alpha@", "bravo@", "feat@origin", "fix@origin", "charlie@", "main"}
+	got := []string{}
+	for i := 0; i < len(want)+1; i++ {
+		got = append(got, m.stopLineKey())
+		m = stackGraphDrive(t, m, stackKey("j"))
+	}
+	if strings.Join(got[:len(want)], ",") != strings.Join(want, ",") || got[len(want)] != "main" {
+		t.Fatalf("j did not walk the lines of work: %v", got)
+	}
+	m = stackGraphDrive(t, m, stackKey("g"))
+	if m.stopLineKey() != "default@" {
+		t.Fatalf("g: %s", m.stopLineKey())
+	}
+	m = stackGraphDrive(t, m, stackKey("G"))
+	if m.stopLineKey() != "main" {
+		t.Fatalf("G: %s", m.stopLineKey())
+	}
+	m = stackGraphDrive(t, m, stackKeys("k", "k", "k")...)
+	if m.stopLineKey() != "feat@origin" {
+		t.Fatalf("k: %s", m.stopLineKey())
+	}
+	// The shared head row names the stop the cursor is on; both lines are listed.
+	view := stripANSI(m.View())
+	if !strings.Contains(view, "◂ #2 bravo@") && !strings.Contains(view, "◂ space to stack  ◀ remote · space to stack") {
+		if !strings.Contains(view, "◀ remote · space to stack") || !strings.Contains(view, "◂ space to stack") {
+			t.Fatalf("shared head row must mark the cursor's line:\n%s", view)
+		}
+	}
+	// The highlight covers the whole line: feat@origin owns b and 2.
+	for _, row := range []string{"b bravo@", "2 feat: bravo"} {
+		if !strings.Contains(view, "›") || !rowHasCursor(view, row) {
+			t.Fatalf("row %q must be highlighted:\n%s", row, view)
+		}
+	}
+	if rowHasCursor(view, "a alpha@") || rowHasCursor(view, "0 base main") {
+		t.Fatalf("rows outside the line must not be highlighted:\n%s", view)
+	}
+	// Space selects the line under the cursor, not the row's first head.
+	m = stackGraphDrive(t, m, stackKey(" "))
+	if strings.Join(m.selected, ",") != "feat@origin" || m.stopLineKey() != "fix@origin" {
+		t.Fatalf("space on a shared head row: selected=%v next=%s", m.selected, m.stopLineKey())
+	}
+	// The nested line is its own stop and selection; bars stay continuous.
+	m = stackGraphDrive(t, m, stackKey(" "))
+	if strings.Join(m.selected, ",") != "feat@origin,fix@origin" {
+		t.Fatalf("nested line selection: %v", m.selected)
+	}
+	view = stripANSI(m.View())
+	if !strings.Contains(view, " 1┃ ○  b bravo@  ◂ space to stack  ◂ #1 feat@origin\n  ┃ │  (desc)\n›2┃ ○  2 feat: bravo fix@origin  ◀ #2 fix@origin\n› ┃ │  (desc)") {
+		t.Fatalf("selected lines must have continuous bars with the nested head's own mark:\n%s", view)
+	}
+	// The target is a stop so t works from line mode.
+	m = stackGraphDrive(t, m, stackKey("g"))
+	m = stackGraphDrive(t, m, stackKey(" "))
+	if !strings.Contains(m.msg, "that is the target") {
+		t.Fatalf("target stop: %q", m.msg)
+	}
+}
+
+func rowHasCursor(view, text string) bool {
+	for _, row := range strings.Split(view, "\n") {
+		if strings.Contains(row, text) {
+			return strings.HasPrefix(row, "›")
+		}
+	}
+	return false
+}
+
+// Change mode steps one commit at a time and highlights that commit only.
+func TestStackGraphChangeModeStepsCommits(t *testing.T) {
+	m, _ := newSyntheticStackGraphModel(t)
+	id := func(c byte) string { return strings.Repeat(string(c), 32) }
+	m = stackGraphDrive(t, m, stackKey("c"))
+	if !m.changeMode || !strings.Contains(stripANSI(m.View()), "by change") {
+		t.Fatalf("change mode not shown: mode=%v", m.changeMode)
+	}
+	seen := []string{}
+	for i := 0; i < 7; i++ {
+		entry, _ := m.cursorEntry()
+		seen = append(seen, string(entry.ChangeID[0]))
+		m = stackGraphDrive(t, m, stackKey("j"))
+	}
+	if strings.Join(seen, "") != "da1b2c0" {
+		t.Fatalf("change mode must step every commit: %s", strings.Join(seen, ""))
+	}
+	m = m.cursorTo(t, id('2'))
+	view := stripANSI(m.View())
+	if !rowHasCursor(view, "2 feat: bravo") || rowHasCursor(view, "b bravo@") {
+		t.Fatalf("change mode must highlight one commit:\n%s", view)
+	}
+	// Back to line mode on the same commit: its stop is fix@origin.
+	m = stackGraphDrive(t, m, stackKey("c"))
+	if m.changeMode || m.stopLineKey() != "fix@origin" {
+		t.Fatalf("leaving change mode: mode=%v line=%s", m.changeMode, m.stopLineKey())
 	}
 }

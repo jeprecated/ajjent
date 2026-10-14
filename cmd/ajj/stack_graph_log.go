@@ -460,15 +460,36 @@ func loadStackGraphState(repoRoot string, cfg config, project string, workspaceO
 			st.trunkCommit = ids[0]
 		}
 	}
+	// A line of work is everything shown from its head down to the target's
+	// history, immutable commits included; the target's own line runs down
+	// to trunk. Only shown commits matter, so the query is bounded by them.
+	shown := []string{}
+	for _, entry := range st.log {
+		if entry.ChangeID != "" {
+			shown = append(shown, entry.ChangeID)
+		}
+	}
+	shownRevset := revsetUnion(shown)
+	lineOf := func(head string) (map[string]bool, error) {
+		ids, err := fullChangeIDs(path, st.base, "(::"+head+" & ~::"+target.Handle+"@) & "+shownRevset)
+		return stringSet(ids), err
+	}
 	for _, info := range infos {
 		if info.Missing {
 			continue
 		}
-		revset := "(::" + info.Ref.Handle + "@) & ~::" + target.Handle + "@ & mutable()"
-		if info.Ref.Handle == target.Handle {
-			revset = "::" + target.Handle + "@ & mutable()"
+		if info.Ref.Handle != target.Handle {
+			ids, err := lineOf(info.Ref.Handle + "@")
+			if err != nil {
+				return nil, err
+			}
+			st.payloads[info.Ref.Handle+"@"] = ids
+			continue
 		}
-		ids, err := fullChangeIDs(path, st.base, revset)
+		ids, err := fullChangeIDs(path, st.base, "(::"+target.Handle+"@ & ~::trunk()) & "+shownRevset)
+		if err != nil {
+			ids, err = fullChangeIDs(path, st.base, "::"+target.Handle+"@ & "+shownRevset)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -478,11 +499,11 @@ func loadStackGraphState(repoRoot string, cfg config, project string, workspaceO
 		if source.Ref.Commit == "" {
 			continue
 		}
-		ids, err := fullChangeIDs(path, st.base, "(::"+source.Ref.Commit+") & ~::"+target.Handle+"@ & mutable()")
+		ids, err := lineOf(source.Ref.Commit)
 		if err != nil {
 			return nil, err
 		}
-		st.payloads[source.Ref.label()] = stringSet(ids)
+		st.payloads[source.Ref.label()] = ids
 	}
 	return st, nil
 }

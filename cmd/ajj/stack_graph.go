@@ -106,13 +106,17 @@ type stackGraphModel struct {
 	selected      []string
 	moveBookmarks []string
 	tidy          bool
-	cursor        int
-	afterOffset   int
-	zoom          bool
-	mode          stackGraphMode
-	force         bool
-	msg           string
-	busy          string
+	// cursor indexes stops() in line mode and nodes() in change mode.
+	cursor int
+	// changeMode steps one commit at a time; the default moves between
+	// lines of work.
+	changeMode  bool
+	afterOffset int
+	zoom        bool
+	mode        stackGraphMode
+	force       bool
+	msg         string
+	busy        string
 
 	// The jj-facing steps are seams so tests can drive the model without
 	// a repository; each receives the state it must act on.
@@ -202,12 +206,123 @@ func (m stackGraphModel) nodes() []int {
 	return nodes
 }
 
+// stackGraphStop is a cursor position in line mode: one line of work at
+// its head row. Lines sharing a head row are consecutive stops.
+type stackGraphStop struct {
+	entry int
+	key   string
+}
+
+func (m stackGraphModel) stops() []stackGraphStop {
+	lines := m.lines()
+	stops := []stackGraphStop{}
+	for i, entry := range m.st.log {
+		if entry.ChangeID == "" {
+			continue
+		}
+		for _, l := range lines {
+			if l.HeadChange == entry.ChangeID {
+				stops = append(stops, stackGraphStop{entry: i, key: l.Key})
+			}
+		}
+	}
+	return stops
+}
+
+// positions is the number of cursor positions in the current mode.
+func (m stackGraphModel) positions() int {
+	if m.changeMode {
+		return len(m.nodes())
+	}
+	return len(m.stops())
+}
+
+func (m *stackGraphModel) clampCursor() {
+	if n := m.positions(); m.cursor >= n {
+		m.cursor = max(0, n-1)
+	}
+}
+
 func (m stackGraphModel) cursorEntry() (stackGraphLogEntry, bool) {
-	nodes := m.nodes()
-	if len(nodes) == 0 || m.cursor < 0 || m.cursor >= len(nodes) {
+	if m.changeMode {
+		nodes := m.nodes()
+		if len(nodes) == 0 || m.cursor < 0 || m.cursor >= len(nodes) {
+			return stackGraphLogEntry{}, false
+		}
+		return m.st.log[nodes[m.cursor]], true
+	}
+	stops := m.stops()
+	if len(stops) == 0 || m.cursor < 0 || m.cursor >= len(stops) {
 		return stackGraphLogEntry{}, false
 	}
-	return m.st.log[nodes[m.cursor]], true
+	return m.st.log[stops[m.cursor].entry], true
+}
+
+// cursorHighlight is the set of changes the cursor covers: the whole line
+// of work in line mode, one commit in change mode.
+func (m stackGraphModel) cursorHighlight() map[string]bool {
+	entry, ok := m.cursorEntry()
+	if !ok {
+		return nil
+	}
+	set := map[string]bool{entry.ChangeID: true}
+	if m.changeMode {
+		return set
+	}
+	if l, ok := m.lineUnderCursor(); ok {
+		for id := range m.st.payloads[l.Key] {
+			set[id] = true
+		}
+	}
+	return set
+}
+
+// toggleChangeMode switches modes keeping the cursor on the same commit,
+// or on the same line's stop when the commit has none.
+func (m *stackGraphModel) toggleChangeMode() {
+	entry, _ := m.cursorEntry()
+	lineKey := ""
+	if l, ok := m.lineUnderCursor(); ok {
+		lineKey = l.Key
+	}
+	m.changeMode = !m.changeMode
+	if m.changeMode {
+		m.cursor = 0
+		for i, idx := range m.nodes() {
+			if m.st.log[idx].ChangeID == entry.ChangeID {
+				m.cursor = i
+				break
+			}
+		}
+		m.msg = "by change: j/k step one commit; space selects the line that owns it"
+		return
+	}
+	stops := m.stops()
+	best := -1
+	for i, s := range stops {
+		if s.key == lineKey && m.st.log[s.entry].ChangeID == entry.ChangeID {
+			best = i
+			break
+		}
+	}
+	for i := range stops {
+		if best >= 0 {
+			break
+		}
+		if m.st.log[stops[i].entry].ChangeID == entry.ChangeID {
+			best = i
+		}
+	}
+	for i := range stops {
+		if best >= 0 {
+			break
+		}
+		if stops[i].key == lineKey {
+			best = i
+		}
+	}
+	m.cursor = max(0, best)
+	m.msg = "by line: j/k move between lines of work"
 }
 
 func (m stackGraphModel) lines() []stackGraphLine { return m.st.lines(m.shape) }
@@ -224,6 +339,13 @@ func (m stackGraphModel) selectedIndex(key string) int {
 // lineUnderCursor is the line of work the cursor row stands for: a head on
 // that commit (selectable or the target first), else the line owning it.
 func (m stackGraphModel) lineUnderCursor() (stackGraphLine, bool) {
+	if !m.changeMode {
+		stops := m.stops()
+		if m.cursor < 0 || m.cursor >= len(stops) {
+			return stackGraphLine{}, false
+		}
+		return stackGraphLineByKey(m.lines(), stops[m.cursor].key)
+	}
 	entry, ok := m.cursorEntry()
 	if !ok {
 		return stackGraphLine{}, false
@@ -391,9 +513,7 @@ func (m stackGraphModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.previewKey = ""
 		m.msg = msg.note
 		m.selected = m.validSelection(m.selected)
-		if nodes := m.nodes(); m.cursor >= len(nodes) {
-			m.cursor = max(0, len(nodes)-1)
-		}
+		m.clampCursor()
 		if m.quitAfter {
 			m.quit = true
 			return m, tea.Quit
@@ -487,7 +607,9 @@ func (m stackGraphModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "g", "home":
 		m.cursor = 0
 	case "G", "end":
-		m.cursor = max(0, len(m.nodes())-1)
+		m.cursor = max(0, m.positions()-1)
+	case "c":
+		m.toggleChangeMode()
 	case "pgdown":
 		m.afterOffset += max(1, m.height/2)
 	case "pgup":
@@ -633,7 +755,7 @@ func (m stackGraphModel) requestQuit() (tea.Model, tea.Cmd) {
 }
 
 func (m *stackGraphModel) moveCursor(delta int) {
-	n := len(m.nodes())
+	n := m.positions()
 	if n == 0 {
 		return
 	}
@@ -670,8 +792,26 @@ func (m stackGraphModel) toggleUnderCursor() (tea.Model, tea.Cmd) {
 	} else {
 		m.selected = append(m.selected, l.Key)
 	}
+	m.advanceToNextSelectable()
+	return m, m.requestPreview()
+}
+
+// advanceToNextSelectable moves the cursor to the next stop (line mode) or
+// head row (change mode) that Space can select.
+func (m *stackGraphModel) advanceToNextSelectable() {
+	lines := m.lines()
+	if !m.changeMode {
+		stops := m.stops()
+		for i := m.cursor + 1; i < len(stops); i++ {
+			if l, ok := stackGraphLineByKey(lines, stops[i].key); ok && l.Selectable {
+				m.cursor = i
+				return
+			}
+		}
+		return
+	}
 	heads := map[string]bool{}
-	for _, line := range m.lines() {
+	for _, line := range lines {
 		if line.Selectable {
 			heads[line.HeadChange] = true
 		}
@@ -680,10 +820,9 @@ func (m stackGraphModel) toggleUnderCursor() (tea.Model, tea.Cmd) {
 	for i := m.cursor + 1; i < len(nodes); i++ {
 		if heads[m.st.log[nodes[i]].ChangeID] {
 			m.cursor = i
-			break
+			return
 		}
 	}
-	return m, m.requestPreview()
 }
 
 // toggleBookmarkMove marks the local bookmarks on the cursor row to move to
@@ -809,8 +948,12 @@ func (m stackGraphModel) View() string {
 	}
 	out := append([]string{}, header...)
 	if !m.zoom {
-		out = append(out, m.rule("now", "j/k move · space select · t target"))
-		first, last := m.cursorRowSpan(lines)
+		hint := "j/k next line · space select · t target"
+		if m.changeMode {
+			hint = "j/k next change · space selects its line · t target"
+		}
+		out = append(out, m.rule("now", hint))
+		first, last := m.cursorRowSpan()
 		out = append(out, window(nowRows, scrollToShow(first, last, nowBudget, len(nowRows)), nowBudget)...)
 	}
 	summary := ""
@@ -848,6 +991,8 @@ func scrollToShow(first, last, budget, total int) int {
 	if budget <= 0 || total <= budget {
 		return 0
 	}
+	// A line longer than the pane keeps its head row visible.
+	last = min(last, first+budget-1)
 	offset := first - (budget-(last-first+1))/2
 	return min(max(0, offset), max(0, total-budget))
 }
@@ -888,6 +1033,10 @@ func (m stackGraphModel) headerLines() []string {
 	if m.tidy {
 		tidy = s.dim.Render("x") + " " + s.yellow.Bold(true).Render("tidy")
 	}
+	mode := s.dim.Render("c") + " " + s.dim.Render("by change")
+	if m.changeMode {
+		mode = s.dim.Render("c") + " " + s.yellow.Bold(true).Render("by change")
+	}
 	stack := s.dim.Render("nothing selected")
 	if len(m.selected) > 0 {
 		parts := []string{}
@@ -900,12 +1049,14 @@ func (m stackGraphModel) headerLines() []string {
 		}
 		stack = strings.Join(parts, s.dim.Render(" › "))
 	}
-	line2 := move + "  " + tidy + "   " + s.dim.Render("stack:") + " " + stack
+	line2 := move + "  " + tidy + "  " + mode + "   " + s.dim.Render("stack:") + " " + stack
 	return []string{line1, line2}
 }
 
 // gutter is the four-column prefix of a graph row: cursor mark, input
-// number or target mark on head rows, and the owning line's bar.
+// number or target mark on head rows, and the owning line's bar. Where a
+// selected line's head lies inside another selected line, the mark is the
+// head's own and the bar stays the owner's, so each bar is continuous.
 func (m stackGraphModel) nowGutter(lines []stackGraphLine, owners map[string]string, entry stackGraphLogEntry, node bool, atCursor bool) string {
 	s := m.styles
 	cursor := " "
@@ -916,30 +1067,53 @@ func (m stackGraphModel) nowGutter(lines []stackGraphLine, owners map[string]str
 		return cursor + "   "
 	}
 	key, owned := owners[entry.ChangeID]
-	if !owned {
-		return cursor + "   "
-	}
-	l, _ := stackGraphLineByKey(lines, key)
-	order := m.selectedIndex(key)
-	if !l.isTarget() && order < 0 {
-		return cursor + s.dim.Render(" ┊ ")
-	}
-	mark := " "
-	style := s.target
-	if l.isTarget() {
-		if node && l.HeadChange == entry.ChangeID {
-			mark = "◉"
+	mark, markStyle := " ", s.target
+	if node {
+		candidates := []string{}
+		if owned {
+			candidates = append(candidates, key)
 		}
-	} else {
-		style = s.input(order)
-		if node && l.HeadChange == entry.ChangeID {
-			mark = fmt.Sprint(order + 1)
+		for _, l := range lines {
+			if l.HeadChange == entry.ChangeID {
+				candidates = append(candidates, l.Key)
+			}
+		}
+		for _, k := range candidates {
+			l, ok := stackGraphLineByKey(lines, k)
+			if !ok || l.HeadChange != entry.ChangeID {
+				continue
+			}
+			if l.isTarget() {
+				mark = "◉"
+				break
+			}
+			if order := m.selectedIndex(k); order >= 0 {
+				mark, markStyle = fmt.Sprint(order+1), s.input(order)
+				break
+			}
 		}
 	}
-	return cursor + style.Render(mark+"┃") + " "
+	bar := " "
+	if owned {
+		l, _ := stackGraphLineByKey(lines, key)
+		switch order := m.selectedIndex(key); {
+		case l.isTarget():
+			bar = s.target.Render("┃")
+		case order >= 0:
+			bar = s.input(order).Render("┃")
+		default:
+			bar = s.dim.Render("┊")
+		}
+	}
+	if mark != " " {
+		mark = markStyle.Render(mark)
+	}
+	return cursor + mark + bar + " "
 }
 
-func (m stackGraphModel) nowTail(lines []stackGraphLine, entry stackGraphLogEntry) string {
+// nowTail labels every line whose head is this row; the line under the
+// cursor gets ◀ so shared head rows show which stop the cursor is on.
+func (m stackGraphModel) nowTail(lines []stackGraphLine, entry stackGraphLogEntry, cursorKey string) string {
 	s := m.styles
 	parts := []string{}
 	moving := []string{}
@@ -956,15 +1130,19 @@ func (m stackGraphModel) nowTail(lines []stackGraphLine, entry stackGraphLogEntr
 		if l.HeadChange != entry.ChangeID {
 			continue
 		}
+		arrow := "◂"
+		if l.Key == cursorKey {
+			arrow = "◀"
+		}
 		var part string
 		switch {
 		case l.isTarget():
-			part = s.target.Render("  ◂ target")
+			part = s.target.Render("  " + arrow + " target")
 			if m.shape == "line" {
-				part = s.target.Render("  ◂ target") + s.dim.Render(" (not an input)")
+				part = s.target.Render("  "+arrow+" target") + s.dim.Render(" (not an input)")
 			}
 		case m.selectedIndex(l.Key) >= 0:
-			part = s.input(m.selectedIndex(l.Key)).Render(fmt.Sprintf("  ◂ #%d %s", m.selectedIndex(l.Key)+1, l.Key))
+			part = s.input(m.selectedIndex(l.Key)).Render(fmt.Sprintf("  %s #%d %s", arrow, m.selectedIndex(l.Key)+1, l.Key))
 		case l.Selectable:
 			hint := "space to stack"
 			switch l.Status {
@@ -973,9 +1151,15 @@ func (m stackGraphModel) nowTail(lines []stackGraphLine, entry stackGraphLogEntr
 			case "remote", "in trunk", "conflict", "follow-only":
 				hint = l.Status + " · space to stack"
 			}
-			part = s.dim.Render("  ◂ " + hint)
+			part = s.dim.Render("  " + arrow + " " + hint)
 		default:
+			if l.Key == cursorKey {
+				arrow = "·"
+			}
 			part = s.dim.Render("  · " + l.Status)
+			if l.Key == cursorKey {
+				part = s.dim.Render("  ◀ " + l.Status)
+			}
 		}
 		if !seen[part] {
 			seen[part] = true
@@ -987,14 +1171,20 @@ func (m stackGraphModel) nowTail(lines []stackGraphLine, entry stackGraphLogEntr
 
 func (m stackGraphModel) nowRows(lines []stackGraphLine) []string {
 	owners := stackGraphOwners(lines, m.st.payloads, m.selected)
-	cursorEntry, _ := m.cursorEntry()
+	highlight := m.cursorHighlight()
+	cursorKey := ""
+	if !m.changeMode {
+		if l, ok := m.lineUnderCursor(); ok {
+			cursorKey = l.Key
+		}
+	}
 	rows := []string{}
 	for _, entry := range m.st.log {
-		atCursor := entry.ChangeID != "" && entry.ChangeID == cursorEntry.ChangeID
+		atCursor := entry.ChangeID != "" && highlight[entry.ChangeID]
 		for i, line := range entry.Lines {
 			row := m.nowGutter(lines, owners, entry, i == 0, atCursor) + line
 			if i == 0 && entry.ChangeID != "" {
-				row += m.nowTail(lines, entry)
+				row += m.nowTail(lines, entry, cursorKey)
 			}
 			rows = append(rows, row)
 		}
@@ -1002,19 +1192,28 @@ func (m stackGraphModel) nowRows(lines []stackGraphLine) []string {
 	return rows
 }
 
-func (m stackGraphModel) cursorRowSpan(lines []stackGraphLine) (int, int) {
+// cursorRowSpan is the first row of the cursor's head commit and the last
+// row the cursor highlights, for scrolling.
+func (m stackGraphModel) cursorRowSpan() (int, int) {
 	cursorEntry, ok := m.cursorEntry()
 	if !ok {
 		return 0, 0
 	}
-	row := 0
+	highlight := m.cursorHighlight()
+	first, last, row := -1, 0, 0
 	for _, entry := range m.st.log {
 		if entry.ChangeID == cursorEntry.ChangeID {
-			return row, row + len(entry.Lines) - 1
+			first = row
+		}
+		if first >= 0 && highlight[entry.ChangeID] {
+			last = row + len(entry.Lines) - 1
 		}
 		row += len(entry.Lines)
 	}
-	return 0, 0
+	if first < 0 {
+		return 0, 0
+	}
+	return first, max(first, last)
 }
 
 // afterRows renders a projected or applied log with +/↻ markers and the
@@ -1152,7 +1351,7 @@ func (m stackGraphModel) footerLine() string {
 		}
 		return prompt + " " + s.bold.Render("[y/N]")
 	}
-	keys := []string{"space", "select", "J/K", "order", "a", "all", "t", "target", "s", "shape", "m", "move", "x", "tidy", "tab", "zoom", "enter", "apply", "q", "quit"}
+	keys := []string{"space", "select", "J/K", "order", "a", "all", "t", "target", "s", "shape", "m", "move", "x", "tidy", "c", "by change", "tab", "zoom", "enter", "apply", "q", "quit"}
 	parts := []string{}
 	for i := 0; i+1 < len(keys); i += 2 {
 		parts = append(parts, s.dim.Render(keys[i])+" "+keys[i+1])
