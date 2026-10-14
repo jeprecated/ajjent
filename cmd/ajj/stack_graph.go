@@ -94,6 +94,12 @@ type stackGraphUndoMsg struct {
 	err error
 }
 
+type stackGraphFetchMsg struct {
+	summary string
+	changed bool
+	err     error
+}
+
 // stackGraphModel is the Bubble Tea model of the graph Stack. Every jj
 // interaction runs as a command off the UI goroutine, one at a time; the
 // model only molds the selection and renders the two logs.
@@ -124,9 +130,10 @@ type stackGraphModel struct {
 	applyFn   func(*stackGraphState, stackPreviewResult, stackPreviewSpec) stackApplyResult
 	loadFn    func(string) (*stackGraphState, error)
 	undoFn    func(*stackGraphState) error
+	fetchFn   func() (string, bool, error)
 	// applying is the preview an accept is integrating.
 	applying *stackPreviewResult
-	// deferredKey is a key that starts repository work (t, u) pressed while
+	// deferredKey is a key that starts repository work (t, u, f) pressed while
 	// a preview chain holds the command seams; it runs when the preview lands.
 	deferredKey     *tea.KeyMsg
 	previewID       uint64
@@ -159,6 +166,7 @@ func newStackGraphModel(req stackGraphRequest, st *stackGraphState, styles stack
 		return loadStackGraphState(req.RepoRoot, req.Cfg, req.Project, override, st.color)
 	}
 	m.undoFn = func(st *stackGraphState) error { return st.undo() }
+	m.fetchFn = func() (string, bool, error) { return fetchStackGraphRemotes(req.RepoRoot) }
 	return m
 }
 
@@ -492,6 +500,23 @@ func (m stackGraphModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.appliedBase = ""
 		m.done = nil
 		return m, m.startLoad(m.st.target.Handle, "undone: restored the pre-Stack operation")
+	case stackGraphFetchMsg:
+		m.busy = ""
+		if msg.err != nil {
+			m.msg = "✗ fetch: " + jjErrorMessage(msg.err)
+			if m.quitAfter {
+				m.quit = true
+				return m, tea.Quit
+			}
+			return m, nil
+		}
+		if msg.changed {
+			// The fetch is a newer operation, so the Stack can no longer be
+			// undone in one step.
+			m.undoAvailable = false
+			m.appliedBase = ""
+		}
+		return m, m.startLoad(m.st.target.Handle, msg.summary)
 	case stackGraphLoadMsg:
 		if msg.id != m.loadID {
 			return m, nil
@@ -573,7 +598,7 @@ func (m stackGraphModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.busy != "" {
 		return m, nil
 	}
-	if m.previewInFlight && m.mode == stackGraphEdit && (key == "t" || key == "u") {
+	if m.previewInFlight && m.mode == stackGraphEdit && (key == "t" || key == "u" || key == "f") {
 		// Never start a load or an undo while a preview chain holds the
 		// command seams: hold the key until the preview result lands.
 		deferred := msg
@@ -700,6 +725,13 @@ func (m stackGraphModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "x":
 		m.tidy = !m.tidy
 		return m, m.requestPreview()
+	case "f":
+		m.busy = "fetching…"
+		run := m.fetchFn
+		return m, func() tea.Msg {
+			summary, changed, err := run()
+			return stackGraphFetchMsg{summary: summary, changed: changed, err: err}
+		}
 	case "!":
 		m.force = true
 		return m.confirmApply()
@@ -1351,7 +1383,7 @@ func (m stackGraphModel) footerLine() string {
 		}
 		return prompt + " " + s.bold.Render("[y/N]")
 	}
-	keys := []string{"space", "select", "J/K", "order", "a", "all", "t", "target", "s", "shape", "m", "move", "x", "tidy", "c", "by change", "tab", "zoom", "enter", "apply", "q", "quit"}
+	keys := []string{"space", "select", "J/K", "order", "a", "all", "t", "target", "s", "shape", "m", "move", "x", "tidy", "f", "fetch", "c", "by change", "tab", "zoom", "enter", "apply", "q", "quit"}
 	parts := []string{}
 	for i := 0; i+1 < len(keys); i += 2 {
 		parts = append(parts, s.dim.Render(keys[i])+" "+keys[i+1])

@@ -4493,19 +4493,45 @@ func revisionMatches(repoPath, revset string) (bool, error) {
 }
 
 func revisionCount(repoPath, revset string) (int, error) {
-	ids, err := revisionChangeIDs(repoPath, revset)
+	out, err := commandCaptureFn("jj", "-R", repoPath, "--ignore-working-copy", "log", "-r", revset, "--no-graph", "-T", "commit_id ++ \"\\n\"")
 	if err != nil {
 		return 0, err
 	}
-	return len(ids), nil
+	return len(uniqueNonEmptyStrings(strings.Split(out, "\n"))), nil
+}
+
+// changeIDTemplate names each revision by change id, which survives the
+// rewrites a Stack makes. A divergent change id names several revisions, so
+// those also carry the commit id and are refused by parseChangeIDs.
+const changeIDTemplate = "change_id.short() ++ if(divergent, \"\\t\" ++ commit_id.short()) ++ \"\\n\""
+
+type divergentChangeError struct {
+	ChangeID string
+	CommitID string
+}
+
+func (e divergentChangeError) Error() string {
+	return fmt.Sprintf("change %s is divergent (one copy is commit %s); abandon the copy you do not want, then stack again", e.ChangeID, e.CommitID)
+}
+
+func parseChangeIDs(out string) ([]string, error) {
+	ids := []string{}
+	for _, line := range strings.Split(out, "\n") {
+		change, commit, divergent := strings.Cut(strings.TrimSpace(line), "\t")
+		if divergent {
+			return nil, divergentChangeError{ChangeID: change, CommitID: commit}
+		}
+		ids = append(ids, change)
+	}
+	return uniqueNonEmptyStrings(ids), nil
 }
 
 func revisionChangeIDs(repoPath, revset string) ([]string, error) {
-	out, err := commandCaptureFn("jj", "-R", repoPath, "--ignore-working-copy", "log", "-r", revset, "--no-graph", "-T", "change_id.short() ++ \"\\n\"")
+	out, err := commandCaptureFn("jj", "-R", repoPath, "--ignore-working-copy", "log", "-r", revset, "--no-graph", "-T", changeIDTemplate)
 	if err != nil {
 		return nil, err
 	}
-	return uniqueNonEmptyStrings(strings.Split(out, "\n")), nil
+	return parseChangeIDs(out)
 }
 
 func revsetUnion(revs []string) string {
@@ -4586,19 +4612,19 @@ func frontierHeads(repoPath string, revs []string) ([]string, error) {
 		return nil, nil
 	}
 	revset := fmt.Sprintf("heads(%s)", strings.Join(revs, " | "))
-	out, err := commandCaptureFn("jj", "-R", repoPath, "log", "-r", revset, "--no-graph", "-T", "change_id.short() ++ \"\\n\"")
+	out, err := commandCaptureFn("jj", "-R", repoPath, "log", "-r", revset, "--no-graph", "-T", changeIDTemplate)
 	if err != nil {
 		return nil, err
 	}
-	return uniqueNonEmptyStrings(strings.Split(out, "\n")), nil
+	return parseChangeIDs(out)
 }
 
 func parentChangeIDs(repoPath string) ([]string, error) {
-	out, err := commandCaptureFn("jj", "-R", repoPath, "--ignore-working-copy", "log", "-r", "parents(@)", "--no-graph", "-T", "change_id.short() ++ \"\\n\"")
+	out, err := commandCaptureFn("jj", "-R", repoPath, "--ignore-working-copy", "log", "-r", "parents(@)", "--no-graph", "-T", changeIDTemplate)
 	if err != nil {
 		return nil, err
 	}
-	return uniqueNonEmptyStrings(strings.Split(out, "\n")), nil
+	return parseChangeIDs(out)
 }
 
 func parentChangeIDsToPreserve(repoPath string, parents []string, destinations []string) ([]string, error) {

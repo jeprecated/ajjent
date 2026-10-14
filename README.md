@@ -267,6 +267,7 @@ With the default `prefer-clean`, `auto` settings, a single divergent Workspace c
 - `t` makes the Workspace under the cursor the target and reclassifies every line against it.
 - `s` cycles the shape `auto → merge → linear → line`. `line` is Line Stacking: the first input keeps its base, bookmarks and the target are not inputs and are dropped with a message.
 - `m` marks the local bookmarks on the commit under the cursor to move forward to the top of the stack; on a row without one it marks the trunk bookmark (`main`). Moves are local and never pushed; a backwards or sideways move is refused with jj's message and, like a conflict, makes `Enter` refuse until you unmark it or press `!`. Moving `main` makes the stack trunk.
+- `f` runs `jj git fetch` and reloads the view, so remote bookmarks are current before you stack.
 - `x` toggles Tidy: Close the stacked input Workspaces after the Stack. Tidy uses the normal Close safety, never the Current Workspace, keeps Workspaces outside the Project layout (close those with `ajj close`, which asks before deleting their directories), skips Workspaces with in-progress heads, skips everything when the stack conflicts, and shows what it would close or keep and why before you accept. Closed paths are printed on stdout; `ajj undo` restores their registrations but not their directories.
 - `Enter` asks for confirmation and applies; `!` applies even though the preview conflicts; `q` quits.
 

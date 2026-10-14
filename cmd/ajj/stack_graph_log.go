@@ -343,11 +343,19 @@ type stackGraphState struct {
 func (st *stackGraphState) targetPath() string { return st.target.Path }
 
 func fullChangeIDs(repoPath, operation, revset string) ([]string, error) {
+	return logIDsAtOperation(repoPath, operation, revset, "change_id")
+}
+
+func fullCommitIDs(repoPath, operation, revset string) ([]string, error) {
+	return logIDsAtOperation(repoPath, operation, revset, "commit_id")
+}
+
+func logIDsAtOperation(repoPath, operation, revset, field string) ([]string, error) {
 	args := []string{"-R", repoPath, "--ignore-working-copy", "--color=never", "--no-pager"}
 	if operation != "" {
 		args = append(args, "--at-op="+operation)
 	}
-	args = append(args, "log", "-r", revset, "--no-graph", "-T", "change_id ++ \"\\n\"")
+	args = append(args, "log", "-r", revset, "--no-graph", "-T", field+" ++ \"\\n\"")
 	out, err := commandCaptureFn("jj", args...)
 	if err != nil {
 		return nil, err
@@ -462,11 +470,12 @@ func loadStackGraphState(repoRoot string, cfg config, project string, workspaceO
 	}
 	// A line of work is everything shown from its head down to the target's
 	// history, immutable commits included; the target's own line runs down
-	// to trunk. Only shown commits matter, so the query is bounded by them.
+	// to trunk. Only shown commits matter, so the query is bounded by them,
+	// named by commit id because a divergent change id names several.
 	shown := []string{}
 	for _, entry := range st.log {
-		if entry.ChangeID != "" {
-			shown = append(shown, entry.ChangeID)
+		if entry.CommitID != "" {
+			shown = append(shown, entry.CommitID)
 		}
 	}
 	shownRevset := revsetUnion(shown)
@@ -747,7 +756,7 @@ func (st *stackGraphState) preview(spec stackPreviewSpec) stackPreviewResult {
 			res.err = err
 			return res
 		}
-		if tips, err := fullChangeIDs(path, chain.head(), plan.FinalTip); err == nil && len(tips) > 0 {
+		if tips, err := fullCommitIDs(path, chain.head(), plan.FinalTip); err == nil && len(tips) > 0 {
 			res.top = tips[0]
 		}
 	} else {
@@ -761,14 +770,14 @@ func (st *stackGraphState) preview(spec stackPreviewSpec) stackPreviewResult {
 			res.err = err
 			return res
 		}
-		parents, err := fullChangeIDs(path, chain.head(), st.target.Handle+"@-")
+		parents, err := fullCommitIDs(path, chain.head(), st.target.Handle+"@-")
 		if err != nil {
 			res.err = err
 			return res
 		}
 		if len(parents) == 1 {
 			res.top = parents[0]
-		} else if heads, err := fullChangeIDs(path, chain.head(), st.target.Handle+"@"); err == nil && len(heads) == 1 {
+		} else if heads, err := fullCommitIDs(path, chain.head(), st.target.Handle+"@"); err == nil && len(heads) == 1 {
 			res.top = heads[0]
 		}
 	}
@@ -777,8 +786,12 @@ func (st *stackGraphState) preview(spec stackPreviewSpec) stackPreviewResult {
 	for _, ref := range st.bookmarkRefs {
 		byLabel[ref.label()] = ref
 	}
+	topChange := ""
+	if res.top != "" {
+		topChange = shortChangeID(changeIDForCommit(path, chain.head(), res.top, nil))
+	}
 	for _, name := range spec.moveBookmarks {
-		move := stackBookmarkMove{Name: name, To: shortChangeID(res.top)}
+		move := stackBookmarkMove{Name: name, To: topChange}
 		ref, ok := byLabel[name]
 		if !ok || !ref.Present || ref.Remote != "" {
 			move.Err = name + " is not a local bookmark"
@@ -946,6 +959,26 @@ func conflictedFiles(path, operation string, changes []string) []string {
 	return files
 }
 
+// fetchStackGraphRemotes runs jj git fetch; changed reports whether it
+// recorded a new operation, that is, whether anything was imported.
+func fetchStackGraphRemotes(repoRoot string) (string, bool, error) {
+	before, err := currentOperationID(repoRoot)
+	if err != nil {
+		return "", false, err
+	}
+	if _, err := commandCaptureFn("jj", "-R", repoRoot, "--color=never", "--no-pager", "git", "fetch"); err != nil {
+		return "", false, err
+	}
+	after, err := currentOperationID(repoRoot)
+	if err != nil {
+		return "", false, err
+	}
+	if before == after {
+		return "fetched: nothing new", false, nil
+	}
+	return "fetched", true, nil
+}
+
 func changeIDForCommit(path, operation, commit string, log []stackGraphLogEntry) string {
 	for _, entry := range log {
 		if entry.CommitID == commit {
@@ -972,8 +1005,8 @@ func jjErrorMessage(err error) string {
 		return ""
 	}
 	for _, line := range strings.Split(err.Error(), "\n") {
-		if strings.HasPrefix(line, "Error: ") {
-			return sanitizeTidyPreview(strings.TrimPrefix(line, "Error: "))
+		if _, message, ok := strings.Cut(line, "Error: "); ok {
+			return sanitizeTidyPreview(message)
 		}
 	}
 	return sanitizeTidyPreview(err.Error())

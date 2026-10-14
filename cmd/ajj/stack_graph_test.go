@@ -1411,3 +1411,66 @@ func TestStackGraphChangeModeStepsCommits(t *testing.T) {
 		t.Fatalf("leaving change mode: mode=%v line=%s", m.changeMode, m.stopLineKey())
 	}
 }
+
+// A fetch can make a change divergent: one change id, two visible commits.
+// The view must still load, and a Stack touching it refuses with Ajj's own
+// message rather than a raw revset error.
+func TestStackGraphLoadsWithDivergentChange(t *testing.T) {
+	repo := setupStackGraphRepo(t, false)
+	op := stackGraphOperation(t, repo.defaultPath)
+	runJJ(t, "-R", repo.defaultPath, "--ignore-working-copy", "describe", "-r", "alpha@-", "-m", "feat: alpha, one copy")
+	runJJ(t, "-R", repo.defaultPath, "--ignore-working-copy", "--at-op="+op, "describe", "-r", "alpha@-", "-m", "feat: alpha, other copy")
+	runJJ(t, "-R", repo.alphaPath, "workspace", "update-stale")
+	if out := jjCombined(t, "-R", repo.defaultPath, "--ignore-working-copy", "log", "--no-graph", "-r", "divergent()", "-T", `commit_id ++ "\n"`); len(strings.Fields(out)) < 2 {
+		t.Fatalf("fixture is not divergent:\n%s", out)
+	}
+	m := loadStackGraphModel(t, repo, "auto")
+	m = m.cursorToWorkspace(t, "bravo")
+	m = stackGraphDrive(t, m, stackKey(" "))
+	if m.preview == nil || m.preview.err != nil {
+		t.Fatalf("stacking a line without the divergent change failed: %+v", m.preview)
+	}
+	m = stackGraphDrive(t, m, stackKey(" "))
+	m = m.cursorToWorkspace(t, "alpha")
+	m = stackGraphDrive(t, m, stackKey(" "))
+	if m.preview == nil {
+		t.Fatal("no preview for alpha")
+	}
+	if err := m.preview.err; err == nil || !strings.Contains(err.Error(), "is divergent (one copy is commit") {
+		t.Fatalf("stacking the divergent line must refuse with Ajj's message, got: %v", err)
+	}
+}
+
+func TestStackGraphModelFetchesAndReloads(t *testing.T) {
+	m, backend := newSyntheticStackGraphModel(t)
+	fetches := 0
+	m.fetchFn = func() (string, bool, error) { fetches++; return "fetched", true, nil }
+	m.undoAvailable, m.appliedBase = true, "before"
+	m = stackGraphDrive(t, m, stackKey("f"))
+	if fetches != 1 || len(backend.loads) != 1 || m.st.base != "reloaded" || m.msg != "fetched" {
+		t.Fatalf("f did not fetch and reload: fetches=%d loads=%v msg=%q", fetches, backend.loads, m.msg)
+	}
+	if m.undoAvailable || m.appliedBase != "" {
+		t.Fatal("a fetch after a Stack must retire the one-step undo")
+	}
+	m.fetchFn = func() (string, bool, error) { return "", false, errors.New("jj git fetch failed: Error: no remote\n") }
+	m = stackGraphDrive(t, m, stackKey("f"))
+	if len(backend.loads) != 1 || m.msg != "✗ fetch: no remote" {
+		t.Fatalf("a failed fetch must report and not reload: loads=%v msg=%q", backend.loads, m.msg)
+	}
+	// f waits for a running preview like t and u.
+	id := func(c byte) string { return strings.Repeat(string(c), 32) }
+	m = m.cursorTo(t, id('a'))
+	out, previewCmd := m.Update(stackKey(" "))
+	m = out.(stackGraphModel)
+	m.fetchFn = func() (string, bool, error) { fetches++; return "fetched: nothing new", false, nil }
+	out, cmd := m.Update(stackKey("f"))
+	m = out.(stackGraphModel)
+	if cmd != nil || m.deferredKey == nil {
+		t.Fatal("f during a preview must be held")
+	}
+	m = stackGraphDrive(t, m, previewCmd())
+	if fetches != 2 || len(backend.loads) != 2 {
+		t.Fatalf("held f did not run after the preview: fetches=%d loads=%v", fetches, backend.loads)
+	}
+}
