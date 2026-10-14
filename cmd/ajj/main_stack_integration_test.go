@@ -257,10 +257,9 @@ func TestRunStackRealRepoProducesSiblingCursorsFromEitherInvokingWorkspace(t *te
 			if err != nil {
 				t.Fatal(err)
 			}
-			items := mapSelectorItemsByHandle(selectorItemsForStack(infos))
-			item, ok := items[tc.input]
-			if !ok || strings.Contains(item.Markers, "outside-layout") || item.Disabled {
-				t.Fatalf("expected %s to be a selectable Stack Input from %s, got %+v", tc.input, target.Handle, item)
+			info, ok := mapInfosByHandle(infos)[tc.input]
+			if !ok || info.External || !(isStackRelevant(info) || isMovableToMain(info)) {
+				t.Fatalf("expected %s to be a selectable Stack Input from %s, got %+v", tc.input, target.Handle, info)
 			}
 
 			payload := jjRev(t, paths.defaultPath, "agentleman@-")

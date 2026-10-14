@@ -728,27 +728,24 @@ func TestPreselectedMultiSelectorSubmitsDefaultCheckedRows(t *testing.T) {
 }
 
 func TestMultiSelectorSpaceTogglesAndAdvances(t *testing.T) {
-	for _, ordered := range []bool{false, true} {
-		model := selectorModel{
-			opts: selectorOptions{Mode: selectorMulti, OrderedSelection: ordered, Items: []selectorItem{
-				{Handle: "alpha"},
-				{Handle: "bravo"},
-				{Handle: "charlie"},
-			}},
-			selected:      map[int]bool{},
-			selectedRoles: map[int]string{},
+	model := selectorModel{
+		opts: selectorOptions{Mode: selectorMulti, Items: []selectorItem{
+			{Handle: "alpha"},
+			{Handle: "bravo"},
+			{Handle: "charlie"},
+		}},
+		selected: map[int]bool{},
+	}
+	for press, wantCursor := range []int{1, 2, 2} {
+		updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+		model = updated.(selectorModel)
+		if model.cursor != wantCursor {
+			t.Fatalf("press=%d: cursor=%d, want %d", press+1, model.cursor, wantCursor)
 		}
-		for press, wantCursor := range []int{1, 2, 2} {
-			updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
-			model = updated.(selectorModel)
-			if model.cursor != wantCursor {
-				t.Fatalf("ordered=%v press=%d: cursor=%d, want %d", ordered, press+1, model.cursor, wantCursor)
-			}
-		}
-		model = model.submit()
-		if got := selectorHandles(model.result.Items); strings.Join(got, ",") != "alpha,bravo,charlie" {
-			t.Fatalf("ordered=%v: expected Space spam to select every row, got %v", ordered, got)
-		}
+	}
+	model = model.submit()
+	if got := selectorHandles(model.result.Items); strings.Join(got, ",") != "alpha,bravo,charlie" {
+		t.Fatalf("expected Space spam to select every row, got %v", got)
 	}
 }
 
@@ -801,131 +798,39 @@ func TestMultiSelectorAllRowRespectsExplicitSelections(t *testing.T) {
 	}
 }
 
-func TestOrderedMultiSelectorPreservesSelectionOrderAndReselectsAtEnd(t *testing.T) {
-	model := selectorModel{
-		opts: selectorOptions{Mode: selectorMulti, OrderedSelection: true, AllowRoleToggle: true, Items: []selectorItem{
-			{Handle: "alpha", Status: "unstacked"},
-			{Handle: "bravo", Status: "unstacked"},
-			{Handle: "charlie", Status: "unstacked"},
-		}},
-	}
-	model.toggleSelection(1) // bravo first
-	model.toggleSelection(0) // alpha second
-	model.toggleSelection(1) // bravo removed
-	model.toggleSelection(2) // charlie third
-	model.toggleSelection(1) // bravo reselected at the end
-
-	model = model.submit()
-	if got := selectorHandles(model.result.Items); strings.Join(got, ",") != "alpha,charlie,bravo" {
-		t.Fatalf("expected ordered selections with reselected item at end, got %v", got)
-	}
-	if got := selectorRoles(model.result.Items); strings.Join(got, ",") != "payload,payload,payload" {
-		t.Fatalf("expected selected unstacked Workspaces to default to payload, got %v", got)
-	}
-}
-
-func TestOrderedLineSelectorRoleToggleAndFollowOnly(t *testing.T) {
-	model := selectorModel{
-		opts: selectorOptions{Mode: selectorMulti, OrderedSelection: true, AllowRoleToggle: true, Items: []selectorItem{
-			{Handle: "alpha", Status: "unstacked"},
-			{Handle: "empty", Status: "empty", Role: selectorRoleFollow},
-			{Handle: "stacked", Status: "stacked", Role: selectorRoleFollow},
-		}},
-	}
-	model.toggleSelection(0)
-	model.toggleSelectedRole(0)
-	model.toggleSelection(1)
-	model.toggleSelection(2)
-
-	model = model.submit()
-	if got := selectorHandles(model.result.Items); strings.Join(got, ",") != "alpha,empty,stacked" {
-		t.Fatalf("expected ordered handles, got %v", got)
-	}
-	if got := selectorRoles(model.result.Items); strings.Join(got, ",") != "follow,follow,follow" {
-		t.Fatalf("expected toggled alpha plus empty/stacked follow-only roles, got %v", got)
-	}
-}
-
-func TestLineStackSelectorViewShowsOrderAndRole(t *testing.T) {
-	model := selectorModel{
-		opts: selectorOptions{Title: "Line Stack Workspaces", Mode: selectorMulti, OrderedSelection: true, AllowRoleToggle: true, Items: []selectorItem{
-			{Handle: "alpha", Status: "unstacked", Markers: "-", Role: selectorRolePayload, Path: "/repo/alpha"},
-			{Handle: "empty", Status: "empty", Markers: "-", Role: selectorRoleFollow, Path: "/repo/empty"},
-			{Handle: "missing", Status: "missing", Markers: "-", Disabled: true, Path: "/repo/missing"},
-		}},
-		selected:      map[int]bool{0: true, 1: true},
-		selectedOrder: []int{1, 0},
-		height:        20,
-	}
-	view := model.View()
-	for _, want := range []string{"[2:P] alpha", "[1:F] empty", "a toggle payload/follow", "selection order defines the line"} {
-		if !strings.Contains(view, want) {
-			t.Fatalf("expected line-stack selector view to contain %q, got %q", want, view)
-		}
-	}
-}
-
-func TestUnorderedMultiSelectorStillUsesItemOrder(t *testing.T) {
-	model := selectorModel{
-		opts: selectorOptions{Mode: selectorMulti, Items: []selectorItem{
-			{Handle: "alpha"},
-			{Handle: "bravo"},
-			{Handle: "charlie"},
-		}},
-		selected:      map[int]bool{0: true, 1: true, 2: true},
-		selectedOrder: []int{2, 0, 1},
-	}
-	model = model.submit()
-	if got := selectorHandles(model.result.Items); strings.Join(got, ",") != "alpha,bravo,charlie" {
-		t.Fatalf("expected unordered selector to keep item order, got %v", got)
-	}
-}
-
-func TestLineStackSelectorItemsDisableMissingAndAllowEmptyStackedAsFollowOnly(t *testing.T) {
-	items := selectorItemsForLineStack([]workspaceInfo{
+func TestLineStackGraphLinesDisableMissingAndAllowEmptyStackedAsFollowOnly(t *testing.T) {
+	st := &stackGraphState{target: stackTargetResolution{Handle: "default"}, infos: []workspaceInfo{
 		{Ref: workspaceRef{Handle: "default"}, Main: true, Empty: true},
 		{Ref: workspaceRef{Handle: "alpha"}, Empty: true},
 		{Ref: workspaceRef{Handle: "bravo"}, Stacked: true},
 		{Ref: workspaceRef{Handle: "charlie"}, Conflict: true},
 		{Ref: workspaceRef{Handle: "delta"}},
 		{Ref: workspaceRef{Handle: "missing"}, Missing: true},
-	}, stackTargetResolution{})
-	byHandle := mapSelectorItemsByHandle(items)
-	if byHandle["default"].Disabled || byHandle["default"].Role != selectorRolePayload {
-		t.Fatalf("expected Main Workspace to default to payload even with an empty cursor, got disabled=%v role=%q", byHandle["default"].Disabled, byHandle["default"].Role)
+	}}
+	byKey := stackGraphLinesByKey(st.lines("line"))
+	if byKey["default@"].Selectable || byKey["default@"].Status != "target: not a Line Stack Input" {
+		t.Fatalf("expected the target to stay out of Line Stacking, got %+v", byKey["default@"])
 	}
-	for _, handle := range []string{"alpha", "bravo"} {
-		if byHandle[handle].Disabled {
-			t.Fatalf("expected %s to be selectable as follow-only, got disabled", handle)
-		}
-		if byHandle[handle].Role != selectorRoleFollow {
-			t.Fatalf("expected %s to default to follow-only, got role %q", handle, byHandle[handle].Role)
+	for _, handle := range []string{"alpha@", "bravo@"} {
+		if !byKey[handle].Selectable || byKey[handle].Role != selectorRoleFollow || byKey[handle].Status != "follow-only" {
+			t.Fatalf("expected %s to be selectable follow-only, got %+v", handle, byKey[handle])
 		}
 	}
-	for _, handle := range []string{"charlie", "delta"} {
-		if byHandle[handle].Disabled || byHandle[handle].Role != selectorRolePayload {
-			t.Fatalf("expected %s to be selectable payload, got disabled=%v role=%q", handle, byHandle[handle].Disabled, byHandle[handle].Role)
+	for _, handle := range []string{"charlie@", "delta@"} {
+		if !byKey[handle].Selectable || !byKey[handle].InAll || byKey[handle].Role != selectorRolePayload {
+			t.Fatalf("expected %s to be selectable payload, got %+v", handle, byKey[handle])
 		}
 	}
-	if !byHandle["missing"].Disabled {
-		t.Fatal("expected missing Workspace to be disabled")
+	if byKey["missing@"].Selectable || byKey["missing@"].Status != "missing" {
+		t.Fatalf("expected missing Workspace to be unselectable, got %+v", byKey["missing@"])
 	}
-}
-
-func TestLineStackSelectorItemsDisableTargetWorkspace(t *testing.T) {
-	items := selectorItemsForLineStack([]workspaceInfo{
-		{Ref: workspaceRef{Handle: "default"}, Current: true, Empty: true},
-		{Ref: workspaceRef{Handle: "alpha"}},
-	}, stackTargetResolution{Handle: "default"})
-	byHandle := mapSelectorItemsByHandle(items)
-	if !byHandle["default"].Disabled {
-		t.Fatal("expected target Workspace to be disabled")
+	// Plain Stacking classifies the same Workspaces against the target.
+	plain := stackGraphLinesByKey(st.lines("auto"))
+	if plain["alpha@"].Selectable || plain["bravo@"].Selectable || plain["alpha@"].Status != "already in default@" {
+		t.Fatalf("expected represented Workspaces to be unselectable for plain Stacking, got %+v %+v", plain["alpha@"], plain["bravo@"])
 	}
-	if byHandle["default"].Markers != "current,target" {
-		t.Fatalf("expected target marker on disabled target Workspace, got %q", byHandle["default"].Markers)
-	}
-	if byHandle["alpha"].Disabled {
-		t.Fatal("expected non-target Workspace to remain selectable")
+	if !plain["charlie@"].Selectable || plain["charlie@"].Status != "conflict" || !plain["delta@"].InAll || plain["delta@"].Status != "ready" {
+		t.Fatalf("expected conflict and unstacked Workspaces to be stack-relevant, got %+v %+v", plain["charlie@"], plain["delta@"])
 	}
 }
 
@@ -935,14 +840,6 @@ func selectorHandles(items []selectorItem) []string {
 		handles = append(handles, item.Handle)
 	}
 	return handles
-}
-
-func selectorRoles(items []selectorItem) []string {
-	roles := make([]string, 0, len(items))
-	for _, item := range items {
-		roles = append(roles, item.Role)
-	}
-	return roles
 }
 
 func mapSelectorItemsByHandle(items []selectorItem) map[string]selectorItem {

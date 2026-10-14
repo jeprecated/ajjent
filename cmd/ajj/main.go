@@ -55,6 +55,8 @@ var (
 	// refreshes) in tests without a terminal.
 	canUseTUIFn   = canUseTUI
 	runSelectorFn = runSelector
+	// runStackGraphFn opens the interactive graph Stack (ADR 0017).
+	runStackGraphFn = runStackGraph
 )
 
 type config struct {
@@ -1756,37 +1758,52 @@ func runUndo(args []string) error {
 	if err != nil {
 		return err
 	}
-	st, err := loadState(repoRoot)
+	record, err := undoRecordedOperation(repoRoot)
 	if err != nil {
+		if errors.Is(err, errUndoNewerOperations) {
+			printManualRestoreHint(record.BeforeOperationID)
+		}
 		return err
-	}
-	if st.Undo == nil {
-		return errors.New("no Ajj operation is recorded for undo")
-	}
-	record := *st.Undo
-	if !integrationFullOperationIDRE.MatchString(record.BeforeOperationID) || !integrationFullOperationIDRE.MatchString(record.AfterOperationID) {
-		return errors.New("stored Ajj undo operation IDs are invalid")
-	}
-	if _, err := commandCaptureFn("jj", "-R", repoRoot, "--no-pager", "status"); err != nil {
-		return fmt.Errorf("snapshot current Workspace before undo: %w", err)
-	}
-	current, err := currentOperationID(repoRoot)
-	if err != nil {
-		return fmt.Errorf("read current operation before undo: %w", err)
-	}
-	if current != record.AfterOperationID {
-		printManualRestoreHint(record.BeforeOperationID)
-		return fmt.Errorf("cannot undo %s: newer Jujutsu operations exist (expected %s, found %s)", record.Command, record.AfterOperationID, current)
-	}
-	if err := commandToStderrFn("jj", "-R", repoRoot, "op", "restore", record.BeforeOperationID); err != nil {
-		return fmt.Errorf("undo %s: %w", record.Command, err)
-	}
-	st.Undo = nil
-	if err := saveState(repoRoot, st); err != nil {
-		return fmt.Errorf("%s was undone, but its undo record could not be consumed: %w", record.Command, err)
 	}
 	fmt.Fprintf(stderrWriter, "Undid %s.\n", record.Command)
 	return nil
+}
+
+var errUndoNewerOperations = errors.New("newer Jujutsu operations exist")
+
+// undoRecordedOperation restores the recorded before-operation when the
+// repository is still exactly at the recorded after-operation, and consumes
+// the record. The record is returned even on failure so callers can hint.
+func undoRecordedOperation(repoRoot string) (undoRecord, error) {
+	st, err := loadState(repoRoot)
+	if err != nil {
+		return undoRecord{}, err
+	}
+	if st.Undo == nil {
+		return undoRecord{}, errors.New("no Ajj operation is recorded for undo")
+	}
+	record := *st.Undo
+	if !integrationFullOperationIDRE.MatchString(record.BeforeOperationID) || !integrationFullOperationIDRE.MatchString(record.AfterOperationID) {
+		return record, errors.New("stored Ajj undo operation IDs are invalid")
+	}
+	if _, err := commandCaptureFn("jj", "-R", repoRoot, "--no-pager", "status"); err != nil {
+		return record, fmt.Errorf("snapshot current Workspace before undo: %w", err)
+	}
+	current, err := currentOperationID(repoRoot)
+	if err != nil {
+		return record, fmt.Errorf("read current operation before undo: %w", err)
+	}
+	if current != record.AfterOperationID {
+		return record, fmt.Errorf("cannot undo %s: %w (expected %s, found %s)", record.Command, errUndoNewerOperations, record.AfterOperationID, current)
+	}
+	if err := commandToStderrFn("jj", "-R", repoRoot, "op", "restore", record.BeforeOperationID); err != nil {
+		return record, fmt.Errorf("undo %s: %w", record.Command, err)
+	}
+	st.Undo = nil
+	if err := saveState(repoRoot, st); err != nil {
+		return record, fmt.Errorf("%s was undone, but its undo record could not be consumed: %w", record.Command, err)
+	}
+	return record, nil
 }
 
 func runMoveToMain(args []string) (retErr error) {
@@ -1996,6 +2013,19 @@ func runStack(args []string) (retErr error) {
 		return err
 	}
 	applyStackOverrides(&cfg, rebaseMode, shape, conflictStrategy)
+	if len(positionals) == 0 && !all {
+		if !canUseTUI() {
+			if lineStack {
+				return errors.New("stack --line requires ordered Workspace Handles when not running in a terminal")
+			}
+			return errors.New("stack requires Workspace Handles, bookmarks, or --all when not running in a terminal")
+		}
+		initialShape := cfg.Stack.Shape
+		if lineStack {
+			initialShape = "line"
+		}
+		return runStackGraphFn(stackGraphRequest{RepoRoot: repoRoot, Cfg: cfg, Project: project, WorkspaceOverride: workspaceOverride, Shape: initialShape, Yes: yes})
+	}
 	cfg, infos, byHandle, target, err := resolveStackTargetWorkspace(repoRoot, cfg, project, workspaceOverride)
 	if err != nil {
 		return err
@@ -2009,9 +2039,9 @@ func runStack(args []string) (retErr error) {
 		return runLineStack(repoRoot, cfg, infos, byHandle, target, positionals, yes)
 	}
 	mainInfo := byHandle[cfg.MainWorkspace]
-	// Bookmark discovery is needed for --all, the selector, or any argument
-	// that is not a registered Workspace Handle.
-	needsBookmarks := len(positionals) == 0
+	// Bookmark discovery is needed for --all or any argument that is not a
+	// registered Workspace Handle.
+	needsBookmarks := all
 	for _, h := range positionals {
 		if _, ok := byHandle[strings.TrimSpace(h)]; !ok {
 			needsBookmarks = true
@@ -2062,27 +2092,6 @@ func runStack(args []string) (retErr error) {
 			}
 			inputs = append(inputs, workspaceStackInput(h))
 		}
-	} else {
-		if !canUseTUI() {
-			return errors.New("stack requires Workspace Handles, bookmarks, or --all when not running in a terminal")
-		}
-		items := append(selectorItemsForStack(infos), selectorItemsForBookmarkSources(sources)...)
-		selected, opts, err := runSelector(selectorOptions{Title: "Stack Workspaces and Bookmarks", Mode: selectorMulti, Items: items, AllDefault: true, AllowStackOptions: true, StackOptions: cfg.Stack})
-		if err != nil {
-			return err
-		}
-		cfg.Stack = opts.StackOptions
-		byLabel := map[string]bookmarkSource{}
-		for _, source := range sources {
-			byLabel[source.Ref.label()] = source
-		}
-		for _, item := range selected {
-			if item.Kind == selectorKindBookmark {
-				inputs = append(inputs, bookmarkStackInput(byLabel[item.Handle]))
-			} else {
-				inputs = append(inputs, workspaceStackInput(item.Handle))
-			}
-		}
 	}
 	inputs = uniqueStackInputs(inputs)
 	if len(inputs) == 0 {
@@ -2100,13 +2109,10 @@ func runStack(args []string) (retErr error) {
 			return err
 		}
 	}
-	preservedTarget, err := detectInProgressStackTarget(mainInfo.Path)
-	if err != nil {
-		return err
-	}
-	describedInputHeads, err := describedStackInputHeads(mainInfo.Path, workspaceInputs)
-	if err != nil {
-		return err
+	// Snapshot the target before recording the pre-Stack operation, so the
+	// snapshot is not the first operation after it.
+	if _, err := commandCaptureFn("jj", "-R", mainInfo.Path, "--no-pager", "status"); err != nil {
+		return fmt.Errorf("snapshot target Workspace before Stack: %w", err)
 	}
 	undoOpID, err := currentOperationID(mainInfo.Path)
 	if err != nil {
@@ -2119,20 +2125,7 @@ func runStack(args []string) (retErr error) {
 			retErr = errors.Join(retErr, completeUndoableOperation(repoRoot, mainInfo.Path, "stack", undoOpID))
 		}
 	}()
-	conflicted, err := runStackRebase(mainInfo.Path, inputs, cfg.Stack)
-	if err != nil {
-		return err
-	}
-	if err := finalizeStackTargetHead(mainInfo.Path, cfg.MainWorkspace, inputs, conflicted, preservedTarget); err != nil {
-		return err
-	}
-	if err := advanceStackInputWorkspaces(mainInfo, workspaceInputs, byHandle, describedInputHeads); err != nil {
-		return err
-	}
-	if err := verifyBookmarkInputsUnchanged(mainInfo.Path, inputs); err != nil {
-		return err
-	}
-	if err := commandToStderrFn("jj", "-R", mainInfo.Path, "workspace", "update-stale"); err != nil {
+	if err := executeStack(mainInfo, cfg.MainWorkspace, inputs, byHandle, cfg.Stack); err != nil {
 		return err
 	}
 	if !yes && canUseTUI() {
@@ -2153,6 +2146,35 @@ func runStack(args []string) (retErr error) {
 	}
 	undoFinished = true
 	return completeUndoableOperation(repoRoot, mainInfo.Path, "stack", undoOpID)
+}
+
+// executeStack is the Stack pipeline shared by positional/--all Stacking and
+// the interactive graph view, from the first rebase to the target's
+// working-copy refresh. It records nothing: callers own undo and Closing.
+func executeStack(mainInfo workspaceInfo, mainHandle string, inputs []stackInput, byHandle map[string]workspaceInfo, stack stackConfig) error {
+	workspaceInputs := stackInputWorkspaceHandles(inputs)
+	preservedTarget, err := detectInProgressStackTarget(mainInfo.Path)
+	if err != nil {
+		return err
+	}
+	describedInputHeads, err := describedStackInputHeads(mainInfo.Path, workspaceInputs)
+	if err != nil {
+		return err
+	}
+	conflicted, err := runStackRebase(mainInfo.Path, inputs, stack)
+	if err != nil {
+		return err
+	}
+	if err := finalizeStackTargetHead(mainInfo.Path, mainHandle, inputs, conflicted, preservedTarget); err != nil {
+		return err
+	}
+	if err := advanceStackInputWorkspaces(mainInfo, workspaceInputs, byHandle, describedInputHeads); err != nil {
+		return err
+	}
+	if err := verifyBookmarkInputsUnchanged(mainInfo.Path, inputs); err != nil {
+		return err
+	}
+	return commandToStderrFn("jj", "-R", mainInfo.Path, "workspace", "update-stale")
 }
 
 type lineStackInput struct {
@@ -2193,23 +2215,8 @@ func runLineStack(stateRoot string, cfg config, infos []workspaceInfo, byHandle 
 		return fmt.Errorf("target Workspace path missing: %s", mainInfo.Path)
 	}
 	requested := []lineStackInput{}
-	if len(positionals) > 0 {
-		for _, h := range positionals {
-			requested = append(requested, lineStackInput{Handle: h})
-		}
-	} else {
-		if !canUseTUI() {
-			return errors.New("stack --line requires ordered Workspace Handles when not running in a terminal")
-		}
-		items := selectorItemsForLineStack(infos, target)
-		var opts selectorOptions
-		var err error
-		selected, opts, err := runSelector(selectorOptions{Title: "Line Stack Workspaces", Mode: selectorMulti, Items: items, OrderedSelection: true, AllowRoleToggle: true})
-		_ = opts
-		if err != nil {
-			return err
-		}
-		requested = lineStackInputsFromSelectorItems(selected)
+	for _, h := range positionals {
+		requested = append(requested, lineStackInput{Handle: h})
 	}
 	if len(requested) == 0 {
 		return errors.New("no Line Stack Workspaces selected")
@@ -2248,18 +2255,6 @@ func runLineStack(stateRoot string, cfg config, infos []workspaceInfo, byHandle 
 		return errors.Join(err, completeUndoableOperation(stateRoot, mainInfo.Path, "stack --line", undoOpID))
 	}
 	return completeUndoableOperation(stateRoot, mainInfo.Path, "stack --line", undoOpID)
-}
-
-func selectorItemForLineStackInfo(info workspaceInfo) selectorItem {
-	return selectorItem{Handle: info.Ref.Handle, Path: info.Path, Status: statusLabel(info), Markers: strings.Join(markers(info), ","), Role: lineStackRoleForInfo(info), Disabled: info.Missing}
-}
-
-func lineStackInputsFromSelectorItems(items []selectorItem) []lineStackInput {
-	inputs := make([]lineStackInput, 0, len(items))
-	for _, item := range items {
-		inputs = append(inputs, lineStackInput{Handle: item.Handle, Role: item.Role})
-	}
-	return inputs
 }
 
 func buildLineStackPlan(infos []workspaceInfo, requested []lineStackInput) (lineStackPlan, error) {
@@ -2730,6 +2725,14 @@ func lineStackRoleLabel(role string) string {
 	return "payload"
 }
 
+// lineStackConflictError reports that Line Stacking stopped at a conflict and
+// left the conflicted state in place.
+type lineStackConflictError struct{ Handle string }
+
+func (e lineStackConflictError) Error() string {
+	return fmt.Sprintf("Line Stacking stopped with conflicts in Workspace %q; resolve conflicts manually or undo with the printed operation id", e.Handle)
+}
+
 func executeLineStackPlan(repoPath string, plan lineStackPlan) error {
 	for _, op := range plan.PayloadRebases {
 		fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Line Stack payload: %s", op.Handle))
@@ -2741,7 +2744,7 @@ func executeLineStackPlan(repoPath string, plan lineStackPlan) error {
 			return err
 		}
 		if conflicted {
-			return fmt.Errorf("Line Stacking stopped with conflicts in Workspace %q; resolve conflicts manually or undo with the printed operation id", op.Handle)
+			return lineStackConflictError{Handle: op.Handle}
 		}
 	}
 	fmt.Fprintf(stderrWriter, "\n%s\n", stderrHeading("Advance Line Stack Workspaces"))
@@ -2761,7 +2764,7 @@ func executeLineStackPlan(repoPath string, plan lineStackPlan) error {
 			return err
 		}
 		if conflicted {
-			return fmt.Errorf("Line Stacking stopped with conflicts in Workspace %q; resolve conflicts manually or undo with the printed operation id", advance.Handle)
+			return lineStackConflictError{Handle: advance.Handle}
 		}
 	}
 	return commandToStderrFn("jj", "-R", repoPath, "workspace", "update-stale")
@@ -4529,31 +4532,37 @@ func currentOperationID(repoPath string) (string, error) {
 }
 
 func completeUndoableOperation(stateRoot, repoPath, command, beforeOperationID string) error {
-	afterOperationID, err := currentOperationID(repoPath)
-	if err != nil {
+	recorded, err := recordUndoableOperation(stateRoot, repoPath, command, beforeOperationID)
+	if err != nil || !recorded {
 		printManualRestoreHint(beforeOperationID)
-		return fmt.Errorf("record post-%s operation id: %w", command, err)
-	}
-	if afterOperationID == beforeOperationID {
-		printManualRestoreHint(beforeOperationID)
-		return nil
-	}
-	if err := ensureStateIgnored(stateRoot); err != nil {
-		printManualRestoreHint(beforeOperationID)
-		return fmt.Errorf("prepare local state ignore for %s undo: %w", command, err)
-	}
-	st, err := loadState(stateRoot)
-	if err != nil {
-		printManualRestoreHint(beforeOperationID)
-		return fmt.Errorf("load state to record %s undo: %w", command, err)
-	}
-	st.Undo = &undoRecord{Command: command, BeforeOperationID: beforeOperationID, AfterOperationID: afterOperationID}
-	if err := saveState(stateRoot, st); err != nil {
-		printManualRestoreHint(beforeOperationID)
-		return fmt.Errorf("record %s undo: %w", command, err)
+		return err
 	}
 	fmt.Fprintf(stderrWriter, "\n%s ajj undo (jj op restore %s)\n", cliStylesForWriter(stderrWriter).Muted.Render("To undo this run:"), beforeOperationID)
 	return nil
+}
+
+// recordUndoableOperation stores the before/after operation pair for
+// `ajj undo`. It reports false, without error, when nothing changed.
+func recordUndoableOperation(stateRoot, repoPath, command, beforeOperationID string) (bool, error) {
+	afterOperationID, err := currentOperationID(repoPath)
+	if err != nil {
+		return false, fmt.Errorf("record post-%s operation id: %w", command, err)
+	}
+	if afterOperationID == beforeOperationID {
+		return false, nil
+	}
+	if err := ensureStateIgnored(stateRoot); err != nil {
+		return false, fmt.Errorf("prepare local state ignore for %s undo: %w", command, err)
+	}
+	st, err := loadState(stateRoot)
+	if err != nil {
+		return false, fmt.Errorf("load state to record %s undo: %w", command, err)
+	}
+	st.Undo = &undoRecord{Command: command, BeforeOperationID: beforeOperationID, AfterOperationID: afterOperationID}
+	if err := saveState(stateRoot, st); err != nil {
+		return false, fmt.Errorf("record %s undo: %w", command, err)
+	}
+	return true, nil
 }
 
 func printManualRestoreHint(opID string) {
@@ -5583,27 +5592,19 @@ const (
 	selectorRoleFollow  = "follow"
 )
 
-// selectorKindBookmark marks a Stack row for a bookmark source; Workspace
-// rows leave Kind empty. Handle then holds the bookmark label.
-const selectorKindBookmark = "bookmark"
-
 type selectorItem struct {
 	Policy           string
 	NormallyClosable bool
 	Safety           string
-	Kind             string
 	Handle           string
 	Path             string
 	// Description replaces Path on rows without a directory.
 	Description string
 	Status      string
 	Markers     string
-	Role        string
 	Disabled    bool
 	All         bool
-	// ExplicitOnly rows are selectable but never submitted by the All row.
-	ExplicitOnly bool
-	Selected     bool
+	Selected    bool
 	// Stale rows (Tidy only) are never selectable, even with force, until
 	// the user's `u` updates them and the whole review is rebuilt.
 	Stale bool
@@ -5622,14 +5623,9 @@ type selectorOptions struct {
 	AllDefault       bool
 	ForceEnabled     bool
 	AllowForceToggle bool
-	OrderedSelection bool
-	AllowRoleToggle  bool
 	MoveToMain       bool
 	Tidy             bool
-	// AllowStackOptions binds s/r/c to cycle StackOptions.
-	AllowStackOptions bool
-	StackOptions      stackConfig
-	Notice            string
+	Notice           string
 	// Restore reapplies the cursor, filter, and preview of a Tidy selector
 	// that ended with a `u` refresh. Checks and force arrive through Items
 	// and ForceEnabled.
@@ -5639,7 +5635,6 @@ type selectorOptions struct {
 type selectorResult struct {
 	Items        []selectorItem
 	ForceEnabled bool
-	StackOptions stackConfig
 }
 
 type selectorModel struct {
@@ -5655,8 +5650,6 @@ type selectorModel struct {
 	opts          selectorOptions
 	cursor        int
 	selected      map[int]bool
-	selectedOrder []int
-	selectedRoles map[int]string
 	filter        string
 	// Keys are modal: in normal mode they are commands only; "/" enters
 	// filterMode, where every printable key edits the filter.
@@ -5673,13 +5666,10 @@ type selectorModel struct {
 }
 
 func newSelectorModel(opts selectorOptions) selectorModel {
-	model := selectorModel{opts: opts, selected: map[int]bool{}, selectedRoles: map[int]string{}, width: 100, notice: opts.Notice}
+	model := selectorModel{opts: opts, selected: map[int]bool{}, width: 100, notice: opts.Notice}
 	for i, item := range opts.Items {
 		if item.Selected && !item.Disabled && !item.All {
 			model.selected[i] = true
-			if opts.OrderedSelection {
-				model.selectedOrder = append(model.selectedOrder, i)
-			}
 		}
 	}
 	if restore := opts.Restore; restore != nil {
@@ -5724,7 +5714,6 @@ func (m selectorModel) outcome(opts selectorOptions) ([]selectorItem, selectorOp
 		return nil, opts, nil
 	}
 	opts.ForceEnabled = m.result.ForceEnabled
-	opts.StackOptions = m.result.StackOptions
 	return m.result.Items, opts, nil
 }
 
@@ -5855,26 +5844,6 @@ func (m *selectorModel) handleCommandKey(key string) bool {
 			return false
 		}
 		m.toggleForce()
-	case "s", "r", "c":
-		if !m.opts.AllowStackOptions {
-			return false
-		}
-		switch key {
-		case "s":
-			m.opts.StackOptions.Shape = cycle(m.opts.StackOptions.Shape, []string{"auto", "linear", "merge"})
-		case "r":
-			m.opts.StackOptions.RebaseMode = cycle(m.opts.StackOptions.RebaseMode, []string{"auto", "branch", "revision"})
-		case "c":
-			m.opts.StackOptions.ConflictStrategy = cycle(m.opts.StackOptions.ConflictStrategy, []string{"prefer-clean", "off"})
-		}
-	case "a":
-		if !m.opts.AllowRoleToggle {
-			return false
-		}
-		visible := m.visibleItems()
-		if m.cursor >= 0 && m.cursor < len(visible) {
-			m.toggleSelectedRole(visible[m.cursor])
-		}
 	default:
 		return false
 	}
@@ -6066,52 +6035,9 @@ func (m *selectorModel) toggleSelection(idx int) {
 	}
 	if m.selected[idx] {
 		delete(m.selected, idx)
-		delete(m.selectedRoles, idx)
-		m.selectedOrder = removeInt(m.selectedOrder, idx)
 		return
 	}
 	m.selected[idx] = true
-	if m.opts.OrderedSelection {
-		m.selectedOrder = append(m.selectedOrder, idx)
-	}
-}
-
-func (m *selectorModel) toggleSelectedRole(idx int) {
-	if idx < 0 || idx >= len(m.opts.Items) || !m.selected[idx] {
-		return
-	}
-	if m.selectedRoles == nil {
-		m.selectedRoles = map[int]string{}
-	}
-	if m.selectedRole(idx) == selectorRoleFollow {
-		m.selectedRoles[idx] = selectorRolePayload
-	} else {
-		m.selectedRoles[idx] = selectorRoleFollow
-	}
-}
-
-func (m selectorModel) selectedRole(idx int) string {
-	if m.selectedRoles != nil {
-		if role := strings.TrimSpace(m.selectedRoles[idx]); role != "" {
-			return role
-		}
-	}
-	if idx >= 0 && idx < len(m.opts.Items) {
-		if role := strings.TrimSpace(m.opts.Items[idx].Role); role != "" {
-			return role
-		}
-	}
-	return selectorRolePayload
-}
-
-func removeInt(items []int, value int) []int {
-	out := items[:0]
-	for _, item := range items {
-		if item != value {
-			out = append(out, item)
-		}
-	}
-	return out
 }
 
 func (m selectorModel) submit() selectorModel {
@@ -6130,14 +6056,14 @@ func (m selectorModel) submit() selectorModel {
 			m.cancel = true
 			return m
 		}
-		m.result = selectorResult{Items: []selectorItem{item}, ForceEnabled: m.opts.ForceEnabled, StackOptions: m.opts.StackOptions}
+		m.result = selectorResult{Items: []selectorItem{item}, ForceEnabled: m.opts.ForceEnabled}
 		return m
 	}
 	idx := visible[m.cursor]
 	item := m.opts.Items[idx]
 	selectedItems := m.selectedItems()
 	if len(selectedItems) > 0 {
-		m.result = selectorResult{Items: selectedItems, ForceEnabled: m.opts.ForceEnabled, StackOptions: m.opts.StackOptions}
+		m.result = selectorResult{Items: selectedItems, ForceEnabled: m.opts.ForceEnabled}
 		return m
 	}
 	if m.opts.Tidy {
@@ -6147,70 +6073,29 @@ func (m selectorModel) submit() selectorModel {
 	if item.All {
 		items := []selectorItem{}
 		for _, candidate := range m.opts.Items {
-			if !candidate.All && !candidate.Disabled && !candidate.ExplicitOnly {
+			if !candidate.All && !candidate.Disabled {
 				items = append(items, candidate)
 			}
 		}
-		m.result = selectorResult{Items: items, ForceEnabled: m.opts.ForceEnabled, StackOptions: m.opts.StackOptions}
+		m.result = selectorResult{Items: items, ForceEnabled: m.opts.ForceEnabled}
 		return m
 	}
 	if !item.Disabled {
-		m.result = selectorResult{Items: []selectorItem{item}, ForceEnabled: m.opts.ForceEnabled, StackOptions: m.opts.StackOptions}
+		m.result = selectorResult{Items: []selectorItem{item}, ForceEnabled: m.opts.ForceEnabled}
 		return m
 	}
-	m.result = selectorResult{ForceEnabled: m.opts.ForceEnabled, StackOptions: m.opts.StackOptions}
+	m.result = selectorResult{ForceEnabled: m.opts.ForceEnabled}
 	return m
 }
 
 func (m selectorModel) selectedItems() []selectorItem {
-	if m.opts.OrderedSelection {
-		items := []selectorItem{}
-		seen := map[int]bool{}
-		for _, idx := range m.selectedOrder {
-			if idx < 0 || idx >= len(m.opts.Items) || seen[idx] {
-				continue
-			}
-			seen[idx] = true
-			if m.selected[idx] && !m.opts.Items[idx].Disabled && !m.opts.Items[idx].All {
-				item := m.opts.Items[idx]
-				item.Role = m.selectedRole(idx)
-				items = append(items, item)
-			}
-		}
-		return items
-	}
 	items := []selectorItem{}
 	for idx, item := range m.opts.Items {
 		if m.selected[idx] && !item.Disabled && !item.All {
-			item.Role = m.selectedRole(idx)
 			items = append(items, item)
 		}
 	}
 	return items
-}
-
-func (m selectorModel) selectedOrdinal(idx int) int {
-	if !m.opts.OrderedSelection {
-		return 0
-	}
-	ordinal := 1
-	for _, selectedIdx := range m.selectedOrder {
-		if selectedIdx < 0 || selectedIdx >= len(m.opts.Items) || !m.selected[selectedIdx] || m.opts.Items[selectedIdx].Disabled || m.opts.Items[selectedIdx].All {
-			continue
-		}
-		if selectedIdx == idx {
-			return ordinal
-		}
-		ordinal++
-	}
-	return 0
-}
-
-func selectorRoleInitial(role string) string {
-	if strings.TrimSpace(role) == selectorRoleFollow {
-		return "F"
-	}
-	return "P"
 }
 
 func (m selectorModel) View() string {
@@ -6269,11 +6154,7 @@ func (m selectorModel) View() string {
 		if m.opts.Mode == selectorMulti && !item.All {
 			mark = "[ ] "
 			if m.selected[idx] {
-				if m.opts.OrderedSelection {
-					mark = fmt.Sprintf("[%d:%s] ", max(1, m.selectedOrdinal(idx)), selectorRoleInitial(m.selectedRole(idx)))
-				} else {
-					mark = "[x] "
-				}
+				mark = "[x] "
 			}
 		}
 		lines = append(lines, m.styleSelectorRow(styles, item, first+row == cursor, formatSelectorItemLine(pointer, mark, item, widths)))
@@ -6291,12 +6172,6 @@ func (m selectorModel) View() string {
 		} else {
 			if m.opts.AllowForceToggle {
 				footer += fmt.Sprintf("  f force:%v", m.opts.ForceEnabled)
-			}
-			if m.opts.AllowRoleToggle {
-				footer += "  a toggle payload/follow-only"
-			}
-			if m.opts.AllowStackOptions {
-				footer += fmt.Sprintf("  s shape:%s  r rebase:%s  c conflicts:%s", emptyDefault(m.opts.StackOptions.Shape, "auto"), emptyDefault(m.opts.StackOptions.RebaseMode, "auto"), emptyDefault(m.opts.StackOptions.ConflictStrategy, "prefer-clean"))
 			}
 		}
 		lines = append(lines, styles.Help.Render(footer))
@@ -6609,9 +6484,6 @@ func formatSelectorItemLine(pointer string, mark string, item selectorItem, widt
 }
 
 func selectorLegend(opts selectorOptions) string {
-	if opts.OrderedSelection {
-		return "status: selection order defines the line; P = payload, F = follow-only; missing rows are disabled"
-	}
 	if opts.MoveToMain {
 		return "status: only Workspaces with no unique commits and behind Main are selected by default; uncheck any to leave alone"
 	}
@@ -6630,9 +6502,6 @@ func selectorLegend(opts selectorOptions) string {
 func selectorHint(opts selectorOptions) string {
 	if opts.Mode == selectorSingle {
 		return "Choose the Workspace to open. Press / to filter by handle, status, marker, or path."
-	}
-	if opts.OrderedSelection {
-		return "Choose Line Stacking order. Space toggles and advances in selection order; press a on a selected row to toggle payload/follow-only. The target Workspace is disabled."
 	}
 	if opts.MoveToMain {
 		return "Choose Workspaces to move to the Main Workspace line. Movable rows start checked; press space to leave one alone."
@@ -6690,18 +6559,6 @@ func selectorItemsForClose(infos []workspaceInfo, force bool) []selectorItem {
 	return items
 }
 
-func selectorItemsForStack(infos []workspaceInfo) []selectorItem {
-	items := []selectorItem{{Handle: "All", Status: "default", Markers: "stack-relevant", All: true}}
-	for _, info := range infos {
-		if info.Main {
-			continue
-		}
-		disabled := !isStackRelevant(info) && !isMovableToMain(info)
-		items = append(items, selectorItem{Handle: info.Ref.Handle, Path: info.Path, Status: statusLabel(info), Markers: strings.Join(markers(info), ","), Disabled: disabled})
-	}
-	return items
-}
-
 func selectorItemsForMoveToMain(infos []workspaceInfo) []selectorItem {
 	items := make([]selectorItem, 0, len(infos))
 	for _, info := range infos {
@@ -6739,32 +6596,6 @@ func moveToMainStatusLabel(info workspaceInfo) string {
 		return "up-to-main"
 	}
 	return statusLabel(info)
-}
-
-func selectorItemsForLineStack(infos []workspaceInfo, target stackTargetResolution) []selectorItem {
-	items := make([]selectorItem, 0, len(infos))
-	for _, info := range infos {
-		itemMarkers := markers(info)
-		isTarget := target.Handle != "" && info.Ref.Handle == target.Handle
-		if isTarget && !markerPresent(itemMarkers, "target") {
-			if len(itemMarkers) == 1 && itemMarkers[0] == "-" {
-				itemMarkers = []string{"target"}
-			} else {
-				itemMarkers = append(itemMarkers, "target")
-			}
-		}
-		items = append(items, selectorItem{Handle: info.Ref.Handle, Path: info.Path, Status: statusLabel(info), Markers: strings.Join(itemMarkers, ","), Role: lineStackRoleForInfo(info), Disabled: info.Missing || isTarget})
-	}
-	return items
-}
-
-func markerPresent(markers []string, needle string) bool {
-	for _, marker := range markers {
-		if marker == needle {
-			return true
-		}
-	}
-	return false
 }
 
 type styles struct{ Title, Selected, Disabled, Help, Warn, Conflict, Stacked, Empty, Missing, Unstacked, Marker, Main lipgloss.Style }
@@ -6826,16 +6657,6 @@ func styleStatus(s styles, status string, line string) string {
 	default:
 		return line
 	}
-}
-
-func cycle(current string, values []string) string {
-	current = emptyDefault(strings.TrimSpace(strings.ToLower(current)), values[0])
-	for i, value := range values {
-		if current == value {
-			return values[(i+1)%len(values)]
-		}
-	}
-	return values[0]
 }
 
 func emptyDefault(value, def string) string {

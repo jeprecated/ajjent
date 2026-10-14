@@ -93,39 +93,24 @@ func TestBookmarkSourceAllBoundary(t *testing.T) {
 			t.Fatalf("%s: stackable=%v inAll=%v status=%s", tc.source.Ref.label(), tc.source.stackable(), tc.source.inAll(), tc.source.status())
 		}
 	}
-	items := mapSelectorItemsByHandle(selectorItemsForBookmarkSources([]bookmarkSource{local, remote, inTrunk, represented, refConflict}))
-	if _, ok := items["main"]; ok {
-		t.Fatal("represented bookmarks must be hidden from the Stack selector")
+	st := &stackGraphState{target: stackTargetResolution{Handle: "default"}, sources: []bookmarkSource{local, remote, inTrunk, represented, refConflict}}
+	lines := stackGraphLinesByKey(st.lines("auto"))
+	if line := lines["main"]; line.Selectable || line.Status != "already in default@" {
+		t.Fatalf("represented bookmarks must not be selectable in the graph Stack, got %+v", line)
 	}
-	if item := items["feat/a"]; item.Kind != selectorKindBookmark || item.Disabled || item.ExplicitOnly || item.Path != "" {
-		t.Fatalf("unexpected local bookmark row %+v", item)
+	if line := lines["feat/a"]; line.Kind != stackLineBookmark || !line.Selectable || !line.InAll || line.Status != "ready" {
+		t.Fatalf("unexpected local bookmark line %+v", line)
 	}
-	if !items["bump@origin"].ExplicitOnly || !items["old"].ExplicitOnly {
-		t.Fatal("remote and in-trunk rows must need explicit selection")
+	if lines["bump@origin"].InAll || !lines["bump@origin"].Selectable || lines["old"].InAll || !lines["old"].Selectable {
+		t.Fatal("remote and in-trunk lines must need explicit selection")
 	}
-	if !items["split"].Disabled {
-		t.Fatal("ref-conflicted bookmark row must be disabled")
+	if lines["split"].Selectable || lines["split"].Status != "ref-conflict" {
+		t.Fatal("ref-conflicted bookmark line must not be selectable")
 	}
-}
-
-func TestMultiSelectorAllRowSkipsExplicitOnlyRows(t *testing.T) {
-	model := selectorModel{
-		opts: selectorOptions{Mode: selectorMulti, AllDefault: true, Items: []selectorItem{
-			{Handle: "All", All: true},
-			{Handle: "alpha"},
-			{Handle: "feat/a", Kind: selectorKindBookmark},
-			{Handle: "bump@origin", Kind: selectorKindBookmark, ExplicitOnly: true},
-		}},
-		selected: map[int]bool{},
-	}
-	model = model.submit()
-	if got := selectorHandles(model.result.Items); strings.Join(got, ",") != "alpha,feat/a" {
-		t.Fatalf("expected All to skip explicit-only rows, got %v", got)
-	}
-	model.selected = map[int]bool{3: true}
-	model = model.submit()
-	if got := selectorHandles(model.result.Items); strings.Join(got, ",") != "bump@origin" {
-		t.Fatalf("expected an explicit check to submit the explicit-only row, got %v", got)
+	for _, line := range st.lines("line") {
+		if line.Selectable {
+			t.Fatalf("bookmarks are never Line Stack Inputs, got %+v", line)
+		}
 	}
 }
 

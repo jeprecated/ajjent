@@ -247,25 +247,6 @@ func findBookmarkSource(sources []bookmarkSource, refs []bookmarkRef, label stri
 	return bookmarkSource{}, fmt.Errorf("no Workspace or bookmark named %q", label)
 }
 
-func selectorItemsForBookmarkSources(sources []bookmarkSource) []selectorItem {
-	items := []selectorItem{}
-	for _, source := range sources {
-		if !source.Ref.Conflict && !source.stackable() {
-			continue
-		}
-		items = append(items, selectorItem{
-			Kind:         selectorKindBookmark,
-			Handle:       source.Ref.label(),
-			Status:       source.status(),
-			Markers:      source.markers(),
-			Description:  source.Ref.Description,
-			Disabled:     !source.stackable(),
-			ExplicitOnly: !source.inAll(),
-		})
-	}
-	return items
-}
-
 // stackInput is one Stack Input: a Workspace (Handle set) or a bookmark
 // source (Commit set to its exact selected target).
 type stackInput struct {

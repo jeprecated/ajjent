@@ -194,8 +194,6 @@ func TestSelectorNormalModeKeysNeverEditFilter(t *testing.T) {
 	selectors := map[string]selectorOptions{
 		"open":         {Title: "Open Workspace", Mode: selectorSingle, Items: items()},
 		"close":        {Title: "Close Workspaces", Mode: selectorMulti, Items: items(), AllowForceToggle: true},
-		"stack":        {Title: "Stack Workspaces", Mode: selectorMulti, Items: items(), AllDefault: true, AllowStackOptions: true},
-		"line-stack":   {Title: "Line Stack Workspaces", Mode: selectorMulti, Items: items(), OrderedSelection: true, AllowRoleToggle: true},
 		"move-to-main": {Title: "Move Workspaces to Main", Mode: selectorMulti, Items: items(), MoveToMain: true},
 		"tidy":         {Title: "Tidy Workspaces", Mode: selectorMulti, Items: items(), Tidy: true, AllowForceToggle: true},
 	}
@@ -226,7 +224,7 @@ func TestSelectorNormalModeKeysNeverEditFilter(t *testing.T) {
 			m = typeKeys(t, m, "jkqufpvsrca? x")
 			m, _ = pressKey(t, m, tea.KeyBackspace)
 			m, _ = pressKey(t, m, tea.KeyBackspace)
-			if m.filter != "jkqufpvsrca?" || m.opts.ForceEnabled || m.previewOpen || m.showHelp || m.refresh != nil || m.opts.StackOptions.Shape != "" {
+			if m.filter != "jkqufpvsrca?" || m.opts.ForceEnabled || m.previewOpen || m.showHelp || m.refresh != nil {
 				t.Fatalf("filter mode ran commands: filter=%q force=%v preview=%v help=%v", m.filter, m.opts.ForceEnabled, m.previewOpen, m.showHelp)
 			}
 			for m.filter != "" {
@@ -281,10 +279,6 @@ func TestSelectorNormalModeKeysNeverEditFilter(t *testing.T) {
 		})
 	}
 	// Bound command letters still run in normal mode.
-	stack := newSelectorModel(selectors["stack"])
-	if stack = typeKeys(t, stack, "s"); stack.filter != "" || stack.opts.StackOptions.Shape != "linear" {
-		t.Fatalf("stack option key not bound: filter=%q shape=%q", stack.filter, stack.opts.StackOptions.Shape)
-	}
 	closeSel := newSelectorModel(selectors["close"])
 	if closeSel = typeKeys(t, closeSel, "f"); !closeSel.opts.ForceEnabled {
 		t.Fatal("f not bound in Close")
@@ -366,20 +360,6 @@ func TestSelectAllVisibleInFilterModeKeepsTyping(t *testing.T) {
 	}
 	if got := strings.Join(selectorHandles(m.selectedItems()), ","); got != "summon-a,summon-b" {
 		t.Fatalf("ctrl+a in filter mode: %s", got)
-	}
-}
-
-func TestSelectAllVisibleOrderedSelection(t *testing.T) {
-	items := []selectorItem{{Handle: "a"}, {Handle: "b"}, {Handle: "c"}, {Handle: "d", Disabled: true}}
-	m := newSelectorModel(selectorOptions{Title: "Line Stack Workspaces", Mode: selectorMulti, Items: items, OrderedSelection: true})
-	m.toggleSelection(2)
-	m = ctrlA(t, m)
-	if got := strings.Join(selectorHandles(m.selectedItems()), ","); got != "c,a,b" {
-		t.Fatalf("new rows must append in visible order after existing order: %s", got)
-	}
-	m = ctrlA(t, m)
-	if len(m.selectedItems()) != 0 || len(m.selectedOrder) != 0 {
-		t.Fatalf("deselect-all left order: %v", m.selectedOrder)
 	}
 }
 

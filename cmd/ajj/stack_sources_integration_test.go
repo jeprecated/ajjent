@@ -97,28 +97,39 @@ func TestDiscoverBookmarkSourcesRealRepoClassifiesLines(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	items := mapSelectorItemsByHandle(selectorItemsForBookmarkSources(sources))
-	for _, label := range []string{"main", "main@git", "feat/a@git"} {
-		if _, ok := items[label]; ok {
-			t.Fatalf("expected %s to be hidden, got rows %+v", label, items)
+	lines := stackGraphLinesByKey((&stackGraphState{target: stackTargetResolution{Handle: "default"}, sources: sources}).lines("auto"))
+	for _, label := range []string{"main@git", "feat/a@git"} {
+		if _, ok := lines[label]; ok {
+			t.Fatalf("expected %s not to be a line of work, got %+v", label, lines)
 		}
 	}
-	if item := items["feat/a"]; item.Disabled || item.ExplicitOnly || item.Status != "unstacked" || item.Description != "feat: a" {
-		t.Fatalf("unexpected feat/a row %+v", item)
+	if line := lines["main"]; line.Selectable || line.Status != "already in default@" {
+		t.Fatalf("expected the represented bookmark to be unselectable, got %+v", line)
 	}
-	if item := items["remote-only@origin"]; item.Disabled || !item.ExplicitOnly || item.Markers != "remote,untracked" {
-		t.Fatalf("unexpected remote-only row %+v", item)
+	if line := lines["feat/a"]; !line.Selectable || !line.InAll || line.Status != "ready" || line.Source.Ref.Description != "feat: a" {
+		t.Fatalf("unexpected feat/a line %+v", line)
 	}
-	// Once the target is behind trunk, a line already in trunk is explicit-only.
+	if line := lines["remote-only@origin"]; !line.Selectable || line.InAll || line.Status != "remote" || line.Source.markers() != "remote,untracked" {
+		t.Fatalf("unexpected remote-only line %+v", line)
+	}
+	// Once the target is behind trunk, a line already in trunk needs explicit selection.
 	runJJ(t, "-R", repo.defaultPath, "bookmark", "set", "main", "-r", repo.featA)
 	sources, _, err = discoverBookmarkSources(repo.defaultPath, "default")
 	if err != nil {
 		t.Fatal(err)
 	}
-	items = mapSelectorItemsByHandle(selectorItemsForBookmarkSources(sources))
-	if item := items["feat/a"]; item.Status != "in-trunk" || !item.ExplicitOnly {
-		t.Fatalf("expected feat/a in-trunk and explicit-only, got %+v", item)
+	lines = stackGraphLinesByKey((&stackGraphState{target: stackTargetResolution{Handle: "default"}, sources: sources}).lines("auto"))
+	if line := lines["feat/a"]; line.Status != "in trunk" || !line.Selectable || line.InAll {
+		t.Fatalf("expected feat/a in trunk and explicit-only, got %+v", line)
 	}
+}
+
+func stackGraphLinesByKey(lines []stackGraphLine) map[string]stackGraphLine {
+	byKey := make(map[string]stackGraphLine, len(lines))
+	for _, line := range lines {
+		byKey[line.Key] = line
+	}
+	return byKey
 }
 
 func TestRunStackRealRepoStacksBookmarksWithoutMovingThem(t *testing.T) {
