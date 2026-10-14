@@ -108,8 +108,11 @@ type stackGraphModel struct {
 	st     *stackGraphState
 	styles stackGraphStyles
 
-	shape         string
-	selected      []string
+	shape    string
+	selected []string
+	// cuts stacks a selected line only up to one of its commits (change
+	// mode), by line key; lines without a cut are stacked whole.
+	cuts          map[string]string
 	moveBookmarks []string
 	tidy          bool
 	// cursor indexes stops() in line mode and nodes() in change mode.
@@ -275,6 +278,12 @@ func (m stackGraphModel) cursorHighlight() map[string]bool {
 	}
 	set := map[string]bool{entry.ChangeID: true}
 	if m.changeMode {
+		// Space here stacks the line up to this commit: show what that is.
+		if l, ok := m.lineUnderCursor(); ok && l.Selectable && m.st.payloads[l.Key][entry.ChangeID] {
+			for id := range m.st.cutPayload(l.Key, entry.CommitID) {
+				set[id] = true
+			}
+		}
 		return set
 	}
 	if l, ok := m.lineUnderCursor(); ok {
@@ -302,7 +311,7 @@ func (m *stackGraphModel) toggleChangeMode() {
 				break
 			}
 		}
-		m.msg = "by change: j/k step one commit; space selects the line that owns it"
+		m.msg = "by change: j/k step one commit; space stacks its line up to that commit"
 		return
 	}
 	stops := m.stops()
@@ -373,6 +382,7 @@ func (m stackGraphModel) lineUnderCursor() (stackGraphLine, bool) {
 	if len(heads) > 0 {
 		return heads[0], true
 	}
+	// A commit above a line's cut still belongs to that line.
 	owners := stackGraphOwners(lines, m.st.payloads, m.selected)
 	if key, ok := owners[entry.ChangeID]; ok {
 		return stackGraphLineByKey(lines, key)
@@ -381,15 +391,48 @@ func (m stackGraphModel) lineUnderCursor() (stackGraphLine, bool) {
 }
 
 func (m stackGraphModel) previewSpec() stackPreviewSpec {
-	return stackPreviewSpec{id: m.previewID, shape: m.shape, selected: append([]string{}, m.selected...), moveBookmarks: append([]string{}, m.moveBookmarks...), tidy: m.tidy}
+	return stackPreviewSpec{id: m.previewID, shape: m.shape, selected: append([]string{}, m.selected...), cuts: m.cuts, moveBookmarks: append([]string{}, m.moveBookmarks...), tidy: m.tidy}
+}
+
+// payloads is what each line brings into the target, narrowed to its cut.
+func (m stackGraphModel) payloads() map[string]map[string]bool {
+	return m.st.payloadsWithCuts(m.cuts)
+}
+
+// selectionLabel names a selected line, with the change it is cut at.
+func (m stackGraphModel) selectionLabel(key string, cuts map[string]string) string {
+	cut, ok := cuts[key]
+	if !ok {
+		return key
+	}
+	for _, entry := range m.st.log {
+		if entry.CommitID == cut {
+			return key + " up to " + shortChangeID(entry.ChangeID)
+		}
+	}
+	return key + " up to " + shortChangeID(cut)
+}
+
+// pruneCuts forgets the cuts of lines that are no longer selected, so a line
+// selected again is stacked whole. The map is replaced, never mutated:
+// earlier specs share it.
+func (m *stackGraphModel) pruneCuts() {
+	kept := map[string]string{}
+	for _, key := range m.selected {
+		if cut, ok := m.cuts[key]; ok {
+			kept[key] = cut
+		}
+	}
+	m.cuts = kept
 }
 
 func (m *stackGraphModel) requestPreview() tea.Cmd {
+	m.pruneCuts()
 	if m.busy != "" {
 		// A load, apply, or undo owns jj; the load's result requests anew.
 		return nil
 	}
-	key := m.shape + "\x00" + strings.Join(m.selected, "\x00") + "\x01" + strings.Join(m.moveBookmarks, "\x00") + fmt.Sprint(m.tidy, m.st.base, m.st.target.Handle)
+	key := m.shape + "\x00" + strings.Join(m.selected, "\x00") + "\x01" + strings.Join(m.moveBookmarks, "\x00") + fmt.Sprint(m.cuts, m.tidy, m.st.base, m.st.target.Handle)
 	if key == m.previewKey {
 		return nil
 	}
@@ -473,7 +516,7 @@ func (m stackGraphModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.done = &result
 		m.doneSpec = m.applying.spec
 		m.doneLines = m.st.lines(m.doneSpec.shape)
-		m.doneOwners = stackGraphOwners(m.doneLines, m.st.payloads, m.doneSpec.selected)
+		m.doneOwners = stackGraphOwners(m.doneLines, m.st.payloadsWithCuts(m.doneSpec.cuts), m.doneSpec.selected)
 		m.appliedBase = m.st.base
 		m.undoAvailable = msg.undoRecorded
 		m.closedPaths = append(m.closedPaths, msg.closedPaths...)
@@ -569,7 +612,13 @@ func (m *stackGraphModel) validSelection(selected []string) []string {
 	lines := m.lines()
 	kept, dropped := []string{}, []string{}
 	for _, key := range selected {
-		if l, ok := stackGraphLineByKey(lines, key); ok && l.Selectable {
+		l, ok := stackGraphLineByKey(lines, key)
+		if cut, isCut := m.cuts[key]; ok && isCut {
+			// A cut must still be a commit of the line, and Line Stack
+			// takes whole Workspaces.
+			ok = m.shape != "line" && m.st.payloads[key][m.changeOfCommit(cut)]
+		}
+		if ok && l.Selectable {
 			kept = append(kept, key)
 		} else {
 			dropped = append(dropped, key)
@@ -578,7 +627,7 @@ func (m *stackGraphModel) validSelection(selected []string) []string {
 	if len(dropped) > 0 {
 		note := "dropped " + strings.Join(dropped, ", ")
 		if m.shape == "line" {
-			note += ": Line Stack takes Workspaces other than the target"
+			note += ": Line Stack takes whole Workspaces other than the target"
 		}
 		if m.msg != "" {
 			// Keep the reason for a reload (a stale or reconciled apply)
@@ -804,8 +853,37 @@ func removeString(items []string, item string) []string {
 	return out
 }
 
+func (m stackGraphModel) changeOfCommit(commit string) string {
+	for _, entry := range m.st.log {
+		if entry.CommitID == commit {
+			return entry.ChangeID
+		}
+	}
+	return ""
+}
+
+// removeCut copies cuts without key; specs already sent share the original.
+func removeCut(cuts map[string]string, key string) map[string]string {
+	out := map[string]string{}
+	for k, cut := range cuts {
+		if k != key {
+			out[k] = cut
+		}
+	}
+	return out
+}
+
+func (m stackGraphModel) selectionLabels() []string {
+	labels := []string{}
+	for _, key := range m.selected {
+		labels = append(labels, m.selectionLabel(key, m.cuts))
+	}
+	return labels
+}
+
 // toggleUnderCursor makes the line under the cursor a Stack Input (or
-// removes it) and moves on to the next selectable head.
+// removes it) and moves on to the next selectable head. In change mode a
+// commit below the line's head stacks the line up to that commit.
 func (m stackGraphModel) toggleUnderCursor() (tea.Model, tea.Cmd) {
 	l, ok := m.lineUnderCursor()
 	switch {
@@ -819,12 +897,48 @@ func (m stackGraphModel) toggleUnderCursor() (tea.Model, tea.Cmd) {
 		m.msg = l.Key + ": " + l.Status
 		return m, nil
 	}
+	if entry, ok := m.cursorEntry(); ok && m.changeMode {
+		if entry.ChangeID != l.HeadChange {
+			return m.toggleCut(l, entry)
+		}
+		if _, cut := m.cuts[l.Key]; cut && m.selectedIndex(l.Key) >= 0 {
+			// Up to the head is the whole line.
+			m.cuts = removeCut(m.cuts, l.Key)
+			m.msg = l.Key + " whole line"
+			return m, m.requestPreview()
+		}
+	}
 	if i := m.selectedIndex(l.Key); i >= 0 {
 		m.selected = append(m.selected[:i], m.selected[i+1:]...)
 	} else {
 		m.selected = append(m.selected, l.Key)
 	}
 	m.advanceToNextSelectable()
+	return m, m.requestPreview()
+}
+
+// toggleCut selects line l up to entry, moves its cut there, or removes the
+// line when it is already cut there.
+func (m stackGraphModel) toggleCut(l stackGraphLine, entry stackGraphLogEntry) (tea.Model, tea.Cmd) {
+	switch {
+	case m.shape == "line":
+		m.msg = "Line Stack takes whole Workspaces: press s to switch shape to stack up to a change"
+		return m, nil
+	case !m.st.payloads[l.Key][entry.ChangeID]:
+		m.msg = "that change is already in " + m.st.target.Handle + "@"
+		return m, nil
+	}
+	i := m.selectedIndex(l.Key)
+	if i >= 0 && m.cuts[l.Key] == entry.CommitID {
+		m.selected = append(m.selected[:i], m.selected[i+1:]...)
+		return m, m.requestPreview()
+	}
+	if i < 0 {
+		m.selected = append(m.selected, l.Key)
+	}
+	m.cuts = removeCut(m.cuts, l.Key)
+	m.cuts[l.Key] = entry.CommitID
+	m.msg = m.selectionLabel(l.Key, m.cuts)
 	return m, m.requestPreview()
 }
 
@@ -1073,7 +1187,7 @@ func (m stackGraphModel) headerLines() []string {
 	if len(m.selected) > 0 {
 		parts := []string{}
 		for i, key := range m.selected {
-			part := s.input(i).Render(fmt.Sprintf("%d %s", i+1, key))
+			part := s.input(i).Render(fmt.Sprintf("%d %s", i+1, m.selectionLabel(key, m.cuts)))
 			if m.shape == "line" && i == 0 {
 				part += s.dim.Render(" (base)")
 			}
@@ -1202,7 +1316,7 @@ func (m stackGraphModel) nowTail(lines []stackGraphLine, entry stackGraphLogEntr
 }
 
 func (m stackGraphModel) nowRows(lines []stackGraphLine) []string {
-	owners := stackGraphOwners(lines, m.st.payloads, m.selected)
+	owners := stackGraphOwners(lines, m.payloads(), m.selected)
 	highlight := m.cursorHighlight()
 	cursorKey := ""
 	if !m.changeMode {
@@ -1348,7 +1462,7 @@ func (m stackGraphModel) afterPane(lines []stackGraphLine) ([]string, []string) 
 		extras = append(extras, "    "+s.yellow.Render(note))
 	}
 	extras = append(extras, m.outcomeLines(m.preview)...)
-	owners := stackGraphOwners(lines, m.st.payloads, m.selected)
+	owners := stackGraphOwners(lines, m.payloads(), m.selected)
 	closing := []string(nil)
 	if m.tidy {
 		closing = m.preview.tidyCloses
@@ -1377,7 +1491,7 @@ func (m stackGraphModel) footerLine() string {
 		if len(extra) > 0 {
 			options += ", " + strings.Join(extra, ", ")
 		}
-		prompt := s.yellow.Bold(true).Render(fmt.Sprintf("Stack %s %s (%s)?", strings.Join(m.selected, ", "), into, options))
+		prompt := s.yellow.Bold(true).Render(fmt.Sprintf("Stack %s %s (%s)?", strings.Join(m.selectionLabels(), ", "), into, options))
 		if m.force {
 			prompt += " " + s.red.Render("It will leave conflicts to resolve.")
 		}

@@ -164,6 +164,10 @@ func syntheticStackGraphState() *stackGraphState {
 			"fix@origin":  {id('2'): true},
 			"feat@origin": {id('b'): true, id('2'): true},
 		},
+		parents: map[string][]string{
+			commit('d'): {commit('0')}, commit('a'): {commit('1')}, commit('1'): {commit('0')},
+			commit('b'): {commit('2')}, commit('2'): {commit('0')}, commit('c'): {commit('0')},
+		},
 		unavailable: map[string]string{},
 	}
 	st.byHandle = mapInfosByHandle(st.infos)
@@ -339,20 +343,25 @@ func TestStackGraphModelMoldsSelectionWithKeys(t *testing.T) {
 	if strings.Join(m.selected, ",") != "alpha@,bravo@" {
 		t.Fatalf("J did not reorder: %v", m.selected)
 	}
-	// In change mode a payload row belongs to its line: space there toggles the line.
+	// In change mode space on a payload row stacks its line up to that row.
 	m = stackGraphDrive(t, m, stackKey("c"))
 	if !m.changeMode {
 		t.Fatal("c did not enter change mode")
 	}
 	m = m.cursorTo(t, id('1'))
 	m = stackGraphDrive(t, m, stackKey(" "))
-	if strings.Join(m.selected, ",") != "bravo@" {
-		t.Fatalf("space on a payload row did not toggle its line: %v", m.selected)
+	if strings.Join(m.selected, ",") != "alpha@,bravo@" || m.cuts["alpha@"] != strings.Repeat("1", 40) {
+		t.Fatalf("space on a payload row did not cut its line there: %v %v", m.selected, m.cuts)
 	}
-	// Space advanced to bravo's head; leaving change mode lands on that stop.
+	// The cursor stays on the cut; leaving change mode lands on its line's stop.
 	m = stackGraphDrive(t, m, stackKey("c"))
-	if m.changeMode || m.stopLineKey() != "bravo@" {
+	if m.changeMode || m.stopLineKey() != "alpha@" {
 		t.Fatalf("leaving change mode must land on the commit's stop: mode=%v line=%s", m.changeMode, m.stopLineKey())
+	}
+	// Space in line mode removes the cut line, and its cut with it.
+	m = stackGraphDrive(t, m, stackKey(" "))
+	if strings.Join(m.selected, ",") != "bravo@" || len(m.cuts) != 0 {
+		t.Fatalf("space on the cut line's stop did not remove it: %v %v", m.selected, m.cuts)
 	}
 	// a selects everything stack-relevant (not the remote bookmark); again clears it.
 	m = stackGraphDrive(t, m, stackKey("a"))
@@ -1473,5 +1482,90 @@ func TestStackGraphModelFetchesAndReloads(t *testing.T) {
 	m = stackGraphDrive(t, m, previewCmd())
 	if fetches != 2 || len(backend.loads) != 2 {
 		t.Fatalf("held f did not run after the preview: fetches=%d loads=%v", fetches, backend.loads)
+	}
+}
+
+// In change mode Space stacks a line up to the commit under the cursor.
+func TestStackGraphChangeModeStacksUpToHere(t *testing.T) {
+	m, backend := newSyntheticStackGraphModel(t)
+	id := func(c byte) string { return strings.Repeat(string(c), 32) }
+	commit := func(c byte) string { return strings.Repeat(string(c), 40) }
+	m = stackGraphDrive(t, m, stackKey("c"))
+	m = m.cursorTo(t, id('1'))
+	if view := stripANSI(m.View()); !rowHasCursor(view, "1 feat: alpha") || rowHasCursor(view, "a alpha@") {
+		t.Fatalf("the highlight must cover alpha@ up to 1 only:\n%s", view)
+	}
+	m = stackGraphDrive(t, m, stackKey(" "))
+	spec := backend.previews[len(backend.previews)-1]
+	if strings.Join(spec.selected, ",") != "alpha@" || spec.cuts["alpha@"] != commit('1') {
+		t.Fatalf("space must select alpha@ up to 1: %+v", spec)
+	}
+	if view := stripANSI(m.View()); !strings.Contains(view, "1 alpha@ up to 11111111") {
+		t.Fatalf("the header must name the cut:\n%s", view)
+	}
+	if owners := stackGraphOwners(m.lines(), m.payloads(), m.selected); owners[id('a')] == "alpha@" || owners[id('1')] != "alpha@" {
+		t.Fatalf("only the commits up to the cut are stacked: %v", owners)
+	}
+	// Up to the head is the whole line; Space on the head again removes it.
+	m = m.cursorTo(t, id('a'))
+	m = stackGraphDrive(t, m, stackKey(" "))
+	if len(m.selected) != 1 || len(m.cuts) != 0 {
+		t.Fatalf("space on the head must widen to the whole line: selected=%v cuts=%v", m.selected, m.cuts)
+	}
+	m = stackGraphDrive(t, m, stackKey(" "))
+	if len(m.selected) != 0 {
+		t.Fatalf("space on the head of a whole line must remove it: %v", m.selected)
+	}
+	// Space on the cut commit again removes the line, and its cut is not
+	// reused when the line is selected again in line mode.
+	m = m.cursorTo(t, id('1'))
+	m = stackGraphDrive(t, m, stackKey(" "), stackKey(" "))
+	if len(m.selected) != 0 || len(m.cuts) != 0 {
+		t.Fatalf("space on the cut must remove the line: selected=%v cuts=%v", m.selected, m.cuts)
+	}
+	// Line Stack takes whole Workspaces.
+	for m.shape != "line" {
+		m = stackGraphDrive(t, m, stackKey("s"))
+	}
+	m = m.cursorTo(t, id('1'))
+	m = stackGraphDrive(t, m, stackKey(" "))
+	if len(m.selected) != 0 || !strings.Contains(m.msg, "Line Stack takes whole Workspaces") {
+		t.Fatalf("line shape must refuse a cut: selected=%v msg=%q", m.selected, m.msg)
+	}
+	// Switching to line shape drops a cut selection.
+	m = stackGraphDrive(t, m, stackKey("s"))
+	m = m.cursorTo(t, id('1'))
+	m = stackGraphDrive(t, m, stackKey(" "))
+	for m.shape != "line" {
+		m = stackGraphDrive(t, m, stackKey("s"))
+	}
+	if len(m.selected) != 0 || !strings.Contains(m.msg, "dropped alpha@") {
+		t.Fatalf("line shape must drop the cut selection: selected=%v msg=%q", m.selected, m.msg)
+	}
+}
+
+func TestStackGraphStacksALineUpToAChange(t *testing.T) {
+	repo := setupStackGraphRepo(t, false)
+	writeStackGraphFile(t, repo.alphaPath, "alpha-later.txt", "later\n")
+	runJJ(t, "-R", repo.alphaPath, "commit", "-m", "feat: alpha, not ready")
+	m := loadStackGraphModel(t, repo, "auto")
+	m = stackGraphDrive(t, m, stackKey("c"))
+	m = m.cursorTo(t, changeOfCommit(t, m, jjCommit(t, repo.defaultPath, "alpha@--")))
+	m = stackGraphDrive(t, m, stackKey(" "))
+	if m.preview == nil || m.preview.err != nil {
+		t.Fatalf("preview failed: %+v", m.preview)
+	}
+	m = stackGraphDrive(t, m, stackKeys("enter", "y")...)
+	if m.mode != stackGraphDone {
+		t.Fatalf("apply did not finish: msg=%q", m.msg)
+	}
+	in := func(revset string) string {
+		return strings.TrimSpace(jjCombined(t, "-R", repo.defaultPath, "--ignore-working-copy", "log", "--no-graph", "-r", revset, "-T", `description.first_line() ++ "\n"`))
+	}
+	if got := in(`::default@ & description(glob:"feat: alpha*")`); got != "feat: alpha" {
+		t.Fatalf("default@ must hold alpha up to the cut only, got %q", got)
+	}
+	if got := in("alpha@-"); got != "feat: alpha, not ready" {
+		t.Fatalf("alpha@ must keep its later commit, got %q", got)
 	}
 }

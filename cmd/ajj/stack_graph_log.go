@@ -335,12 +335,55 @@ type stackGraphState struct {
 	// payloads holds, per line key, the change ids the line owns at the base
 	// operation: its mutable history that is not in the target.
 	payloads map[string]map[string]bool
+	// parents maps each shown commit to its parent commits.
+	parents map[string][]string
 	// unavailable explains Workspaces whose snapshot failed; they are shown
 	// but cannot be stacked.
 	unavailable map[string]string
 }
 
 func (st *stackGraphState) targetPath() string { return st.target.Path }
+
+// cutPayload is the part of a line of work at or below commit: what
+// stacking the line "up to here" brings into the target.
+func (st *stackGraphState) cutPayload(key, commit string) map[string]bool {
+	changeOf := map[string]string{}
+	for _, entry := range st.log {
+		changeOf[entry.CommitID] = entry.ChangeID
+	}
+	line := st.payloads[key]
+	set := map[string]bool{}
+	seen := map[string]bool{}
+	queue := []string{commit}
+	for len(queue) > 0 {
+		next := queue[0]
+		queue = queue[1:]
+		if seen[next] {
+			continue
+		}
+		seen[next] = true
+		if change := changeOf[next]; line[change] {
+			set[change] = true
+		}
+		queue = append(queue, st.parents[next]...)
+	}
+	return set
+}
+
+// payloadsWithCuts narrows the lines stacked "up to here" to their cut.
+func (st *stackGraphState) payloadsWithCuts(cuts map[string]string) map[string]map[string]bool {
+	if len(cuts) == 0 {
+		return st.payloads
+	}
+	out := make(map[string]map[string]bool, len(st.payloads))
+	for key, ids := range st.payloads {
+		out[key] = ids
+	}
+	for key, commit := range cuts {
+		out[key] = st.cutPayload(key, commit)
+	}
+	return out
+}
 
 func fullChangeIDs(repoPath, operation, revset string) ([]string, error) {
 	return logIDsAtOperation(repoPath, operation, revset, "change_id")
@@ -479,6 +522,19 @@ func loadStackGraphState(repoRoot string, cfg config, project string, workspaceO
 		}
 	}
 	shownRevset := revsetUnion(shown)
+	if len(shown) > 0 {
+		out, err := commandCaptureFn("jj", "-R", path, "--ignore-working-copy", "--color=never", "--no-pager", "--at-op="+st.base, "log", "-r", shownRevset, "--no-graph", "-T", `commit_id ++ "\t" ++ parents.map(|c| c.commit_id()).join(" ") ++ "\n"`)
+		if err != nil {
+			return nil, err
+		}
+		st.parents = map[string][]string{}
+		for _, line := range strings.Split(out, "\n") {
+			commit, parents, ok := strings.Cut(strings.TrimSpace(line), "\t")
+			if ok {
+				st.parents[commit] = strings.Fields(parents)
+			}
+		}
+	}
 	lineOf := func(head string) (map[string]bool, error) {
 		ids, err := fullChangeIDs(path, st.base, "(::"+head+" & ~::"+target.Handle+"@) & "+shownRevset)
 		return stringSet(ids), err
@@ -644,9 +700,11 @@ func stackGraphLineByKey(lines []stackGraphLine, key string) (stackGraphLine, bo
 // stackPreviewSpec is what the user has molded: the order of the selected
 // lines is the input order.
 type stackPreviewSpec struct {
-	id            uint64
-	shape         string
-	selected      []string
+	id       uint64
+	shape    string
+	selected []string
+	// cuts stacks a selected line only up to a commit of it, by line key.
+	cuts          map[string]string
 	moveBookmarks []string
 	tidy          bool
 }
@@ -727,6 +785,14 @@ func (st *stackGraphState) preview(spec stackPreviewSpec) stackPreviewResult {
 		if !ok || !l.Selectable {
 			res.err = fmt.Errorf("%s cannot be stacked here", key)
 			return res
+		}
+		if cut, ok := spec.cuts[key]; ok {
+			if spec.shape == "line" {
+				res.err = fmt.Errorf("Line Stack takes whole Workspaces: %s is selected up to a change", key)
+				return res
+			}
+			inputs = append(inputs, revisionStackInput(shortChangeID(changeIDForCommit(path, st.base, cut, st.log)), cut))
+			continue
 		}
 		if l.Kind == stackLineBookmark {
 			inputs = append(inputs, bookmarkStackInput(l.Source))

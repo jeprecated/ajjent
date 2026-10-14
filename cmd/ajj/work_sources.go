@@ -253,6 +253,9 @@ type stackInput struct {
 	Label  string
 	Handle string
 	Commit string
+	// Revision marks a bare commit (a line stacked up to a change), which no
+	// bookmark names.
+	Revision bool
 }
 
 func workspaceStackInput(handle string) stackInput {
@@ -261,6 +264,10 @@ func workspaceStackInput(handle string) stackInput {
 
 func bookmarkStackInput(source bookmarkSource) stackInput {
 	return stackInput{Label: source.Ref.label(), Commit: source.Ref.Commit}
+}
+
+func revisionStackInput(label, commit string) stackInput {
+	return stackInput{Label: label, Commit: commit, Revision: true}
 }
 
 func workspaceStackInputs(handles ...string) []stackInput {
@@ -337,6 +344,9 @@ func verifyBookmarkInputsUnchanged(repoPath string, inputs []stackInput) error {
 		byLabel[ref.label()] = ref
 	}
 	for _, input := range bookmarks {
+		if input.Revision {
+			continue
+		}
 		ref, ok := byLabel[input.Label]
 		if !ok || !ref.Present || ref.Conflict || ref.Commit != input.Commit {
 			return fmt.Errorf("bookmark %q no longer points at selected commit %s after Stack; inspect the result or run `ajj undo`", input.Label, input.Commit)
