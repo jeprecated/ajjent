@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -1436,7 +1437,7 @@ func TestStackGraphLoadsWithDivergentChange(t *testing.T) {
 	if m.preview == nil {
 		t.Fatal("no preview for alpha")
 	}
-	if err := m.preview.err; err == nil || !strings.Contains(err.Error(), "is divergent (one copy is commit") {
+	if err := m.preview.err; err == nil || !regexp.MustCompile(`^change [k-z]+/\d+ is divergent: abandon the copy`).MatchString(err.Error()) {
 		t.Fatalf("stacking the divergent line must refuse with Ajj's message, got: %v", err)
 	}
 }

@@ -4502,24 +4502,24 @@ func revisionCount(repoPath, revset string) (int, error) {
 
 // changeIDTemplate names each revision by change id, which survives the
 // rewrites a Stack makes. A divergent change id names several revisions, so
-// those also carry the commit id and are refused by parseChangeIDs.
-const changeIDTemplate = "change_id.short() ++ if(divergent, \"\\t\" ++ commit_id.short()) ++ \"\\n\""
+// those also carry jj's change offset and are refused by parseChangeIDs.
+const changeIDTemplate = "change_id.short() ++ if(divergent, \"\\t\" ++ change_offset) ++ \"\\n\""
 
 type divergentChangeError struct {
 	ChangeID string
-	CommitID string
+	Offset   string
 }
 
 func (e divergentChangeError) Error() string {
-	return fmt.Sprintf("change %s is divergent (one copy is commit %s); abandon the copy you do not want, then stack again", e.ChangeID, e.CommitID)
+	return fmt.Sprintf("change %s/%s is divergent: abandon the copy you do not want, then stack again", e.ChangeID, e.Offset)
 }
 
 func parseChangeIDs(out string) ([]string, error) {
 	ids := []string{}
 	for _, line := range strings.Split(out, "\n") {
-		change, commit, divergent := strings.Cut(strings.TrimSpace(line), "\t")
+		change, offset, divergent := strings.Cut(strings.TrimSpace(line), "\t")
 		if divergent {
-			return nil, divergentChangeError{ChangeID: change, CommitID: commit}
+			return nil, divergentChangeError{ChangeID: change, Offset: offset}
 		}
 		ids = append(ids, change)
 	}
