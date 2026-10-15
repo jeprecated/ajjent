@@ -844,7 +844,9 @@ func setupRealStackMergeRepoWithColocation(t *testing.T, conflicting bool, descr
 
 func runJJ(t *testing.T, args ...string) {
 	t.Helper()
-	cmd := exec.Command("jj", args...)
+	// Fixture Workspaces stand in for Ajj-created ones, so like those they are
+	// not colocated; only an explicit --colocate makes a colocated repository.
+	cmd := exec.Command("jj", append([]string{"--config", workspaceAddNoColocate}, args...)...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("jj %s failed: %v\n%s", strings.Join(args, " "), err, out)

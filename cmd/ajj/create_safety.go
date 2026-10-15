@@ -130,7 +130,7 @@ func (s *createSafety) create(repo string, req createRequestV1) error {
 	if err := os.MkdirAll(filepath.Dir(s.record.Destination), 0o755); err != nil {
 		return err
 	}
-	if err := createMachineCommandFn("jj", "-R", repo, "workspace", "add", "--name", req.Child.Workspace, "--revision", req.baseCommit(), s.record.Destination); err != nil {
+	if err := createMachineCommandFn("jj", "-R", repo, "workspace", "add", "--config", workspaceAddNoColocate, "--name", req.Child.Workspace, "--revision", req.baseCommit(), s.record.Destination); err != nil {
 		return err
 	}
 	addOperation, err := currentOperationFullID(repo)

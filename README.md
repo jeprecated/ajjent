@@ -139,7 +139,7 @@ repositories. Setting `programs.ajjent.package` yourself bypasses it.
 `ajj` shells out to `jj` (Jujutsu), which must be on `PATH`.
 
 - Minimum supported `jj`: 0.41.0
-- Full test suite passes against: 0.43.0, 0.44.0 and 0.45.1
+- Full test suite passes against: 0.43.0, 0.44.0, 0.45.1 and 0.46.0
 - Machine create `noCleanup` trusts exactly one release per build; see [the trusted Jujutsu release](#trusted-jujutsu-release-for-nocleanup)
 
 Commands that only print help or version information do not require `jj`; repo-aware commands do.
@@ -155,7 +155,7 @@ go build -ldflags "-X github.com/jeprecated/ajjent/internal/buildcfg.NoCleanupJJ
 - **Default: 0.43.0.** `go install`, release binaries, and a plain `go build` or `go test` trust the release CI installs.
 - **Nix: the `jujutsu` the package is built with.** `nix/package.nix` takes `noCleanupJjVersion ? jujutsu.version`; override it, or `jujutsu`, to choose differently.
 - **The build's tests are the validation.** The `TestNoCleanup*` tests run the real proof against the jj on `PATH` and fail when that jj is not the trusted release, so a build that ran its tests cannot trust a release they did not exercise. A build that skips its tests has no such evidence.
-- **Runs so far:** with jj 0.43.0, 0.44.0 and 0.45.1, each as the trusted release, the whole suite passes. `jj workspace add` writes the same two operations on 0.43.0 and 0.45.1.
+- **Runs so far:** with jj 0.43.0, 0.44.0, 0.45.1 and 0.46.0, each as the trusted release, the whole suite passes. `jj workspace add` writes the same two operations on 0.43.0 and 0.45.1.
 
 Only a plain `x.y.z` setting is honoured; anything else trusts no release and safe mode is refused. At runtime the match stays exact: `jj x.y.z` as Nix builds print it, or, for 0.43.0, the official release binary's own tag-commit suffix. Development, dirty and other-commit builds are refused.
 

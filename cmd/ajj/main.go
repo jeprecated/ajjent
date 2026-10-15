@@ -686,7 +686,7 @@ func createWorkspaceInternal(repoRoot string, cfg config, project string, handle
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return fmt.Errorf("create Workspace parent: %w", err)
 	}
-	addArgs := []string{"-R", repoRoot, "workspace", "add", "--name", handle}
+	addArgs := []string{"-R", repoRoot, "workspace", "add", "--config", workspaceAddNoColocate, "--name", handle}
 	if revision != "" {
 		// Pass the exact commit id as a separate argv value; never shell-construct.
 		addArgs = append(addArgs, "--revision", revision)
@@ -835,6 +835,13 @@ func workspaceParentCommitID(path string) (string, error) {
 	}
 	return ids[0], nil
 }
+
+// workspaceAddNoColocate keeps every Workspace Ajj creates a plain jj
+// workspace, as it was before jj 0.46. From 0.46, `jj workspace add` in a
+// colocated repository also creates a Git worktree by running the `git` program,
+// whose metadata outlives Ajj's close (directory first, then forget) and blocks
+// re-adding the same handle. Older jj accepts and ignores the setting here.
+const workspaceAddNoColocate = "git.colocate=false"
 
 // cleanupFailedRevisionWorkspace forgets the Workspace handle and removes its
 // directory after a failed exact-revision create, leaving no dangling registration
