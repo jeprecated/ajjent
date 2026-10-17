@@ -44,5 +44,5 @@ A preview that introduces conflicts (conflicted commits that were not conflicted
 
 - What the user sees before pressing Enter is what the repository will contain, including jj's real conflict verdict, bookmark refusals, and the Tidy plan. The cost is jj's own: a detached chain of operations and the commits it writes into the store for each preview.
 - The flat Stack and Line Stack selectors, their option toggles, and the ordered-selection role toggle are gone; the graph view is the only interactive Stack. `--rebase-mode` and `--conflict-strategy` remain flags and config.
-- `jj workspace forget` is not previewable: it writes the repository-wide workspace store, so the after pane annotates the cursors Tidy would close instead of removing them.
+- `jj workspace forget` is not previewable: it writes the repository-wide workspace store. The after pane instead leaves out the closing heads that forgetting abandons (empty and undescribed), listing them struck through below the graph, and annotates any other head Tidy would close.
 - The view requires jj's detached operations (already the minimum since ADR 0010) and a terminal; the non-terminal errors are unchanged.

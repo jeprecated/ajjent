@@ -969,8 +969,19 @@ func TestStackGraphTidyClosesStackedInputsAndKeepsInProgress(t *testing.T) {
 	if strings.Join(m.preview.tidyCloses, ",") != "alpha" || len(m.preview.tidyKept) != 1 || !strings.Contains(m.preview.tidyKept[0], "bravo@ kept: in-progress changes") {
 		t.Fatalf("unexpected tidy plan: closes=%v kept=%v", m.preview.tidyCloses, m.preview.tidyKept)
 	}
-	if view := stripANSI(m.View()); !strings.Contains(view, "tidy closes alpha@") || !strings.Contains(view, "bravo@ kept: in-progress changes") || !strings.Contains(view, "alpha@") || !strings.Contains(view, "✂ tidy closes this Workspace") {
-		t.Fatalf("after pane must explain the tidy plan and mark alpha@:\n%s", view)
+	if len(m.preview.tidyGone) != 1 {
+		t.Fatalf("alpha's empty head should be gone after tidy: %+v", m.preview.tidyGone)
+	}
+	alphaHead := m.preview.tidyGone[0].ChangeID
+	for _, entry := range m.preview.log {
+		if entry.ChangeID == alphaHead {
+			t.Fatalf("alpha's abandoned head must not be in the projected graph")
+		}
+	}
+	view := stripANSI(m.View())
+	_, gone, _ := strings.Cut(view, "✂ gone after tidy")
+	if !strings.Contains(view, "tidy closes alpha@") || !strings.Contains(view, "bravo@ kept: in-progress changes") || !strings.Contains(gone, "alpha@") {
+		t.Fatalf("after pane must explain the tidy plan and list alpha@ as gone:\n%s", view)
 	}
 	if got := stackGraphOperation(t, repo.defaultPath); got != m.st.base {
 		t.Fatalf("tidy preview moved the repository operation: %s -> %s", m.st.base, got)
@@ -996,6 +1007,9 @@ func TestStackGraphTidyClosesStackedInputsAndKeepsInProgress(t *testing.T) {
 	}
 	if jjRevsetCount(t, repo.defaultPath, "description(substring:\"feat: alpha\") & ::default@") != 1 {
 		t.Fatal("alpha's work must live in the target")
+	}
+	if jjRevsetCount(t, repo.defaultPath, "present("+alphaHead+")") != 0 {
+		t.Fatal("tidy should abandon alpha's empty head, as the preview showed")
 	}
 	if view := stripANSI(m.View()); !strings.Contains(view, "tidy closed alpha@") {
 		t.Fatalf("done view lacks the tidy outcome:\n%s", view)

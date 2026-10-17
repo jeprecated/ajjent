@@ -44,9 +44,24 @@ func stackGraphLogTemplate(repoPath string) string {
 	return stackGraphMarkerTemplate + " ++ (" + template + ")"
 }
 
+// stackGraphLogRevsetExcluding is the user's default log revset without the
+// given revisions.
+func stackGraphLogRevsetExcluding(repoPath, exclude string) (string, error) {
+	out, err := commandCaptureFn("jj", "-R", repoPath, "--ignore-working-copy", "--color=never", "--no-pager", "config", "get", "revsets.log")
+	revset := strings.TrimSpace(out)
+	if err == nil && revset == "" {
+		err = errors.New("revsets.log is not set")
+	}
+	if err != nil {
+		return "", err
+	}
+	return "(" + revset + ") ~ (" + exclude + ")", nil
+}
+
 // loadStackGraphLog renders the repository's default `jj log` (the user's
-// revset, graph style, and colours) at the given operation.
-func loadStackGraphLog(repoPath, operation string, color bool) ([]stackGraphLogEntry, error) {
+// revset, graph style, and colours) at the given operation; logArgs such as
+// -r or --no-graph replace those defaults.
+func loadStackGraphLog(repoPath, operation string, color bool, logArgs ...string) ([]stackGraphLogEntry, error) {
 	colorFlag := "--color=never"
 	if color {
 		colorFlag = "--color=always"
@@ -56,6 +71,7 @@ func loadStackGraphLog(repoPath, operation string, color bool) ([]stackGraphLogE
 		args = append(args, "--at-op="+operation)
 	}
 	args = append(args, "log", "-T", stackGraphLogTemplate(repoPath))
+	args = append(args, logArgs...)
 	out, err := commandCaptureFn("jj", args...)
 	if err != nil {
 		return nil, err
@@ -733,8 +749,10 @@ type stackPreviewResult struct {
 	bookmarkMoves []stackBookmarkMove
 	tidyCloses    []string
 	tidyKept      []string
-	notes         []string
-	top           string
+	// tidyGone are the closing heads Tidy abandons, left out of log.
+	tidyGone []stackGraphLogEntry
+	notes    []string
+	top      string
 }
 
 func (r *stackPreviewResult) hasConflicts() bool {
@@ -895,7 +913,25 @@ func (st *stackGraphState) preview(spec stackPreviewSpec) stackPreviewResult {
 		// The after pane marks the cursors Tidy would close instead.
 		res.tidyCloses, res.tidyKept = st.tidyPlan(path, workspaceInputs, res.hasConflicts())
 	}
-	res.log, err = loadStackGraphLog(path, res.stackOp, st.color)
+	logArgs := []string{}
+	if len(res.tidyCloses) > 0 {
+		// Closing forgets the Workspace, and jj abandons a forgotten head
+		// that is empty and undescribed.
+		heads := []string{}
+		for _, handle := range res.tidyCloses {
+			heads = append(heads, handle+"@")
+		}
+		gone := revsetUnion(heads) + ` & empty() & description(exact:"")`
+		if revset, err := stackGraphLogRevsetExcluding(path, gone); err == nil {
+			res.tidyGone, err = loadStackGraphLog(path, res.stackOp, st.color, "--no-graph", "-r", gone)
+			if err != nil {
+				res.err = fmt.Errorf("read projected jj log: %w", err)
+				return res
+			}
+			logArgs = []string{"-r", revset}
+		}
+	}
+	res.log, err = loadStackGraphLog(path, res.stackOp, st.color, logArgs...)
 	if err != nil {
 		res.err = fmt.Errorf("read projected jj log: %w", err)
 		return res

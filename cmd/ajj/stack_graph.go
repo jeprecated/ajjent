@@ -1467,7 +1467,17 @@ func (m stackGraphModel) afterPane(lines []stackGraphLine) ([]string, []string) 
 	if m.tidy {
 		closing = m.preview.tidyCloses
 	}
-	return extras, m.afterRows(lines, owners, m.preview.log, m.preview.heads, m.preview.created, m.preview.rewritten, closing)
+	rows := m.afterRows(lines, owners, m.preview.log, m.preview.heads, m.preview.created, m.preview.rewritten, closing)
+	if m.tidy && len(m.preview.tidyGone) > 0 {
+		rows = append(rows, "", "    "+s.dim.Render("✂ gone after tidy"))
+		struck := s.dim.Strikethrough(true)
+		for _, entry := range m.preview.tidyGone {
+			for _, line := range entry.Lines {
+				rows = append(rows, "    "+struck.Render(stripANSI(line)))
+			}
+		}
+	}
+	return extras, rows
 }
 
 func (m stackGraphModel) footerLine() string {
