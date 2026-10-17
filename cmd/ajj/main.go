@@ -94,6 +94,8 @@ type stackConfig struct {
 	RebaseMode       string `yaml:"rebase_mode"`
 	Shape            string `yaml:"shape"`
 	ConflictStrategy string `yaml:"conflict_strategy"`
+	// ShowLog prints `jj log` after a successful Stack.
+	ShowLog bool `yaml:"show_log"`
 }
 
 type createSetup struct {
@@ -2152,6 +2154,7 @@ func runStack(args []string) (retErr error) {
 		}
 	}
 	undoFinished = true
+	printStackLog(cfg.Stack, mainInfo.Path)
 	return completeUndoableOperation(repoRoot, mainInfo.Path, "stack", undoOpID)
 }
 
@@ -2261,6 +2264,7 @@ func runLineStack(stateRoot string, cfg config, infos []workspaceInfo, byHandle 
 	if err := executeLineStackPlan(mainInfo.Path, plan); err != nil {
 		return errors.Join(err, completeUndoableOperation(stateRoot, mainInfo.Path, "stack --line", undoOpID))
 	}
+	printStackLog(cfg.Stack, mainInfo.Path)
 	return completeUndoableOperation(stateRoot, mainInfo.Path, "stack --line", undoOpID)
 }
 
@@ -2967,6 +2971,9 @@ func mergeConfigFile(dst *config, path string) error {
 	}
 	if strings.TrimSpace(src.Stack.ConflictStrategy) != "" {
 		dst.Stack.ConflictStrategy = strings.TrimSpace(src.Stack.ConflictStrategy)
+	}
+	if src.Stack.ShowLog {
+		dst.Stack.ShowLog = true
 	}
 	if src.Create.Envrc {
 		dst.Create.Envrc = true
@@ -4596,6 +4603,25 @@ func recordUndoableOperation(stateRoot, repoPath, command, beforeOperationID str
 		return false, fmt.Errorf("record %s undo: %w", command, err)
 	}
 	return true, nil
+}
+
+// printStackLog shows `jj log` on stderr after a Stack when stack.show_log
+// is set. It never snapshots, so the Stack stays the latest operation for
+// `ajj undo`.
+func printStackLog(cfg stackConfig, repoPath string) {
+	if !cfg.ShowLog {
+		return
+	}
+	colorFlag := "--color=never"
+	if canColorWriter(stderrWriter) {
+		colorFlag = "--color=always"
+	}
+	out, err := commandCaptureFn("jj", "-R", repoPath, "--ignore-working-copy", "--no-pager", colorFlag, "log")
+	if err != nil {
+		fmt.Fprintf(stderrWriter, "jj log: %v\n", err)
+		return
+	}
+	fmt.Fprint(stderrWriter, out)
 }
 
 func printManualRestoreHint(opID string) {

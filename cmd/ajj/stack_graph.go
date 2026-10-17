@@ -198,6 +198,7 @@ func runStackGraph(req stackGraphRequest) error {
 		return m.err
 	}
 	if m.undoAvailable && m.appliedBase != "" {
+		printStackLog(req.Cfg.Stack, m.st.targetPath())
 		fmt.Fprintf(stderrWriter, "Stacked into %s@.\n", m.st.target.Handle)
 		fmt.Fprintf(stderrWriter, "%s ajj undo (jj op restore %s)\n", cliStylesForWriter(stderrWriter).Muted.Render("To undo this run:"), m.appliedBase)
 	}

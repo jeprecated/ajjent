@@ -107,6 +107,7 @@ See [the trusted Jujutsu release](#trusted-jujutsu-release-for-nocleanup).
                 rebase_mode = "auto";
                 shape = "auto";
                 conflict_strategy = "prefer-clean";
+                show_log = false;
               };
               cleanup = {
                 rules = [
@@ -255,6 +256,8 @@ The stack target resolves in this order: explicit `--workspace`, then the curren
 - `--rebase-mode auto|branch|revision`
 - `--stack-shape auto|linear|merge`
 - `--conflict-strategy off|prefer-clean`
+
+Set `stack.show_log: true` to print `jj log` on stderr after every successful Stack (positional, `--all`, `--line`, and the graph view), so the result is visible without running it yourself. It reads without snapshotting, so `ajj undo` still applies.
 
 With the default `prefer-clean`, `auto` settings, a single divergent Workspace containing one unique non-empty payload commit is tried tidiest-first. `ajj` uses `jj --no-integrate-operation` to project inserting the payload immediately before the target Workspace head; a clean projection is integrated as a one-parent line, preserving an in-progress target head above it. A conflicted projection is not integrated and falls back directly to the merge-shaped result. Other auto cases retain the existing shape fallback, and if every available result conflicts, `ajj` keeps the merge-shaped conflicted target Workspace so the conflict can be resolved there.
 
@@ -523,6 +526,7 @@ stack:
   rebase_mode: auto
   shape: auto
   conflict_strategy: prefer-clean
+  show_log: false
 create:
   envrc: false
   direnv_allow: false

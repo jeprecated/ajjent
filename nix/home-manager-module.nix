@@ -83,6 +83,7 @@ in {
           rebase_mode = "auto";
           shape = "auto";
           conflict_strategy = "prefer-clean";
+          show_log = false;
         };
         create = {
           envrc = false;
@@ -109,6 +110,7 @@ in {
           rebase_mode = "auto";
           shape = "auto";
           conflict_strategy = "prefer-clean";
+          show_log = false;
         };
         create = {
           envrc = false;

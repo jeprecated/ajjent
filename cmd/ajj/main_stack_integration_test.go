@@ -302,6 +302,33 @@ func TestRunStackRealRepoTargetsCurrentNonDefaultWorkspace(t *testing.T) {
 	}
 }
 
+func TestRunStackShowLogPrintsJJLogWithoutBlockingUndo(t *testing.T) {
+	paths := setupRealStackRepo(t)
+	writeConfig(t, paths.defaultPath, strings.Join([]string{
+		"workspaces_root: " + filepath.Dir(filepath.Dir(paths.defaultPath)),
+		"project: proj",
+		"main_workspace: default",
+		"stack:",
+		"  rebase_mode: branch",
+		"  conflict_strategy: off",
+		"  show_log: true",
+		"",
+	}, "\n"))
+	_, errOut, err := captureOutput(func() error {
+		return runStack([]string{"agm-speed-transition", "--repo", paths.speedPath, "--yes"})
+	})
+	if err != nil {
+		t.Fatalf("stack failed: %v\nstderr:%s", err, errOut)
+	}
+	logAt := strings.Index(errOut, "child payload")
+	if logAt < 0 || logAt > strings.Index(errOut, "To undo this run:") {
+		t.Fatalf("expected jj log before the undo hint, got:\n%s", errOut)
+	}
+	if err := runUndo([]string{"--repo", paths.speedPath}); err != nil {
+		t.Fatalf("printing the log must not record an operation that blocks undo: %v", err)
+	}
+}
+
 func TestRunStackRealRepoUsesCurrentDirectoryWorkspaceWhenRepoOmitted(t *testing.T) {
 	paths := setupRealStackRepo(t)
 	defaultBefore := jjRev(t, paths.defaultPath, "default@")
