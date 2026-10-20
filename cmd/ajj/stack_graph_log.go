@@ -356,6 +356,10 @@ type stackGraphState struct {
 	// unavailable explains Workspaces whose snapshot failed; they are shown
 	// but cannot be stacked.
 	unavailable map[string]string
+	// emptyHandles are the empty Workspaces (emptyWorkspaceHandles), which
+	// the view hides by default; logWithoutEmpty is log without their heads.
+	emptyHandles    []string
+	logWithoutEmpty []stackGraphLogEntry
 }
 
 func (st *stackGraphState) targetPath() string { return st.target.Path }
@@ -509,13 +513,22 @@ func loadStackGraphState(repoRoot string, cfg config, project string, workspaceO
 	if err != nil {
 		return nil, err
 	}
-	st.heads, _, err = workspaceHeadsAtOperation(path, st.base)
+	var headCommits map[string]string
+	st.heads, headCommits, err = workspaceHeadsAtOperation(path, st.base)
 	if err != nil {
 		return nil, err
 	}
 	st.log, err = loadStackGraphLog(path, st.base, color)
 	if err != nil {
 		return nil, fmt.Errorf("read jj log: %w", err)
+	}
+	// Hiding is a convenience: if jj cannot answer, every Workspace shows.
+	if handles := emptyWorkspaceHandles(path, st.base, target.Handle, infos, headCommits); len(handles) > 0 {
+		if revset, err := stackGraphLogRevsetExcluding(path, workspaceHeadsRevset(handles)); err == nil {
+			if log, err := loadStackGraphLog(path, st.base, color, "-r", revset); err == nil {
+				st.emptyHandles, st.logWithoutEmpty = handles, log
+			}
+		}
 	}
 	conflicts, err := fullChangeIDs(path, st.base, "conflicts() & mutable()")
 	if err != nil {
@@ -587,6 +600,45 @@ func loadStackGraphState(repoRoot string, cfg config, project string, workspaceO
 		st.payloads[source.Ref.label()] = ids
 	}
 	return st, nil
+}
+
+// emptyWorkspaceHandles names the Workspaces other than the target that
+// hold nothing to stack: the head is an empty, undescribed commit with no
+// bookmark or tag, no children, and no mutable parent outside the target.
+// A cursor on top of unstacked work is not empty: it is that work's line.
+func emptyWorkspaceHandles(path, operation, target string, infos []workspaceInfo, commits map[string]string) []string {
+	heads := []string{}
+	for _, info := range infos {
+		if info.Ref.Handle != target && commits[info.Ref.Handle] != "" {
+			heads = append(heads, commits[info.Ref.Handle])
+		}
+	}
+	if len(heads) == 0 {
+		return nil
+	}
+	empty := "(" + revsetUnion(heads) + ` & empty() & description(exact:"") & ~(bookmarks() | remote_bookmarks() | tags()))`
+	ids, err := fullCommitIDs(path, operation, empty+" ~ parents(children("+empty+")) ~ children(mutable() ~ ::"+target+"@)")
+	if err != nil {
+		return nil
+	}
+	set := stringSet(ids)
+	handles := []string{}
+	for _, info := range infos {
+		if info.Ref.Handle != target && set[commits[info.Ref.Handle]] {
+			handles = append(handles, info.Ref.Handle)
+		}
+	}
+	return handles
+}
+
+// workspaceHeadsRevset names the heads of the given Workspaces, resolving
+// to nothing for one that no longer exists.
+func workspaceHeadsRevset(handles []string) string {
+	heads := []string{}
+	for _, handle := range handles {
+		heads = append(heads, "present("+handle+"@)")
+	}
+	return revsetUnion(heads)
 }
 
 // trunkBookmark names the local bookmark that stands for trunk: one at
@@ -723,6 +775,8 @@ type stackPreviewSpec struct {
 	cuts          map[string]string
 	moveBookmarks []string
 	tidy          bool
+	// hidden are the empty Workspaces left out of the projected log.
+	hidden []string
 }
 
 type stackBookmarkMove struct {
@@ -913,7 +967,10 @@ func (st *stackGraphState) preview(spec stackPreviewSpec) stackPreviewResult {
 		// The after pane marks the cursors Tidy would close instead.
 		res.tidyCloses, res.tidyKept = st.tidyPlan(path, workspaceInputs, res.hasConflicts())
 	}
-	logArgs := []string{}
+	logArgs, excluded, gone := []string{}, []string{}, ""
+	if len(spec.hidden) > 0 {
+		excluded = append(excluded, workspaceHeadsRevset(spec.hidden))
+	}
 	if len(res.tidyCloses) > 0 {
 		// Closing forgets the Workspace, and jj abandons a forgotten head
 		// that is empty and undescribed.
@@ -921,12 +978,17 @@ func (st *stackGraphState) preview(spec stackPreviewSpec) stackPreviewResult {
 		for _, handle := range res.tidyCloses {
 			heads = append(heads, handle+"@")
 		}
-		gone := revsetUnion(heads) + ` & empty() & description(exact:"")`
-		if revset, err := stackGraphLogRevsetExcluding(path, gone); err == nil {
-			res.tidyGone, err = loadStackGraphLog(path, res.stackOp, st.color, "--no-graph", "-r", gone)
-			if err != nil {
-				res.err = fmt.Errorf("read projected jj log: %w", err)
-				return res
+		gone = "(" + revsetUnion(heads) + ` & empty() & description(exact:""))`
+		excluded = append(excluded, gone)
+	}
+	if len(excluded) > 0 {
+		if revset, err := stackGraphLogRevsetExcluding(path, revsetUnion(excluded)); err == nil {
+			if gone != "" {
+				res.tidyGone, err = loadStackGraphLog(path, res.stackOp, st.color, "--no-graph", "-r", gone)
+				if err != nil {
+					res.err = fmt.Errorf("read projected jj log: %w", err)
+					return res
+				}
 			}
 			logArgs = []string{"-r", revset}
 		}
@@ -1212,7 +1274,13 @@ func (st *stackGraphState) apply(res stackPreviewResult, spec stackPreviewSpec) 
 		out.err = err
 		return out
 	}
-	out.log, err = loadStackGraphLog(path, afterOp, st.color)
+	logArgs := []string{}
+	if len(spec.hidden) > 0 {
+		if revset, err := stackGraphLogRevsetExcluding(path, workspaceHeadsRevset(spec.hidden)); err == nil {
+			logArgs = []string{"-r", revset}
+		}
+	}
+	out.log, err = loadStackGraphLog(path, afterOp, st.color, logArgs...)
 	if err != nil {
 		out.err = err
 		return out

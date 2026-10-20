@@ -271,7 +271,7 @@ func (m stackGraphModel) cursorTo(t *testing.T, change string) stackGraphModel {
 	t.Helper()
 	if m.changeMode {
 		for i, idx := range m.nodes() {
-			if m.st.log[idx].ChangeID == change {
+			if m.log()[idx].ChangeID == change {
 				m.cursor = i
 				return m
 			}
@@ -280,7 +280,7 @@ func (m stackGraphModel) cursorTo(t *testing.T, change string) stackGraphModel {
 		return m
 	}
 	for i, stop := range m.stops() {
-		if m.st.log[stop.entry].ChangeID == change {
+		if m.log()[stop.entry].ChangeID == change {
 			m.cursor = i
 			return m
 		}
@@ -1581,5 +1581,113 @@ func TestStackGraphStacksALineUpToAChange(t *testing.T) {
 	}
 	if got := in("alpha@-"); got != "feat: alpha, not ready" {
 		t.Fatalf("alpha@ must keep its later commit, got %q", got)
+	}
+}
+
+// withEmptyWorkspace adds echo@, an empty Workspace on base, to the
+// synthetic state as the loader would find it.
+func withEmptyWorkspace(st *stackGraphState) *stackGraphState {
+	id := func(c byte) string { return strings.Repeat(string(c), 32) }
+	commit := func(c byte) string { return strings.Repeat(string(c), 40) }
+	st.logWithoutEmpty = append([]stackGraphLogEntry{}, st.log...)
+	echo := stackGraphLogEntry{ChangeID: id('e'), CommitID: commit('e'), Lines: []string{"○  e echo@", "│  (empty)"}}
+	st.log = append(append(append([]stackGraphLogEntry{}, st.log[:6]...), echo), st.log[6:]...)
+	st.infos = append(st.infos, workspaceInfo{Ref: workspaceRef{Handle: "echo"}, Path: "/ws/echo", Ahead: 1})
+	st.byHandle = mapInfosByHandle(st.infos)
+	st.heads["echo"] = id('e')
+	st.payloads["echo@"] = map[string]bool{id('e'): true}
+	st.parents[commit('e')] = []string{commit('0')}
+	st.emptyHandles = []string{"echo"}
+	return st
+}
+
+func TestStackGraphHidesEmptyWorkspacesUntilE(t *testing.T) {
+	m, backend := newSyntheticStackGraphModel(t)
+	m.st = withEmptyWorkspace(m.st)
+	m.loadFn = func(string) (*stackGraphState, error) {
+		next := withEmptyWorkspace(syntheticStackGraphState())
+		next.base = "reloaded"
+		return next, nil
+	}
+	view := stripANSI(m.View())
+	if strings.Contains(view, "echo@") || !strings.Contains(view, "e 1 empty hidden") {
+		t.Fatalf("empty Workspaces must be hidden by default:\n%s", view)
+	}
+	keys := []string{}
+	for range m.stops() {
+		keys = append(keys, m.stopLineKey())
+		m = stackGraphDrive(t, m, stackKey("j"))
+	}
+	if stringSet(keys)["echo@"] {
+		t.Fatalf("the cursor must skip hidden Workspaces: %v", keys)
+	}
+	// a selects only what is shown, and the projection leaves echo@ out.
+	m = stackGraphDrive(t, m, stackKey("a"))
+	if stringSet(m.selected)["echo@"] || len(m.selected) == 0 {
+		t.Fatalf("a must skip hidden Workspaces: %v", m.selected)
+	}
+	if last := backend.previews[len(backend.previews)-1]; strings.Join(last.hidden, ",") != "echo" {
+		t.Fatalf("preview must leave hidden Workspaces out: %v", last.hidden)
+	}
+	m = stackGraphDrive(t, m, stackKey("esc"))
+	// e shows them, keeping the cursor on its line, and re-previews.
+	m = m.cursorToWorkspace(t, "charlie")
+	m = stackGraphDrive(t, m, stackKey("e"))
+	view = stripANSI(m.View())
+	if !m.showEmpty || !strings.Contains(view, "e echo@") || !strings.Contains(view, "e 1 empty shown") || m.stopLineKey() != "charlie@" {
+		t.Fatalf("e must show empty Workspaces: show=%v line=%s\n%s", m.showEmpty, m.stopLineKey(), view)
+	}
+	m = m.cursorToWorkspace(t, "echo")
+	m = stackGraphDrive(t, m, stackKey(" "))
+	if !stringSet(m.selected)["echo@"] {
+		t.Fatalf("a shown empty Workspace can be stacked: %v", m.selected)
+	}
+	if last := backend.previews[len(backend.previews)-1]; len(last.hidden) != 0 {
+		t.Fatalf("shown Workspaces stay in the projection: %v", last.hidden)
+	}
+	// Hiding again drops it from the selection and says why; a reload keeps
+	// the choice.
+	m = stackGraphDrive(t, m, stackKey("e"))
+	if m.showEmpty || stringSet(m.selected)["echo@"] || !strings.Contains(m.msg, "empty Workspaces are hidden") {
+		t.Fatalf("hiding must drop a selected empty Workspace: selected=%v msg=%q", m.selected, m.msg)
+	}
+	m = stackGraphDrive(t, m, stackKey("e"))
+	load := m.startLoad("", "")
+	m = stackGraphDrive(t, m, load())
+	if m.st.base != "reloaded" || !m.showEmpty || !strings.Contains(stripANSI(m.View()), "e echo@") {
+		t.Fatalf("a reload must keep empty Workspaces shown: base=%s show=%v", m.st.base, m.showEmpty)
+	}
+}
+
+// The loader finds the empty Workspaces in a real repository: an empty,
+// undescribed head on the target's history is hidden, a cursor on top of
+// unstacked work is not.
+func TestStackGraphFindsEmptyWorkspaces(t *testing.T) {
+	repo := setupStackGraphRepo(t, false)
+	idlePath := filepath.Join(filepath.Dir(repo.defaultPath), "idle")
+	runJJ(t, "-R", repo.defaultPath, "workspace", "add", "--revision", "main", "--name", "idle", idlePath)
+	m := loadStackGraphModel(t, repo, "auto")
+	if strings.Join(m.st.emptyHandles, ",") != "idle" {
+		t.Fatalf("empty Workspaces: %v", m.st.emptyHandles)
+	}
+	plain := jjCombined(t, "-R", repo.defaultPath, "--ignore-working-copy", "--no-pager", "--color=always", "log", "-r", "("+strings.TrimSpace(jjCombined(t, "-R", repo.defaultPath, "config", "get", "revsets.log"))+") ~ idle@")
+	got := []string{}
+	for _, entry := range m.log() {
+		got = append(got, entry.Lines...)
+	}
+	if strings.Join(got, "\n")+"\n" != plain {
+		t.Fatalf("now pane must be jj log without idle@\n--- want:\n%s\n--- got:\n%s", plain, strings.Join(got, "\n"))
+	}
+	m = m.cursorToWorkspace(t, "alpha")
+	m = stackGraphDrive(t, m, stackKey(" "))
+	if m.preview == nil || m.preview.err != nil {
+		t.Fatalf("preview failed: %+v", m.preview)
+	}
+	if _, ok := stackGraphLogByChange(m.preview.log)[m.st.heads["idle"]]; ok {
+		t.Fatal("the projection must leave the hidden Workspace out")
+	}
+	m = stackGraphDrive(t, m, stackKey("e"))
+	if _, ok := stackGraphLogByChange(m.preview.log)[m.st.heads["idle"]]; !ok || !strings.Contains(stripANSI(m.View()), "idle@") {
+		t.Fatal("e must bring the empty Workspace back into both panes")
 	}
 }

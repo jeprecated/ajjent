@@ -119,7 +119,9 @@ type stackGraphModel struct {
 	cursor int
 	// changeMode steps one commit at a time; the default moves between
 	// lines of work.
-	changeMode  bool
+	changeMode bool
+	// showEmpty shows the empty Workspaces, hidden by default.
+	showEmpty   bool
 	afterOffset int
 	zoom        bool
 	mode        stackGraphMode
@@ -207,10 +209,35 @@ func runStackGraph(req stackGraphRequest) error {
 
 func (m stackGraphModel) Init() tea.Cmd { return nil }
 
+// log is the now pane: the jj log without the empty Workspaces unless they
+// are shown.
+func (m stackGraphModel) log() []stackGraphLogEntry {
+	if m.showEmpty || len(m.st.emptyHandles) == 0 {
+		return m.st.log
+	}
+	return m.st.logWithoutEmpty
+}
+
+// hiddenEmpty names the empty Workspaces the view leaves out.
+func (m stackGraphModel) hiddenEmpty() []string {
+	if m.showEmpty {
+		return nil
+	}
+	return m.st.emptyHandles
+}
+
+func (m stackGraphModel) hiddenLines() map[string]bool {
+	hidden := map[string]bool{}
+	for _, handle := range m.hiddenEmpty() {
+		hidden[handle+"@"] = true
+	}
+	return hidden
+}
+
 // nodes are the log entries the cursor can rest on.
 func (m stackGraphModel) nodes() []int {
 	nodes := []int{}
-	for i, entry := range m.st.log {
+	for i, entry := range m.log() {
 		if entry.ChangeID != "" {
 			nodes = append(nodes, i)
 		}
@@ -228,7 +255,7 @@ type stackGraphStop struct {
 func (m stackGraphModel) stops() []stackGraphStop {
 	lines := m.lines()
 	stops := []stackGraphStop{}
-	for i, entry := range m.st.log {
+	for i, entry := range m.log() {
 		if entry.ChangeID == "" {
 			continue
 		}
@@ -261,13 +288,13 @@ func (m stackGraphModel) cursorEntry() (stackGraphLogEntry, bool) {
 		if len(nodes) == 0 || m.cursor < 0 || m.cursor >= len(nodes) {
 			return stackGraphLogEntry{}, false
 		}
-		return m.st.log[nodes[m.cursor]], true
+		return m.log()[nodes[m.cursor]], true
 	}
 	stops := m.stops()
 	if len(stops) == 0 || m.cursor < 0 || m.cursor >= len(stops) {
 		return stackGraphLogEntry{}, false
 	}
-	return m.st.log[stops[m.cursor].entry], true
+	return m.log()[stops[m.cursor].entry], true
 }
 
 // cursorHighlight is the set of changes the cursor covers: the whole line
@@ -304,43 +331,73 @@ func (m *stackGraphModel) toggleChangeMode() {
 		lineKey = l.Key
 	}
 	m.changeMode = !m.changeMode
-	if m.changeMode {
+	if !m.placeCursor(entry.ChangeID, lineKey) {
 		m.cursor = 0
+	}
+	m.msg = "by line: j/k move between lines of work"
+	if m.changeMode {
+		m.msg = "by change: j/k step one commit; space stacks its line up to that commit"
+	}
+}
+
+// placeCursor puts the cursor on the commit in change mode, or on the
+// line's stop at that commit, else the commit's first stop, else the line's
+// first stop; it reports whether it found one.
+func (m *stackGraphModel) placeCursor(change, lineKey string) bool {
+	log := m.log()
+	if m.changeMode {
 		for i, idx := range m.nodes() {
-			if m.st.log[idx].ChangeID == entry.ChangeID {
+			if log[idx].ChangeID == change {
 				m.cursor = i
-				break
+				return true
 			}
 		}
-		m.msg = "by change: j/k step one commit; space stacks its line up to that commit"
-		return
+		return false
 	}
 	stops := m.stops()
-	best := -1
 	for i, s := range stops {
-		if s.key == lineKey && m.st.log[s.entry].ChangeID == entry.ChangeID {
-			best = i
-			break
+		if s.key == lineKey && log[s.entry].ChangeID == change {
+			m.cursor = i
+			return true
 		}
 	}
-	for i := range stops {
-		if best >= 0 {
-			break
-		}
-		if m.st.log[stops[i].entry].ChangeID == entry.ChangeID {
-			best = i
+	for i, s := range stops {
+		if log[s.entry].ChangeID == change {
+			m.cursor = i
+			return true
 		}
 	}
-	for i := range stops {
-		if best >= 0 {
-			break
-		}
-		if stops[i].key == lineKey {
-			best = i
+	for i, s := range stops {
+		if s.key == lineKey {
+			m.cursor = i
+			return true
 		}
 	}
-	m.cursor = max(0, best)
-	m.msg = "by line: j/k move between lines of work"
+	return false
+}
+
+// toggleEmpty shows or hides the empty Workspaces, keeping the cursor where
+// it was when that row stays visible.
+func (m *stackGraphModel) toggleEmpty() {
+	entry, _ := m.cursorEntry()
+	lineKey := ""
+	if l, ok := m.lineUnderCursor(); ok {
+		lineKey = l.Key
+	}
+	m.showEmpty = !m.showEmpty
+	m.selected = m.validSelection(m.selected)
+	if !m.placeCursor(entry.ChangeID, lineKey) {
+		m.clampCursor()
+	}
+	n := len(m.st.emptyHandles)
+	note := fmt.Sprintf("hiding %d empty Workspace(s)", n)
+	if m.showEmpty {
+		note = fmt.Sprintf("showing %d empty Workspace(s): ", n) + strings.Join(m.st.emptyHandles, "@, ") + "@"
+	}
+	if m.msg != "" {
+		note += " · " + m.msg
+	}
+	m.msg = note
 }
 
 func (m stackGraphModel) lines() []stackGraphLine { return m.st.lines(m.shape) }
@@ -392,7 +449,7 @@ func (m stackGraphModel) lineUnderCursor() (stackGraphLine, bool) {
 }
 
 func (m stackGraphModel) previewSpec() stackPreviewSpec {
-	return stackPreviewSpec{id: m.previewID, shape: m.shape, selected: append([]string{}, m.selected...), cuts: m.cuts, moveBookmarks: append([]string{}, m.moveBookmarks...), tidy: m.tidy}
+	return stackPreviewSpec{id: m.previewID, shape: m.shape, selected: append([]string{}, m.selected...), cuts: m.cuts, moveBookmarks: append([]string{}, m.moveBookmarks...), tidy: m.tidy, hidden: m.hiddenEmpty()}
 }
 
 // payloads is what each line brings into the target, narrowed to its cut.
@@ -433,7 +490,7 @@ func (m *stackGraphModel) requestPreview() tea.Cmd {
 		// A load, apply, or undo owns jj; the load's result requests anew.
 		return nil
 	}
-	key := m.shape + "\x00" + strings.Join(m.selected, "\x00") + "\x01" + strings.Join(m.moveBookmarks, "\x00") + fmt.Sprint(m.cuts, m.tidy, m.st.base, m.st.target.Handle)
+	key := m.shape + "\x00" + strings.Join(m.selected, "\x00") + "\x01" + strings.Join(m.moveBookmarks, "\x00") + fmt.Sprint(m.cuts, m.tidy, m.showEmpty, m.st.base, m.st.target.Handle)
 	if key == m.previewKey {
 		return nil
 	}
@@ -611,8 +668,13 @@ func (m stackGraphModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // or a shape change, reporting them.
 func (m *stackGraphModel) validSelection(selected []string) []string {
 	lines := m.lines()
-	kept, dropped := []string{}, []string{}
+	hidden := m.hiddenLines()
+	kept, dropped, droppedHidden := []string{}, []string{}, false
 	for _, key := range selected {
+		if hidden[key] {
+			dropped, droppedHidden = append(dropped, key), true
+			continue
+		}
 		l, ok := stackGraphLineByKey(lines, key)
 		if cut, isCut := m.cuts[key]; ok && isCut {
 			// A cut must still be a commit of the line, and Line Stack
@@ -627,7 +689,10 @@ func (m *stackGraphModel) validSelection(selected []string) []string {
 	}
 	if len(dropped) > 0 {
 		note := "dropped " + strings.Join(dropped, ", ")
-		if m.shape == "line" {
+		switch {
+		case droppedHidden:
+			note += ": empty Workspaces are hidden (e shows them)"
+		case m.shape == "line":
 			note += ": Line Stack takes whole Workspaces other than the target"
 		}
 		if m.msg != "" {
@@ -685,6 +750,13 @@ func (m stackGraphModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.cursor = max(0, m.positions()-1)
 	case "c":
 		m.toggleChangeMode()
+	case "e":
+		if len(m.st.emptyHandles) == 0 {
+			m.msg = "no empty Workspaces to hide"
+			return m, nil
+		}
+		m.toggleEmpty()
+		return m, m.requestPreview()
 	case "pgdown":
 		m.afterOffset += max(1, m.height/2)
 	case "pgup":
@@ -714,8 +786,9 @@ func (m stackGraphModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.requestPreview()
 	case "a", "A":
 		all := []string{}
+		hidden := m.hiddenLines()
 		for _, l := range m.lines() {
-			if l.InAll && l.Selectable {
+			if l.InAll && l.Selectable && !hidden[l.Key] {
 				all = append(all, l.Key)
 			}
 		}
@@ -965,7 +1038,7 @@ func (m *stackGraphModel) advanceToNextSelectable() {
 	}
 	nodes := m.nodes()
 	for i := m.cursor + 1; i < len(nodes); i++ {
-		if heads[m.st.log[nodes[i]].ChangeID] {
+		if heads[m.log()[nodes[i]].ChangeID] {
 			m.cursor = i
 			return
 		}
@@ -1196,7 +1269,14 @@ func (m stackGraphModel) headerLines() []string {
 		}
 		stack = strings.Join(parts, s.dim.Render(" › "))
 	}
-	line2 := move + "  " + tidy + "  " + mode + "   " + s.dim.Render("stack:") + " " + stack
+	empty := ""
+	if n := len(m.st.emptyHandles); n > 0 {
+		empty = "  " + s.dim.Render("e") + " " + s.dim.Render(fmt.Sprintf("%d empty hidden", n))
+		if m.showEmpty {
+			empty = "  " + s.dim.Render("e") + " " + s.yellow.Bold(true).Render(fmt.Sprintf("%d empty shown", n))
+		}
+	}
+	line2 := move + "  " + tidy + "  " + mode + empty + "   " + s.dim.Render("stack:") + " " + stack
 	return []string{line1, line2}
 }
 
@@ -1326,7 +1406,7 @@ func (m stackGraphModel) nowRows(lines []stackGraphLine) []string {
 		}
 	}
 	rows := []string{}
-	for _, entry := range m.st.log {
+	for _, entry := range m.log() {
 		atCursor := entry.ChangeID != "" && highlight[entry.ChangeID]
 		for i, line := range entry.Lines {
 			row := m.nowGutter(lines, owners, entry, i == 0, atCursor) + line
@@ -1348,7 +1428,7 @@ func (m stackGraphModel) cursorRowSpan() (int, int) {
 	}
 	highlight := m.cursorHighlight()
 	first, last, row := -1, 0, 0
-	for _, entry := range m.st.log {
+	for _, entry := range m.log() {
 		if entry.ChangeID == cursorEntry.ChangeID {
 			first = row
 		}
@@ -1508,7 +1588,7 @@ func (m stackGraphModel) footerLine() string {
 		}
 		return prompt + " " + s.bold.Render("[y/N]")
 	}
-	keys := []string{"space", "select", "J/K", "order", "a", "all", "t", "target", "s", "shape", "m", "move", "x", "tidy", "f", "fetch", "c", "by change", "tab", "zoom", "enter", "apply", "q", "quit"}
+	keys := []string{"space", "select", "J/K", "order", "a", "all", "t", "target", "s", "shape", "m", "move", "x", "tidy", "f", "fetch", "c", "by change", "e", "empty", "tab", "zoom", "enter", "apply", "q", "quit"}
 	parts := []string{}
 	for i := 0; i+1 < len(keys); i += 2 {
 		parts = append(parts, s.dim.Render(keys[i])+" "+keys[i+1])
