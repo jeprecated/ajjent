@@ -485,7 +485,7 @@ func validateIntegrationAssertionsAtOperation(repoPath, operationID string, requ
 	if targetCommit != request.Target.ExpectedHeadCommit {
 		return integrationPreparedStateV1{}, newIntegrationProtocolError(integrationErrorAssertionFailed, "target Workspace %q head changed", request.Target.ExpectedWorkspace)
 	}
-	targetChangeID, err := integrationQuery(repoPath, operationID, "log", "-r", request.Target.ExpectedWorkspace+"@", "--no-graph", "-T", "change_id")
+	targetChangeID, err := integrationQuery(repoPath, operationID, "log", "-r", jjWorkspaceName(request.Target.ExpectedWorkspace)+"@", "--no-graph", "-T", "change_id")
 	if err != nil {
 		return integrationPreparedStateV1{}, err
 	}
@@ -493,7 +493,7 @@ func validateIntegrationAssertionsAtOperation(repoPath, operationID string, requ
 	if !integrationFullChangeIDRE.MatchString(targetChangeID) {
 		return integrationPreparedStateV1{}, newIntegrationProtocolError(integrationErrorAssertionFailed, "target Workspace %q change identity is invalid", request.Target.ExpectedWorkspace)
 	}
-	targetConflict, err := integrationRevisionMatchesAtOperation(repoPath, operationID, "conflicts() & "+request.Target.ExpectedWorkspace+"@")
+	targetConflict, err := integrationRevisionMatchesAtOperation(repoPath, operationID, "conflicts() & "+jjWorkspaceName(request.Target.ExpectedWorkspace)+"@")
 	if err != nil {
 		return integrationPreparedStateV1{}, err
 	}
@@ -520,18 +520,18 @@ func validateIntegrationAssertionsAtOperation(repoPath, operationID string, requ
 		if commit != payload.ExpectedHeadCommit {
 			return integrationPreparedStateV1{}, newIntegrationProtocolError(integrationErrorAssertionFailed, "payload Workspace %q head changed", payload.Workspace)
 		}
-		conflicted, err := integrationRevisionMatchesAtOperation(repoPath, operationID, "conflicts() & "+payload.Workspace+"@")
+		conflicted, err := integrationRevisionMatchesAtOperation(repoPath, operationID, "conflicts() & "+jjWorkspaceName(payload.Workspace)+"@")
 		if err != nil {
 			return integrationPreparedStateV1{}, err
 		}
 		if conflicted {
 			return integrationPreparedStateV1{}, newIntegrationProtocolError(integrationErrorAssertionFailed, "payload Workspace %q head is conflicted", payload.Workspace)
 		}
-		payloadEmpty, err := integrationRevisionMatchesAtOperation(repoPath, operationID, "empty() & "+payload.Workspace+"@")
+		payloadEmpty, err := integrationRevisionMatchesAtOperation(repoPath, operationID, "empty() & "+jjWorkspaceName(payload.Workspace)+"@")
 		if err != nil {
 			return integrationPreparedStateV1{}, err
 		}
-		payloadDescription, err := integrationQuery(repoPath, operationID, "log", "-r", payload.Workspace+"@", "--no-graph", "-T", "description")
+		payloadDescription, err := integrationQuery(repoPath, operationID, "log", "-r", jjWorkspaceName(payload.Workspace)+"@", "--no-graph", "-T", "description")
 		if err != nil {
 			return integrationPreparedStateV1{}, err
 		}
@@ -635,7 +635,10 @@ func validateIntegrationWorkspacePathsAtOperation(repoPath, operationID string, 
 	}
 	roots := map[string]string{}
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		parts := strings.SplitN(line, "\t", 2)
+		parts, ours := splitWorkspaceListLine(line, 2)
+		if !ours {
+			continue
+		}
 		if len(parts) != 2 || validateWorkspaceHandle(parts[0]) != nil {
 			return errors.New("workspace path evidence is invalid")
 		}
@@ -727,7 +730,7 @@ func currentOperationFullID(repoPath string) (string, error) {
 }
 
 func integrationWorkspaceHeadCommit(repoPath, handle string) (string, error) {
-	out, err := integrationQuery(repoPath, "", "log", "-r", handle+"@", "--no-graph", "-T", "commit_id ++ \"\\n\"")
+	out, err := integrationQuery(repoPath, "", "log", "-r", jjWorkspaceName(handle)+"@", "--no-graph", "-T", "commit_id ++ \"\\n\"")
 	if err != nil {
 		return "", err
 	}

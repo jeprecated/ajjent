@@ -442,7 +442,11 @@ func workspaceHeadsAtOperation(repoPath, operation string) (map[string]string, m
 		if len(fields) != 3 || fields[0] == "" {
 			continue
 		}
-		changes[fields[0]], commits[fields[0]] = fields[1], fields[2]
+		handle, ours := handleFromJJWorkspaceName(fields[0])
+		if !ours {
+			continue
+		}
+		changes[handle], commits[handle] = fields[1], fields[2]
 	}
 	return changes, commits, nil
 }
@@ -565,7 +569,7 @@ func loadStackGraphState(repoRoot string, cfg config, project string, workspaceO
 		}
 	}
 	lineOf := func(head string) (map[string]bool, error) {
-		ids, err := fullChangeIDs(path, st.base, "(::"+head+" & ~::"+target.Handle+"@) & "+shownRevset)
+		ids, err := fullChangeIDs(path, st.base, "(::"+head+" & ~::"+jjWorkspaceName(target.Handle)+"@) & "+shownRevset)
 		return stringSet(ids), err
 	}
 	for _, info := range infos {
@@ -573,16 +577,16 @@ func loadStackGraphState(repoRoot string, cfg config, project string, workspaceO
 			continue
 		}
 		if info.Ref.Handle != target.Handle {
-			ids, err := lineOf(info.Ref.Handle + "@")
+			ids, err := lineOf(jjWorkspaceName(info.Ref.Handle) + "@")
 			if err != nil {
 				return nil, err
 			}
 			st.payloads[info.Ref.Handle+"@"] = ids
 			continue
 		}
-		ids, err := fullChangeIDs(path, st.base, "(::"+target.Handle+"@ & ~::trunk()) & "+shownRevset)
+		ids, err := fullChangeIDs(path, st.base, "(::"+jjWorkspaceName(target.Handle)+"@ & ~::trunk()) & "+shownRevset)
 		if err != nil {
-			ids, err = fullChangeIDs(path, st.base, "::"+target.Handle+"@ & "+shownRevset)
+			ids, err = fullChangeIDs(path, st.base, "::"+jjWorkspaceName(target.Handle)+"@ & "+shownRevset)
 		}
 		if err != nil {
 			return nil, err
@@ -908,14 +912,14 @@ func (st *stackGraphState) preview(spec stackPreviewSpec) stackPreviewResult {
 			res.err = err
 			return res
 		}
-		parents, err := fullCommitIDs(path, chain.head(), st.target.Handle+"@-")
+		parents, err := fullCommitIDs(path, chain.head(), jjWorkspaceName(st.target.Handle)+"@-")
 		if err != nil {
 			res.err = err
 			return res
 		}
 		if len(parents) == 1 {
 			res.top = parents[0]
-		} else if heads, err := fullCommitIDs(path, chain.head(), st.target.Handle+"@"); err == nil && len(heads) == 1 {
+		} else if heads, err := fullCommitIDs(path, chain.head(), jjWorkspaceName(st.target.Handle)+"@"); err == nil && len(heads) == 1 {
 			res.top = heads[0]
 		}
 	}
@@ -976,7 +980,7 @@ func (st *stackGraphState) preview(spec stackPreviewSpec) stackPreviewResult {
 		// that is empty and undescribed.
 		heads := []string{}
 		for _, handle := range res.tidyCloses {
-			heads = append(heads, handle+"@")
+			heads = append(heads, jjWorkspaceName(handle)+"@")
 		}
 		gone = "(" + revsetUnion(heads) + ` & empty() & description(exact:""))`
 		excluded = append(excluded, gone)

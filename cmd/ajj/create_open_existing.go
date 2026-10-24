@@ -162,7 +162,7 @@ func forgetMissingCursorForCreate(repoRoot string, cfg config, project string, i
 		return fmt.Errorf("Workspace %q is registered but missing, and its path already exists without Workspace metadata: %s; move it aside, then retry", handle, target)
 	}
 	fmt.Fprintf(stderrWriter, "Forgetting Workspace %q, whose directory is gone; its head was an empty cursor on bookmark %q\n", handle, bookmark)
-	return commandToStderrFn("jj", "-R", repoRoot, "workspace", "forget", handle)
+	return commandToStderrFn("jj", "-R", repoRoot, "workspace", "forget", jjWorkspaceName(handle))
 }
 
 type workspaceHead struct {
@@ -211,7 +211,7 @@ func registeredWorkspaceHead(repoRoot, handle string) (workspaceHead, error) {
 	}
 	for _, line := range strings.Split(out, "\n") {
 		name, rest, ok := strings.Cut(line, "\t")
-		if ok && name == handle {
+		if ok && name == jjWorkspaceName(handle) {
 			return parseWorkspaceHead(rest)
 		}
 	}

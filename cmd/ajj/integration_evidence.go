@@ -101,7 +101,10 @@ func integrationWorkspaceHeadsAtOperation(repoPath, operationID string) ([]integ
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 3)
+		parts, ours := splitWorkspaceListLine(line, 3)
+		if !ours {
+			continue
+		}
 		if len(parts) != 3 || validateWorkspaceHandle(parts[0]) != nil || !integrationCommitIDRE.MatchString(parts[1]) || !integrationFullChangeIDRE.MatchString(parts[2]) {
 			return nil, errors.New("Jujutsu returned invalid workspace-head evidence")
 		}
@@ -156,7 +159,7 @@ func integrationRefsAtOperation(repoPath, operationID, kind string) ([]integrati
 }
 
 func integrationTargetCommitEvidenceAtOperation(repoPath, operationID, targetHandle string) (integrationTargetCommitEvidenceV1, error) {
-	out, err := integrationQuery(repoPath, operationID, "log", "-r", targetHandle+"@", "--no-graph", "-T", `commit_id ++ "\t" ++ change_id ++ "\t" ++ parents.map(|p| p.commit_id()).join(",") ++ "\n"`)
+	out, err := integrationQuery(repoPath, operationID, "log", "-r", jjWorkspaceName(targetHandle)+"@", "--no-graph", "-T", `commit_id ++ "\t" ++ change_id ++ "\t" ++ parents.map(|p| p.commit_id()).join(",") ++ "\n"`)
 	if err != nil {
 		return integrationTargetCommitEvidenceV1{}, err
 	}
@@ -431,7 +434,7 @@ func proveDetachedIntegrationTransaction(repoPath string, record integrationOper
 		return err
 	}
 	for _, generated := range record.GeneratedCommitIDs {
-		modeled, err := integrationRevisionMatchesAtOperation(repoPath, record.GraphOperationID, "commit_id("+generated+") & ::"+request.Target.ExpectedWorkspace+"@")
+		modeled, err := integrationRevisionMatchesAtOperation(repoPath, record.GraphOperationID, "commit_id("+generated+") & ::"+jjWorkspaceName(request.Target.ExpectedWorkspace)+"@")
 		description, descriptionErr := integrationQuery(repoPath, record.GraphOperationID, "log", "-r", "commit_id("+generated+")", "--no-graph", "-T", "description")
 		if err != nil || !modeled || descriptionErr != nil || strings.TrimSpace(description) != "chore: merge" {
 			return errors.New("detached integration generated-commit evidence is invalid")
@@ -468,7 +471,7 @@ func proveNoUnmodeledTargetAncestry(repoPath, operationID string, record integra
 			allowed[mapping.LandedCommit] = struct{}{}
 		}
 	}
-	ids, err := integrationCommitIDsAtOperation(repoPath, operationID, "(::"+record.PreparedState.Target.Workspace+"@ & ~::commit_id("+record.PreparedState.Target.HeadCommit+"))")
+	ids, err := integrationCommitIDsAtOperation(repoPath, operationID, "(::"+jjWorkspaceName(record.PreparedState.Target.Workspace)+"@ & ~::commit_id("+record.PreparedState.Target.HeadCommit+"))")
 	if err != nil {
 		return err
 	}
@@ -529,7 +532,7 @@ func proveNoUnmodeledVisibleHeads(repoPath, beforeOperation string, before, stag
 }
 
 func provePreservedIntegrationTargetAtOperation(repoPath, operationID, targetHandle string, target integrationPreparedTargetV1) error {
-	commits, err := integrationCommitIDsAtOperation(repoPath, operationID, "commit_id("+target.HeadCommit+") & ::"+targetHandle+"@")
+	commits, err := integrationCommitIDsAtOperation(repoPath, operationID, "commit_id("+target.HeadCommit+") & ::"+jjWorkspaceName(targetHandle)+"@")
 	if err != nil || len(commits) != 1 || commits[0] != target.HeadCommit {
 		return errors.New("asserted target commit is not preserved exactly in result ancestry")
 	}
@@ -666,7 +669,7 @@ func proveOrderedLineAtOperation(repoPath, operationID string, record integratio
 		if source == "" || len(payload.FrontierCommits) != 1 {
 			return errors.New("ordered-line payload evidence is not singular")
 		}
-		landedSource := "(" + source + " & ::" + request.Target.ExpectedWorkspace + "@)"
+		landedSource := "(" + source + " & ::" + jjWorkspaceName(request.Target.ExpectedWorkspace) + "@)"
 		anchored, err := orderedLineContributionAnchoredAtOperation(repoPath, operationID, landedSource, destination)
 		if err != nil || !anchored {
 			return errors.New("ordered-line payload is not anchored to its exact ordered predecessor")
@@ -712,27 +715,27 @@ func proveOrderedLineAtOperation(repoPath, operationID string, record integratio
 }
 
 func proveFreshIntegrationCursorAtOperation(repoPath, operationID, workspace, expectedHead, expectedParent string) error {
-	heads, err := integrationCommitIDsAtOperation(repoPath, operationID, workspace+"@")
+	heads, err := integrationCommitIDsAtOperation(repoPath, operationID, jjWorkspaceName(workspace)+"@")
 	if err != nil || len(heads) != 1 || (expectedHead != "" && heads[0] != expectedHead) {
 		return errors.New("ordered-line cursor head is not exact")
 	}
-	parents, err := integrationCommitIDsAtOperation(repoPath, operationID, "parents("+workspace+"@)")
+	parents, err := integrationCommitIDsAtOperation(repoPath, operationID, "parents("+jjWorkspaceName(workspace)+"@)")
 	if err != nil || len(parents) != 1 || parents[0] != expectedParent {
 		return errors.New("ordered-line cursor parent is not exact")
 	}
-	empty, err := integrationRevisionMatchesAtOperation(repoPath, operationID, "empty() & "+workspace+"@")
+	empty, err := integrationRevisionMatchesAtOperation(repoPath, operationID, "empty() & "+jjWorkspaceName(workspace)+"@")
 	if err != nil || !empty {
 		return errors.New("ordered-line cursor is not empty")
 	}
-	conflicted, err := integrationRevisionMatchesAtOperation(repoPath, operationID, "conflicts() & "+workspace+"@")
+	conflicted, err := integrationRevisionMatchesAtOperation(repoPath, operationID, "conflicts() & "+jjWorkspaceName(workspace)+"@")
 	if err != nil || conflicted {
 		return errors.New("ordered-line cursor is conflicted")
 	}
-	mutable, err := integrationRevisionMatchesAtOperation(repoPath, operationID, "mutable() & "+workspace+"@")
+	mutable, err := integrationRevisionMatchesAtOperation(repoPath, operationID, "mutable() & "+jjWorkspaceName(workspace)+"@")
 	if err != nil || !mutable {
 		return errors.New("ordered-line cursor is immutable")
 	}
-	description, err := integrationQuery(repoPath, operationID, "log", "-r", workspace+"@", "--no-graph", "-T", "description")
+	description, err := integrationQuery(repoPath, operationID, "log", "-r", jjWorkspaceName(workspace)+"@", "--no-graph", "-T", "description")
 	if err != nil || description != "" {
 		return errors.New("ordered-line cursor description is not exactly empty")
 	}
@@ -740,7 +743,7 @@ func proveFreshIntegrationCursorAtOperation(repoPath, operationID, workspace, ex
 }
 
 func provePreparedOrderedLineEvidence(repoPath string, record integrationOperationRecord, request integrationRequestV1) error {
-	frontier, err := integrationCommitIDsAtOperation(repoPath, record.BeforeOperationID, request.Target.ExpectedWorkspace+"@")
+	frontier, err := integrationCommitIDsAtOperation(repoPath, record.BeforeOperationID, jjWorkspaceName(request.Target.ExpectedWorkspace)+"@")
 	if err != nil || len(frontier) != 1 || frontier[0] != record.PreparedState.Target.HeadCommit || !reflect.DeepEqual(frontier, record.PreparedState.Target.FrontierCommits) {
 		return errors.New("ordered-line prepared target anchor cannot be reproduced")
 	}

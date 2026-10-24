@@ -23,7 +23,7 @@ func tidyGraphReview(repo string, infos []workspaceInfo, operation string) (*tid
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	for _, info := range infos {
-		out, truncated, err := tidyReadCommandFn(ctx, repo, operation, 2*1024*1024, "log", "--no-graph", "-r", "mutable() & ::"+info.Ref.Handle+"@ & "+workspaceRelevantRevset(), "-T", `commit_id ++ "\n"`)
+		out, truncated, err := tidyReadCommandFn(ctx, repo, operation, 2*1024*1024, "log", "--no-graph", "-r", "mutable() & ::"+jjWorkspaceName(info.Ref.Handle)+"@ & "+workspaceRelevantRevset(), "-T", `commit_id ++ "\n"`)
 		if err != nil {
 			return nil, fmt.Errorf("load pinned Tidy evidence: %w", err)
 		}
@@ -237,6 +237,10 @@ func (m *selectorModel) toggleTidyPolicy() {
 	item := &m.opts.Items[idx]
 	if itemHasMarker(*item, "current") || itemHasMarker(*item, "main") {
 		m.notice = "Main/Current are unavailable in Tidy"
+		return
+	}
+	if item.Foreign {
+		m.notice = item.Handle + ": " + foreignWorkspaceNote
 		return
 	}
 	policy := policyDisposable

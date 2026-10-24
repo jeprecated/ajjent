@@ -275,7 +275,7 @@ func staleUpdateReviewNote(repoRoot, operation, handle string, report staleUpdat
 	case staleUpdateKeptEdits(report.output):
 		return staleUpdateKeptEditsNote
 	}
-	out, err := integrationQuery(repoRoot, operation, "log", "--no-graph", "-r", handle+"@ & divergent()", "-T", `commit_id ++ "\n"`)
+	out, err := integrationQuery(repoRoot, operation, "log", "--no-graph", "-r", jjWorkspaceName(handle)+"@ & divergent()", "-T", `commit_id ++ "\n"`)
 	if err != nil {
 		return "could not check it for divergence (" + summarizeStaleUpdateError(err) + ") — review before tidying"
 	}

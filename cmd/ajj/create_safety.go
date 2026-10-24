@@ -130,7 +130,7 @@ func (s *createSafety) create(repo string, req createRequestV1) error {
 	if err := os.MkdirAll(filepath.Dir(s.record.Destination), 0o755); err != nil {
 		return err
 	}
-	if err := createMachineCommandFn("jj", "-R", repo, "workspace", "add", "--config", workspaceAddNoColocate, "--name", req.Child.Workspace, "--revision", req.baseCommit(), s.record.Destination); err != nil {
+	if err := createMachineCommandFn("jj", "-R", repo, "workspace", "add", "--config", workspaceAddNoColocate, "--name", jjWorkspaceName(req.Child.Workspace), "--revision", req.baseCommit(), s.record.Destination); err != nil {
 		return err
 	}
 	addOperation, err := currentOperationFullID(repo)
@@ -200,14 +200,14 @@ func validateCreateAddEvidence(repo string, r createSafetyRecord, base string) e
 				return errors.New("another Workspace changed during add")
 			}
 		}
-		parents, err := integrationCommitIDsAtOperation(repo, operation, "parents("+r.Workspace+"@)")
+		parents, err := integrationCommitIDsAtOperation(repo, operation, "parents("+jjWorkspaceName(r.Workspace)+"@)")
 		if err != nil {
 			return err
 		}
 		if len(parents) != 1 || parents[0] != parent {
 			return errors.New("unexpected add parent")
 		}
-		fresh, err := integrationRevisionMatchesAtOperation(repo, operation, r.Workspace+`@ & empty() & description("") & ~conflicts()`)
+		fresh, err := integrationRevisionMatchesAtOperation(repo, operation, jjWorkspaceName(r.Workspace)+`@ & empty() & description("") & ~conflicts()`)
 		if err != nil {
 			return err
 		}

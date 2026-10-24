@@ -183,7 +183,7 @@ func discoverBookmarkSources(repoPath, targetHandle string) ([]bookmarkSource, [
 		return sources, refs, nil
 	}
 	candidates := revsetUnion(commits)
-	outsideTarget := "~::" + targetHandle + "@ & " + workspaceRelevantRevset()
+	outsideTarget := "~::" + jjWorkspaceName(targetHandle) + "@ & " + workspaceRelevantRevset()
 	query := func(marking string) (map[string]bool, error) {
 		ids, err := revisionCommitIDs(repoPath, candidates+" & ("+marking+")::")
 		if err != nil {

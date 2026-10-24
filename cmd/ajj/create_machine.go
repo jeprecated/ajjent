@@ -60,6 +60,9 @@ func runCreateMachine(args []string) error {
 		return err
 	}
 	if request.NoCleanup {
+		if err := configureAgentTickFrom(repo); err != nil {
+			return err
+		}
 		version, err := jjVersionFn()
 		if err != nil || !supportsNoCleanupJJVersion(version) {
 			return errNoCleanupUntestedJJ()
@@ -101,6 +104,12 @@ func supportsNoCleanupJJVersion(version string) bool {
 	reported := strings.TrimSpace(version)
 	for _, trusted := range trustedNoCleanupJJVersions() {
 		if reported == "jj "+trusted {
+			return true
+		}
+		// Agent Tick's jj is this release's jj-cli and jj-lib with Agent
+		// Tick's stores and two small patches, and only it opens Agent Tick
+		// repos.
+		if agentTickPrefix != "" && reported == "jj "+trusted+"-agent-tick" {
 			return true
 		}
 		// Accept the trusted release's own tag commit, never another

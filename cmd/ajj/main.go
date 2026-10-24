@@ -716,7 +716,7 @@ func createWorkspaceInternal(repoRoot string, cfg config, project string, handle
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return fmt.Errorf("create Workspace parent: %w", err)
 	}
-	addArgs := []string{"-R", repoRoot, "workspace", "add", "--config", workspaceAddNoColocate, "--name", handle}
+	addArgs := []string{"-R", repoRoot, "workspace", "add", "--config", workspaceAddNoColocate, "--name", jjWorkspaceName(handle)}
 	if revision != "" {
 		// Pass the exact commit id as a separate argv value; never shell-construct.
 		addArgs = append(addArgs, "--revision", revision)
@@ -878,7 +878,7 @@ const workspaceAddNoColocate = "git.colocate=false"
 // or partial working copy for the next attempt.
 func cleanupFailedRevisionWorkspace(repoRoot, handle, target string) error {
 	var problems []string
-	if err := commandToStderrFn("jj", "-R", repoRoot, "workspace", "forget", handle); err != nil {
+	if err := commandToStderrFn("jj", "-R", repoRoot, "workspace", "forget", jjWorkspaceName(handle)); err != nil {
 		problems = append(problems, fmt.Sprintf("forget Workspace %q: %v", handle, err))
 	}
 	if err := os.RemoveAll(target); err != nil {
@@ -1273,7 +1273,7 @@ func loadTidyReview(repoRoot string, cfg config, project string) ([]workspaceInf
 	}
 	candidates := []workspaceInfo{}
 	for _, info := range infos {
-		if !info.Main && !info.Current {
+		if !info.Main && !info.Current && !foreignTidyWorkspace(info) {
 			candidates = append(candidates, info)
 		}
 	}
@@ -1407,7 +1407,7 @@ func tidyWorkspacesPass(repoRoot string, cfg config, project string, infos []wor
 		targets = targets[:0]
 		for _, item := range selected {
 			info, ok := byHandle[item.Handle]
-			if !ok || info.Main || info.Current || info.Stale || (!info.Missing && !force && !isClosable(info)) {
+			if !ok || info.Main || info.Current || info.Stale || foreignTidyWorkspace(info) || (!info.Missing && !force && !isClosable(info)) {
 				continue
 			}
 			targets = append(targets, info)
@@ -1415,6 +1415,11 @@ func tidyWorkspacesPass(repoRoot string, cfg config, project string, infos []wor
 	} else {
 		for _, info := range staleWorkspaceInfos(infos) {
 			fmt.Fprintf(stderrWriter, "%s\n", cliStylesForWriter(stderrWriter).Warn.Render(fmt.Sprintf("Skipping stale Workspace %s: %s", info.Ref.Handle, staleWorkspaceSkipHint(info, pass.updateStaleRan))))
+		}
+		for _, info := range infos {
+			if foreignTidyWorkspace(info) {
+				fmt.Fprintf(stderrWriter, "%s\n", cliStylesForWriter(stderrWriter).Warn.Render(fmt.Sprintf("Skipping jj workspace %s: %s", info.Ref.Handle, foreignWorkspaceNote)))
+			}
 		}
 		// Updated Workspaces held for review are never closed automatically,
 		// with or without force.
@@ -1515,10 +1520,19 @@ func tidyWorkspacesPass(repoRoot string, cfg config, project string, infos []wor
 	return nil
 }
 
+// foreignTidyWorkspace reports a jj workspace whose name is not a Workspace
+// Handle, such as another host's `prism/name` in an ordinary repo. Tidy never
+// snapshots, selects, closes, or sets policy on it.
+func foreignTidyWorkspace(info workspaceInfo) bool {
+	return validateWorkspaceHandle(info.Ref.Handle) != nil
+}
+
+const foreignWorkspaceNote = "name is not a Workspace Handle, so Tidy leaves it alone; remove it with the tool that created it or jj workspace forget"
+
 func tidyTargets(infos []workspaceInfo, force bool) []workspaceInfo {
 	targets := []workspaceInfo{}
 	for _, info := range infos {
-		if info.Main || info.Current || info.Stale || info.Policy != policyDisposable {
+		if info.Main || info.Current || info.Stale || foreignTidyWorkspace(info) || info.Policy != policyDisposable {
 			continue
 		}
 		if info.Missing || force || isClosable(info) {
@@ -1985,9 +1999,9 @@ func validateMoveToMainTarget(info workspaceInfo) error {
 
 func moveToMainDestinationRevset(mainInfo workspaceInfo) string {
 	if mainInfo.Empty {
-		return mainInfo.Ref.Handle + "@-"
+		return jjWorkspaceName(mainInfo.Ref.Handle) + "@-"
 	}
-	return mainInfo.Ref.Handle + "@"
+	return jjWorkspaceName(mainInfo.Ref.Handle) + "@"
 }
 
 func moveToMainPrompt(targets []workspaceInfo, destination string) string {
@@ -2377,7 +2391,7 @@ func resolveLineStackPlan(repoPath string, plan lineStackPlan) (lineStackPlan, e
 			continue
 		}
 		for _, excluded := range plan.Excluded {
-			descendant, err := revisionMatches(repoPath, excluded+"@ & descendants("+advance.InProgressRevset+")")
+			descendant, err := revisionMatches(repoPath, jjWorkspaceName(excluded)+"@ & descendants("+advance.InProgressRevset+")")
 			if err != nil {
 				return lineStackPlan{}, err
 			}
@@ -2411,7 +2425,7 @@ func resolveLineStackPlan(repoPath string, plan lineStackPlan) (lineStackPlan, e
 			return lineStackPlan{}, fmt.Errorf("Line Stack payload Workspace %q has unique immutable commits; rebase or make them mutable before Line Stacking", current)
 		}
 		for _, excluded := range plan.Excluded {
-			descendant, err := revisionMatches(repoPath, excluded+"@ & descendants("+sourceRevset+")")
+			descendant, err := revisionMatches(repoPath, jjWorkspaceName(excluded)+"@ & descendants("+sourceRevset+")")
 			if err != nil {
 				return lineStackPlan{}, err
 			}
@@ -2454,7 +2468,7 @@ func normalizeLineStackRole(role string) (string, error) {
 }
 
 func lineStackPayloadSourceRevset(handle string, baseHandle string) string {
-	return fmt.Sprintf("(::%s@ & ~::%s@ & ~empty())", handle, baseHandle)
+	return fmt.Sprintf("(::%s@ & ~::%s@ & ~empty())", jjWorkspaceName(handle), jjWorkspaceName(baseHandle))
 }
 
 func lineStackPayloadDestinationRevset(handle string) string {
@@ -2462,11 +2476,11 @@ func lineStackPayloadDestinationRevset(handle string) string {
 }
 
 func lineStackPayloadDestinationRevsetExcluding(handle string, excluded []string) string {
-	return fmt.Sprintf("heads(%s)", lineStackExcludeRevset(fmt.Sprintf("(::%s@ & ~empty())", handle), excluded))
+	return fmt.Sprintf("heads(%s)", lineStackExcludeRevset(fmt.Sprintf("(::%s@ & ~empty())", jjWorkspaceName(handle)), excluded))
 }
 
 func lineStackInProgressHeadRevset(handle string) string {
-	return fmt.Sprintf("(description(\"\") & ~empty() & %s@)", handle)
+	return fmt.Sprintf("(description(\"\") & ~empty() & %s@)", jjWorkspaceName(handle))
 }
 
 func lineStackExcludeRevset(revset string, excluded []string) string {
@@ -2481,7 +2495,7 @@ func lineStackFirstPayloadPreviewRevset(handle string, nextHandle string) string
 	if strings.TrimSpace(nextHandle) == "" {
 		return lineStackPayloadDestinationRevset(handle)
 	}
-	return fmt.Sprintf("(::%s@ & ~::%s@ & ~empty())", handle, nextHandle)
+	return fmt.Sprintf("(::%s@ & ~::%s@ & ~empty())", jjWorkspaceName(handle), jjWorkspaceName(nextHandle))
 }
 
 func lineStackProjectedLog(repoPath string, plan lineStackPlan) (string, error) {
@@ -2792,7 +2806,7 @@ func executeLineStackPlan(repoPath string, plan lineStackPlan) error {
 			return fmt.Errorf("update stale Workspace %q before Line Stack advance: %w", advance.Handle, err)
 		}
 		if advance.InProgress {
-			if err := commandToStderrFn("jj", "-R", advance.Path, "rebase", "-r", advance.Handle+"@", "-d", plan.FinalTip); err != nil {
+			if err := commandToStderrFn("jj", "-R", advance.Path, "rebase", "-r", jjWorkspaceName(advance.Handle)+"@", "-d", plan.FinalTip); err != nil {
 				return fmt.Errorf("rebase in-progress Workspace %q to Line Stack tip: %w", advance.Handle, err)
 			}
 		} else if err := commandToStderrFn("jj", "-R", advance.Path, "new", plan.FinalTip); err != nil {
@@ -2855,6 +2869,7 @@ func commandContext(repoRootOverride, projectOverride, rootOverride string) (str
 		return "", config{}, "", err
 	}
 	cfg.Project = project
+	adoptAgentTickMainWorkspace(repoRoot, &cfg)
 	return repoRoot, cfg, project, nil
 }
 
@@ -3204,17 +3219,17 @@ func workspaceInfosForRefs(repoRoot string, cfg config, project string, refs []w
 				info.Empty = false
 				info.Stacked = false
 			} else {
-				info.Empty, err = revisionMatches(graphRepoPath, "empty() & "+ref.Handle+"@")
+				info.Empty, err = revisionMatches(graphRepoPath, "empty() & "+jjWorkspaceName(ref.Handle)+"@")
 				if err != nil {
 					return nil, fmt.Errorf("probe empty status for Workspace %q from %s: %w", ref.Handle, graphRepoPath, err)
 				}
-				info.Stacked, err = revisionIsAncestor(graphRepoPath, ref.Handle+"@", cfg.MainWorkspace+"@")
+				info.Stacked, err = revisionIsAncestor(graphRepoPath, jjWorkspaceName(ref.Handle)+"@", jjWorkspaceName(cfg.MainWorkspace)+"@")
 				if err != nil {
 					return nil, fmt.Errorf("probe stacked status for Workspace %q from %s: %w", ref.Handle, graphRepoPath, err)
 				}
 			}
 		} else {
-			info.Empty, err = revisionMatches(graphRepoPath, "empty() & "+ref.Handle+"@")
+			info.Empty, err = revisionMatches(graphRepoPath, "empty() & "+jjWorkspaceName(ref.Handle)+"@")
 			if err != nil {
 				return nil, fmt.Errorf("probe empty status for Workspace %q from %s: %w", ref.Handle, graphRepoPath, err)
 			}
@@ -3252,7 +3267,7 @@ func workspaceHasConflictCommits(repoPath, handle string) (bool, error) {
 	// Conflict status belongs to this head's mutable history, not its connected
 	// component: reachable() also traverses children into unrelated siblings.
 	// Include conflicted empty cursors and ancestors, not only relevant payloads.
-	return revisionMatches(repoPath, "conflicts() & mutable() & ::"+handle+"@")
+	return revisionMatches(repoPath, "conflicts() & mutable() & ::"+jjWorkspaceName(handle)+"@")
 }
 
 func workspaceHasUnstackedCommits(repoPath, handle, mainHandle string) (bool, error) {
@@ -3268,11 +3283,11 @@ func workspaceBehindCount(repoPath, handle, mainHandle string) (int, error) {
 }
 
 func workspaceAheadRevset(handle, mainHandle string) string {
-	return "::" + handle + "@ & ~::" + mainHandle + "@ & " + workspaceRelevantRevset()
+	return "::" + jjWorkspaceName(handle) + "@ & ~::" + jjWorkspaceName(mainHandle) + "@ & " + workspaceRelevantRevset()
 }
 
 func workspaceBehindRevset(handle, mainHandle string) string {
-	return "::" + mainHandle + "@ & ~::" + handle + "@ & " + workspaceRelevantRevset()
+	return "::" + jjWorkspaceName(mainHandle) + "@ & ~::" + jjWorkspaceName(handle) + "@ & " + workspaceRelevantRevset()
 }
 
 func workspaceRelevantRevset() string {
@@ -3280,13 +3295,13 @@ func workspaceRelevantRevset() string {
 }
 
 func workspaceUniqueRelevantMutableRevset(handle string, protectorHandles []string) string {
-	revset := "mutable() & ::" + handle + "@ & " + workspaceRelevantRevset()
+	revset := "mutable() & ::" + jjWorkspaceName(handle) + "@ & " + workspaceRelevantRevset()
 	if len(protectorHandles) == 0 {
 		return revset
 	}
 	protected := make([]string, 0, len(protectorHandles))
 	for _, protector := range uniqueNonEmptyStrings(protectorHandles) {
-		protected = append(protected, "::"+protector+"@")
+		protected = append(protected, "::"+jjWorkspaceName(protector)+"@")
 	}
 	return revset + " & ~(" + strings.Join(protected, " | ") + ")"
 }
@@ -3822,7 +3837,7 @@ func closeWorkspacesWithProtection(repoPath string, targets []workspaceInfo, for
 				return failure(index, fmt.Errorf("cannot remove Workspace %q directory %s: %w; the Workspace remains registered in jj — fix the filesystem issue and retry", info.Ref.Handle, info.Path, err))
 			}
 		}
-		if err := commandToStderrFn("jj", "-R", repoPath, "workspace", "forget", info.Ref.Handle); err != nil {
+		if err := commandToStderrFn("jj", "-R", repoPath, "workspace", "forget", jjWorkspaceName(info.Ref.Handle)); err != nil {
 			if info.Missing {
 				return failure(index, fmt.Errorf("cannot forget missing Workspace %q (filesystem untouched): %w", info.Ref.Handle, err))
 			}
@@ -3900,11 +3915,11 @@ func abandonUniqueMutableChanges(repoRoot, handle string, protectorHandles []str
 	// The immutable protector set is computed once for the complete closing batch. Members
 	// of that batch can never protect each other; every surviving registered Workspace can,
 	// including one whose directory is missing but whose jj Workspace ref still exists.
-	revset := "mutable() & ::" + handle + "@"
+	revset := "mutable() & ::" + jjWorkspaceName(handle) + "@"
 	if len(protectorHandles) > 0 {
 		otherAncestors := make([]string, 0, len(protectorHandles))
 		for _, protector := range uniqueNonEmptyStrings(protectorHandles) {
-			otherAncestors = append(otherAncestors, "::"+protector+"@")
+			otherAncestors = append(otherAncestors, "::"+jjWorkspaceName(protector)+"@")
 		}
 		revset += " & ~(" + strings.Join(otherAncestors, " | ") + ")"
 	}
@@ -4086,7 +4101,7 @@ func jjSupportsDetachedOperations() bool {
 }
 
 func trySingleInputTidyLinearProbe(mainPath, input string) (bool, bool, error) {
-	payloadRevset := fmt.Sprintf("(::%s@ & ~::@ & ~empty())", input)
+	payloadRevset := fmt.Sprintf("(::%s@ & ~::@ & ~empty())", jjWorkspaceName(input))
 	payloadChanges, err := revisionChangeIDs(mainPath, payloadRevset)
 	if err != nil {
 		return false, false, err
@@ -4298,13 +4313,13 @@ func stackInputPayloadRevsets(inputs []stackInput) []string {
 }
 
 func stackInputPayloadRevset(handle string) string {
-	return fmt.Sprintf("heads((::%s@ & ~empty()) & ~%s)", handle, lineStackInProgressHeadRevset(handle))
+	return fmt.Sprintf("heads((::%s@ & ~empty()) & ~%s)", jjWorkspaceName(handle), lineStackInProgressHeadRevset(handle))
 }
 
 func describedStackInputHeads(repoPath string, inputs []string) (map[string]bool, error) {
 	described := make(map[string]bool, len(inputs))
 	for _, handle := range uniqueNonEmptyStrings(inputs) {
-		matches, err := revisionMatches(repoPath, handle+"@ & "+stackInputPayloadRevset(handle))
+		matches, err := revisionMatches(repoPath, jjWorkspaceName(handle)+"@ & "+stackInputPayloadRevset(handle))
 		if err != nil {
 			return nil, err
 		}
@@ -4318,11 +4333,11 @@ func advanceStackInputWorkspaces(target workspaceInfo, inputs []string, byHandle
 	if len(inputs) == 0 {
 		return nil
 	}
-	empty, err := revisionMatches(target.Path, "empty() & "+target.Ref.Handle+"@")
+	empty, err := revisionMatches(target.Path, "empty() & "+jjWorkspaceName(target.Ref.Handle)+"@")
 	if err != nil {
 		return err
 	}
-	conflicted, err := revisionMatches(target.Path, "conflicts() & "+target.Ref.Handle+"@")
+	conflicted, err := revisionMatches(target.Path, "conflicts() & "+jjWorkspaceName(target.Ref.Handle)+"@")
 	if err != nil {
 		return err
 	}
@@ -4343,7 +4358,7 @@ func advanceStackInputWorkspaces(target workspaceInfo, inputs []string, byHandle
 			}
 			continue
 		}
-		if err := commandToStderrFn("jj", "-R", info.Path, "rebase", "-r", handle+"@", "-d", destination); err != nil {
+		if err := commandToStderrFn("jj", "-R", info.Path, "rebase", "-r", jjWorkspaceName(handle)+"@", "-d", destination); err != nil {
 			return fmt.Errorf("advance Workspace %q onto target: %w", handle, err)
 		}
 	}
@@ -4443,7 +4458,7 @@ func advanceMainToStackPayload(mainPath, mainHandle string, inputs []stackInput)
 	}
 	unintegrated := make([]string, 0, len(tips))
 	for _, tip := range tips {
-		integrated, err := revisionIsAncestor(mainPath, tip, mainHandle+"@")
+		integrated, err := revisionIsAncestor(mainPath, tip, jjWorkspaceName(mainHandle)+"@")
 		if err != nil {
 			return err
 		}
@@ -4714,7 +4729,7 @@ func isAncestorOfAny(repoPath string, ancestor string, descendants []string) (bo
 func abandonEmptyWorkspaceHeads(repoPath string, infos []workspaceInfo) (bool, error) {
 	revs := make([]string, 0, len(infos))
 	for _, info := range infos {
-		revs = append(revs, info.Ref.Handle+"@")
+		revs = append(revs, jjWorkspaceName(info.Ref.Handle)+"@")
 	}
 	revs = uniqueNonEmptyStrings(revs)
 	if len(revs) == 0 {
@@ -5134,6 +5149,20 @@ func regularFilesHaveSameContent(a string, b string) (bool, error) {
 }
 
 func resolveRepoRoot(override string) (string, error) {
+	root, err := resolveRepoRootPath(override)
+	if err != nil {
+		return "", err
+	}
+	if err := configureAgentTick(root); err != nil {
+		return "", err
+	}
+	if err := checkAgentTickTick(); err != nil {
+		return "", err
+	}
+	return root, nil
+}
+
+func resolveRepoRootPath(override string) (string, error) {
 	if override != "" {
 		root := expandPath(override)
 		abs, err := filepath.Abs(root)
@@ -5163,6 +5192,13 @@ func resolveRepoRoot(override string) (string, error) {
 			return filepath.Clean(canonical), nil
 		}
 		return abs, nil
+	}
+	// `jj root` itself must run Agent Tick's jj inside an Agent Tick repo.
+	if err := configureAgentTickFrom(""); err != nil {
+		return "", err
+	}
+	if err := checkAgentTickTick(); err != nil {
+		return "", err
 	}
 	if out, err := commandCaptureFn("jj", "root"); err == nil {
 		root := strings.TrimSpace(out)
@@ -5222,7 +5258,11 @@ func listWorkspaceRefs(repoRoot string) ([]workspaceRef, error) {
 			continue
 		}
 		parts := strings.Split(line, "\t")
-		ref := workspaceRef{Handle: strings.TrimSpace(parts[0])}
+		handle, ours := handleFromJJWorkspaceName(strings.TrimSpace(parts[0]))
+		if !ours {
+			continue
+		}
+		ref := workspaceRef{Handle: handle}
 		if len(parts) > 1 {
 			ref.TargetChange = strings.TrimSpace(parts[1])
 		}
@@ -5232,6 +5272,11 @@ func listWorkspaceRefs(repoRoot string) ([]workspaceRef, error) {
 		refs = append(refs, ref)
 	}
 	sort.Slice(refs, func(i, j int) bool { return refs[i].Handle < refs[j].Handle })
+	for i := 1; i < len(refs); i++ {
+		if refs[i-1].Handle == refs[i].Handle {
+			return nil, fmt.Errorf("jj workspaces %q and %q are both Workspace %q; rename one with jj workspace rename", refs[i].Handle, hostPrefix+refs[i].Handle, refs[i].Handle)
+		}
+	}
 	return refs, nil
 }
 
@@ -5695,6 +5740,10 @@ type selectorItem struct {
 	// Stale rows (Tidy only) are never selectable, even with force, until
 	// the user's `u` updates them and the whole review is rebuilt.
 	Stale bool
+	// Foreign rows (Tidy only) are jj workspaces whose name is not a
+	// Workspace Handle; they are never selectable, even with force, and p
+	// never sets their policy.
+	Foreign bool
 	// Note (Tidy only) is a warning shown first on the row's detail line,
 	// e.g. that its stale update kept on-disk edits in a divergent commit.
 	Note string
@@ -6018,7 +6067,7 @@ func (m *selectorModel) toggleForce() {
 			continue
 		}
 		if m.opts.Tidy {
-			item.Disabled = item.Stale || itemHasMarker(*item, "current") || itemHasMarker(*item, "main") || (!m.opts.ForceEnabled && !item.NormallyClosable && item.Status != "missing")
+			item.Disabled = item.Stale || item.Foreign || itemHasMarker(*item, "current") || itemHasMarker(*item, "main") || (!m.opts.ForceEnabled && !item.NormallyClosable && item.Status != "missing")
 		} else if m.opts.ForceEnabled {
 			item.Disabled = item.Status == "missing"
 		} else {
@@ -6665,12 +6714,17 @@ func selectorItemsForTidy(infos []workspaceInfo, force bool) []selectorItem {
 			continue
 		}
 		tidy := isClosable(info) || info.Missing
-		disabled := info.Current || info.Stale || (!force && !tidy)
+		foreign := foreignTidyWorkspace(info)
+		disabled := info.Current || info.Stale || foreign || (!force && !tidy)
 		status := statusLabel(info)
 		if info.Stale {
 			status = "stale"
 		}
-		items = append(items, selectorItem{Handle: info.Ref.Handle, Path: info.Path, Status: status, Policy: emptyDefault(info.Policy, policyKeep), Safety: workspaceCloseSafetyLabel(info), NormallyClosable: isClosable(info), Markers: strings.Join(markers(info), ","), Disabled: disabled, Stale: info.Stale, Selected: info.Policy == policyDisposable && (tidy || force) && !info.Current && !info.Stale})
+		note := ""
+		if foreign {
+			note = foreignWorkspaceNote
+		}
+		items = append(items, selectorItem{Handle: info.Ref.Handle, Path: info.Path, Status: status, Policy: emptyDefault(info.Policy, policyKeep), Safety: workspaceCloseSafetyLabel(info), NormallyClosable: isClosable(info), Markers: strings.Join(markers(info), ","), Disabled: disabled, Stale: info.Stale, Foreign: foreign, Note: note, Selected: info.Policy == policyDisposable && (tidy || force) && !info.Current && !info.Stale && !foreign})
 	}
 	return items
 }
@@ -6888,7 +6942,8 @@ func compareVersions(a, b string) int {
 }
 
 func runCommandCapture(name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
+	program, programArgs := jjProgram(name, args)
+	cmd := exec.Command(program, programArgs...)
 	setCommandWorkingDir(cmd, name, args...)
 	var out bytes.Buffer
 	var stderr bytes.Buffer
@@ -6926,7 +6981,8 @@ func (w *boundedCommandOutput) Write(p []byte) (int, error) {
 }
 
 func runCommandCombinedCapture(name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
+	program, programArgs := jjProgram(name, args)
+	cmd := exec.Command(program, programArgs...)
 	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
 	setCommandWorkingDir(cmd, name, args...)
 	out := &boundedCommandOutput{limit: detachedOperationResultMaxBytes}
@@ -6947,7 +7003,8 @@ func runCommandCombinedCapture(name string, args ...string) (string, error) {
 }
 
 func runCommandToStderr(name string, args ...string) error {
-	cmd := exec.Command(name, args...)
+	program, programArgs := jjProgram(name, args)
+	cmd := exec.Command(program, programArgs...)
 	setCommandWorkingDir(cmd, name, args...)
 	cmd.Stdout = stderrWriter
 	cmd.Stderr = stderrWriter

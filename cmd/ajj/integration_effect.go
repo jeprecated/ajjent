@@ -67,7 +67,7 @@ func materializeIntegrationPayloadChanges(repoPath, targetHandle, payloadHandle 
 }
 
 func materializeIntegrationPayloadChangesAtOperation(repoPath, operationID, targetHandle, payloadHandle string) ([]integrationPreparedChangeV1, []string, error) {
-	revset := fmt.Sprintf("(::%s@ & ~::%s@ & ~empty())", payloadHandle, targetHandle)
+	revset := fmt.Sprintf("(::%s@ & ~::%s@ & ~empty())", jjWorkspaceName(payloadHandle), jjWorkspaceName(targetHandle))
 	out, err := integrationQuery(repoPath, operationID, "log", "-r", revset, "--no-graph", "-T", "change_id ++ \"\\t\" ++ commit_id ++ \"\\n\"")
 	if err != nil {
 		return nil, nil, err
@@ -135,7 +135,7 @@ func integrationOperationFullID(repoPath, operationID string) (string, error) {
 }
 
 func integrationWorkspaceHeadCommitAtOperation(repoPath, operationID, handle string) (string, error) {
-	ids, err := integrationCommitIDsAtOperation(repoPath, operationID, handle+"@")
+	ids, err := integrationCommitIDsAtOperation(repoPath, operationID, jjWorkspaceName(handle)+"@")
 	if err != nil {
 		return "", err
 	}
@@ -289,7 +289,10 @@ func integrationSelectedWorkspacePaths(repoRoot, operationID string, cfg config,
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 2)
+		parts, ours := splitWorkspaceListLine(line, 2)
+		if !ours {
+			continue
+		}
 		ref := workspaceRef{Handle: strings.TrimSpace(parts[0])}
 		if len(parts) == 2 {
 			ref.Root = strings.TrimSpace(parts[1])
@@ -555,7 +558,10 @@ func stageDetachedRestoreOmittedWorkspaceHeads(cfg config, project string, targe
 	}
 	roots := map[string]string{}
 	for _, line := range strings.Split(strings.TrimSpace(rootsOut), "\n") {
-		parts := strings.SplitN(line, "\t", 2)
+		parts, ours := splitWorkspaceListLine(line, 2)
+		if !ours {
+			continue
+		}
 		if len(parts) != 2 || validateWorkspaceHandle(parts[0]) != nil {
 			return errors.New("omitted Workspace path evidence is invalid")
 		}
@@ -575,11 +581,11 @@ func stageDetachedRestoreOmittedWorkspaceHeads(cfg config, project string, targe
 		if err := integrationOmittedRestoreHook("before-" + before.Workspace); err != nil {
 			return &integrationBoundaryInterruption{err: err}
 		}
-		selectedHeads := []string{request.Target.ExpectedWorkspace + "@"}
+		selectedHeads := []string{jjWorkspaceName(request.Target.ExpectedWorkspace) + "@"}
 		for _, payload := range request.Payloads {
-			selectedHeads = append(selectedHeads, payload.Workspace+"@")
+			selectedHeads = append(selectedHeads, jjWorkspaceName(payload.Workspace)+"@")
 		}
-		uniqueOut, err := integrationQuery(target.Path, record.BeforeOperationID, "log", "-r", "(::"+before.Workspace+"@ & ~::("+strings.Join(selectedHeads, " | ")+"))", "--no-graph", "-T", `change_id ++ "\n"`)
+		uniqueOut, err := integrationQuery(target.Path, record.BeforeOperationID, "log", "-r", "(::"+jjWorkspaceName(before.Workspace)+"@ & ~::("+strings.Join(selectedHeads, " | ")+"))", "--no-graph", "-T", `change_id ++ "\n"`)
 		if err != nil {
 			return err
 		}
@@ -668,7 +674,8 @@ func runIntegrationCommandCaptureBounded(maxBytes int, name string, args ...stri
 	if maxBytes <= 0 || uint64(maxBytes) >= uint64(math.MaxInt64) {
 		return "", errIntegrationEvidenceOutputLimit
 	}
-	cmd := exec.Command(name, args...)
+	program, programArgs := jjProgram(name, args)
+	cmd := exec.Command(program, programArgs...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return "", errIntegrationEvidenceCommand
@@ -755,7 +762,7 @@ func sealDetachedIntegrationTransaction(repoPath string, binding integrationStat
 
 func stageDetachedPayloadCursors(repoRoot string, cfg config, project string, target integrationTargetResolution, binding integrationStateBinding, record *integrationOperationRecord, request integrationRequestV1) error {
 	operationID := record.GraphOperationID
-	parents, err := integrationCommitIDsAtOperation(target.Path, operationID, "parents("+request.Target.ExpectedWorkspace+"@)")
+	parents, err := integrationCommitIDsAtOperation(target.Path, operationID, "parents("+jjWorkspaceName(request.Target.ExpectedWorkspace)+"@)")
 	if err != nil || len(parents) != 1 {
 		return errors.New("integrated target has no exact cursor parent")
 	}
@@ -842,26 +849,26 @@ func detachedTargetState(repoPath, operationID, targetHandle string) (integratio
 	if err != nil {
 		return integrationTargetAdvancedStateV1{}, err
 	}
-	parents, err := integrationCommitIDsAtOperation(repoPath, operationID, "parents("+targetHandle+"@)")
+	parents, err := integrationCommitIDsAtOperation(repoPath, operationID, "parents("+jjWorkspaceName(targetHandle)+"@)")
 	if err != nil {
 		return integrationTargetAdvancedStateV1{}, err
 	}
 	if len(parents) != 1 {
 		return integrationTargetAdvancedStateV1{}, errors.New("staged integration target does not have one integrated tip")
 	}
-	empty, err := integrationRevisionMatchesAtOperation(repoPath, operationID, "empty() & "+targetHandle+"@")
+	empty, err := integrationRevisionMatchesAtOperation(repoPath, operationID, "empty() & "+jjWorkspaceName(targetHandle)+"@")
 	if err != nil || !empty {
 		return integrationTargetAdvancedStateV1{}, errors.New("staged integration target cursor is not empty")
 	}
-	conflicted, err := integrationRevisionMatchesAtOperation(repoPath, operationID, "conflicts() & "+targetHandle+"@")
+	conflicted, err := integrationRevisionMatchesAtOperation(repoPath, operationID, "conflicts() & "+jjWorkspaceName(targetHandle)+"@")
 	if err != nil || conflicted {
 		return integrationTargetAdvancedStateV1{}, errors.New("staged integration target cursor is conflicted")
 	}
-	mutable, err := integrationRevisionMatchesAtOperation(repoPath, operationID, "mutable() & "+targetHandle+"@")
+	mutable, err := integrationRevisionMatchesAtOperation(repoPath, operationID, "mutable() & "+jjWorkspaceName(targetHandle)+"@")
 	if err != nil || !mutable {
 		return integrationTargetAdvancedStateV1{}, errors.New("staged integration target cursor is immutable")
 	}
-	description, err := integrationQuery(repoPath, operationID, "log", "-r", targetHandle+"@", "--no-graph", "-T", "description")
+	description, err := integrationQuery(repoPath, operationID, "log", "-r", jjWorkspaceName(targetHandle)+"@", "--no-graph", "-T", "description")
 	if err != nil || description != "" {
 		return integrationTargetAdvancedStateV1{}, errors.New("staged integration target cursor is described")
 	}
@@ -984,7 +991,10 @@ func updateIntegratedWorkspaceFiles(repoRoot, operationID string, cfg config, pr
 	}
 	byHandle := map[string]workspaceRef{}
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		parts := strings.SplitN(line, "\t", 2)
+		parts, ours := splitWorkspaceListLine(line, 2)
+		if !ours {
+			continue
+		}
 		if len(parts) != 2 || validateWorkspaceHandle(parts[0]) != nil {
 			return errors.New("integrated Workspace path evidence is invalid")
 		}
@@ -1035,7 +1045,7 @@ func revalidatePreparedIntegrationForEffect(repoRoot string, cfg config, project
 func preparedChangesReachableFromTargetAtOperation(repoPath, operationID, targetHandle string, prepared integrationPreparedStateV1) (bool, error) {
 	for _, payload := range prepared.Payloads {
 		for _, change := range payload.Changes {
-			commits, err := integrationCommitIDsAtOperation(repoPath, operationID, fmt.Sprintf("(change_id(%s) & ::%s@)", change.ChangeID, targetHandle))
+			commits, err := integrationCommitIDsAtOperation(repoPath, operationID, fmt.Sprintf("(change_id(%s) & ::%s@)", change.ChangeID, jjWorkspaceName(targetHandle)))
 			if err != nil {
 				return false, err
 			}
@@ -1054,7 +1064,7 @@ func proveIntegrationPayloadMappingsAtOperation(repoPath, operationID, targetHan
 			return nil, errors.New("prepared payload has no exact change evidence")
 		}
 		for _, change := range payload.Changes {
-			commits, err := integrationCommitIDsAtOperation(repoPath, operationID, fmt.Sprintf("(change_id(%s) & ::%s@)", change.ChangeID, targetHandle))
+			commits, err := integrationCommitIDsAtOperation(repoPath, operationID, fmt.Sprintf("(change_id(%s) & ::%s@)", change.ChangeID, jjWorkspaceName(targetHandle)))
 			if err != nil || len(commits) != 1 {
 				return nil, errors.New("could not prove one landed payload change")
 			}

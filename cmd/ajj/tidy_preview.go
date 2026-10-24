@@ -19,7 +19,8 @@ var tidyReadCommandFn = runTidyReadCommand
 // The caller supplies one deadline for the entire evidence/preview request.
 func runTidyReadCommand(ctx context.Context, repo, operation string, limit int, args ...string) (string, bool, error) {
 	argv := append([]string{"-R", repo, "--ignore-working-copy", "--at-op=" + operation, "--color=never", "--no-pager"}, args...)
-	cmd := exec.CommandContext(ctx, "jj", argv...)
+	program, programArgs := jjProgram("jj", argv)
+	cmd := exec.CommandContext(ctx, program, programArgs...)
 	setCommandWorkingDir(cmd, "jj", argv...)
 	out := boundedCommandOutput{limit: limit}
 	stderr := boundedCommandOutput{limit: 4096}
@@ -117,7 +118,7 @@ func (r *tidyGraphEvidence) preview(ctx context.Context, handle string, selected
 		return nil
 	}
 	const template = `change_id.short(12) ++ " " ++ commit_id.short(12) ++ " " ++ if(conflict, "[conflict] ", "") ++ description.first_line() ++ "\n"`
-	relevant := "mutable() & ::" + handle + "@ & " + workspaceRelevantRevset()
+	relevant := "mutable() & ::" + jjWorkspaceName(handle) + "@ & " + workspaceRelevantRevset()
 	if err := read("Relevant mutable ancestor log (change ID / commit ID / description; empty cursors omitted)", 30, "log", "--no-graph", "-n", "31", "-r", relevant, "-T", template); err != nil {
 		return strings.Join(sections, "\n"), err
 	}
@@ -146,10 +147,10 @@ func (r *tidyGraphEvidence) preview(ctx context.Context, handle string, selected
 		return strings.Join(sections, "\n"), fmt.Errorf("Main comparison unavailable: no reviewed Main Workspace")
 	}
 	label := "Main comparison: " + main + "@ -> " + handle + "@ (NOT unique-work or ancestry proof)"
-	if err := read(label+" / changed files", 80, "diff", "--from", main+"@", "--to", handle+"@", "--summary"); err != nil {
+	if err := read(label+" / changed files", 80, "diff", "--from", jjWorkspaceName(main)+"@", "--to", jjWorkspaceName(handle)+"@", "--summary"); err != nil {
 		return strings.Join(sections, "\n"), err
 	}
-	if err := read(label+" / patch", 120, "diff", "--from", main+"@", "--to", handle+"@", "--git", "--context", "3"); err != nil {
+	if err := read(label+" / patch", 120, "diff", "--from", jjWorkspaceName(main)+"@", "--to", jjWorkspaceName(handle)+"@", "--git", "--context", "3"); err != nil {
 		return strings.Join(sections, "\n"), err
 	}
 	return strings.Join(sections, "\n"), nil
