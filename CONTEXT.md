@@ -131,6 +131,7 @@ _Avoid_: Disposable workspace, empty or Main-stacked workspace
 - **Moving to Main** applies to non-main **Workspaces** with no unique non-empty commits and advances their Workspace heads to the Main Workspace line.
 - **Creating** produces one **Workspace**.
 - **Opening** applies to an existing **Workspace**.
+- **Creating** with `--open-existing` Opens a registered **Workspace Handle** instead, after checking that its head sits on the requested bookmark (the bookmark's commit is `@` or a parent of `@`); it never moves a Workspace, and recovers a stale one only on explicit `--update-stale`.
 - **Closing** applies only to a non-main **Workspace**.
 - **Forced Closing** applies only to a non-main **Workspace**.
 - **Closing** commonly targets the **Current Workspace** or selected non-main **Workspaces**.

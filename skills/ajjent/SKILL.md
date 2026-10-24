@@ -34,6 +34,14 @@ ajj --repo /path/to/current-workspace create <source> <handle>
 
 With two Handles, Creating starts a child Workspace from the source Workspace's current working-copy commit, including uncommitted edits, without Opening the source first. Do not combine this form with `--revision`. With zero or one Handle, Creating retains jj's default base (the Current Workspace's parent commits). No Git-style clean-working-tree requirement applies. The returned Workspace Handle is reusable after Closing.
 
+`--bookmark <name>` bases the new Workspace on a local bookmark's exact commit instead (not with `--revision` or a source Handle). To keep one long-lived Workspace on a bookmark, for example an automated agent's line of work, start each run with the idempotent form and enter the printed path:
+
+```sh
+cd "$(ajj --repo /path/to/repo create agents-update --bookmark bot/agents-update --open-existing --update-stale)"
+```
+
+It Creates the Workspace on the bookmark when the Handle is not registered, and Opens it when the Workspace's `@` or `@-` is the bookmark's commit. It refuses, with empty stdout and a fix in the message, when the Workspace sits elsewhere (it never moves it), when the bookmark is missing or conflicted, or when a deleted Workspace's head still holds work. A deleted Workspace whose head was an empty cursor on the bookmark is recreated. `--update-stale` runs `jj workspace update-stale` on a stale Workspace first; without it a stale Workspace is refused. If the update kept on-disk edits in a divergent commit, stop and report it rather than resolving the divergence yourself.
+
 ### Keep and Disposable
 
 Every Workspace has a cleanup policy that is separate from graph safety:

@@ -541,23 +541,26 @@ func runCreate(args []string) error {
 		return runCreateMachine(args)
 	}
 	var err error
-	args, err = normalizePositionalsLast(args, map[string]struct{}{"--repo": {}, "--project": {}, "--workspaces-root": {}, "--revision": {}})
+	args, err = normalizePositionalsLast(args, map[string]struct{}{"--repo": {}, "--project": {}, "--workspaces-root": {}, "--revision": {}, "--bookmark": {}})
 	if err != nil {
 		return err
 	}
 	fs := flag.NewFlagSet("create", flag.ContinueOnError)
-	var repoRootOverride, projectOverride, rootOverride, revision, machineRequestHelp string
-	var envrc, direnvAllow, machineJSONHelp, disposable bool
+	var repoRootOverride, projectOverride, rootOverride, revision, bookmark, machineRequestHelp string
+	var envrc, direnvAllow, machineJSONHelp, disposable, openExisting, updateStale bool
 	fs.StringVar(&repoRootOverride, "repo", "", "repo root override")
 	fs.StringVar(&projectOverride, "project", "", "Project override")
 	fs.StringVar(&rootOverride, "workspaces-root", "", "Workspaces root override")
 	fs.StringVar(&revision, "revision", "", "base the new Workspace on an exact full commit id instead of jj's default")
+	fs.StringVar(&bookmark, "bookmark", "", "base the new Workspace on this local bookmark's commit")
+	fs.BoolVar(&openExisting, "open-existing", false, "if the Handle is registered, Open it instead; with --bookmark it must already be on the bookmark")
+	fs.BoolVar(&updateStale, "update-stale", false, "with --open-existing, run jj workspace update-stale on a stale Workspace before Opening it")
 	fs.BoolVar(&disposable, "disposable", false, "opt this Workspace into automatic Tidy (safety still required)")
 	fs.BoolVar(&envrc, "envrc", false, "create .envrc in the new Workspace")
 	fs.BoolVar(&direnvAllow, "direnv-allow", false, "run direnv allow for the new Workspace")
 	fs.StringVar(&machineRequestHelp, "request-json", "", "machine mode: read a strict create request from PATH or -")
 	fs.BoolVar(&machineJSONHelp, "json", false, "machine mode: write one bounded state receipt")
-	if handled, err := parseCommandFlags(fs, args, "ajj create [source] [handle] [options]", "Create a new Workspace (Keep by default) and print its path. Use --disposable to opt into automatic Tidy. With two Handles, inherit the source Workspace's current content."); handled || err != nil {
+	if handled, err := parseCommandFlags(fs, args, "ajj create [source] [handle] [options]", "Create a new Workspace (Keep by default) and print its path. Use --disposable to opt into automatic Tidy. With two Handles, inherit the source Workspace's current content. With --open-existing, a registered Handle is Opened instead, so `ajj create <handle> --bookmark <name> --open-existing` is idempotent; it never moves a Workspace that is not on the bookmark."); handled || err != nil {
 		return err
 	}
 	if machineRequestHelp != "" || machineJSONHelp {
@@ -567,14 +570,27 @@ func runCreate(args []string) error {
 	if err != nil {
 		return err
 	}
+	bookmark = strings.TrimSpace(bookmark)
+	if bookmark != "" && hasArgumentFlag(args, "--revision") {
+		return errors.New("create --bookmark cannot be combined with --revision")
+	}
 	positionals := fs.Args()
 	if len(positionals) > 2 {
 		return errors.New("create accepts at most two Workspace Handles: [source] [handle]")
+	}
+	if openExisting && len(positionals) != 1 {
+		return errors.New("create --open-existing requires exactly one Workspace Handle")
+	}
+	if updateStale && !openExisting {
+		return errors.New("create --update-stale requires --open-existing")
 	}
 	source := ""
 	if len(positionals) == 2 {
 		if hasArgumentFlag(args, "--revision") {
 			return errors.New("create source Handle cannot be combined with --revision")
+		}
+		if bookmark != "" {
+			return errors.New("create source Handle cannot be combined with --bookmark")
 		}
 		source = strings.TrimSpace(positionals[0])
 		if err := validateWorkspaceHandle(source); err != nil {
@@ -585,6 +601,11 @@ func runCreate(args []string) error {
 	repoRoot, cfg, project, err := commandContext(repoRootOverride, projectOverride, rootOverride)
 	if err != nil {
 		return err
+	}
+	if bookmark != "" {
+		if revision, err = resolveLocalBookmarkCommit(repoRoot, bookmark); err != nil {
+			return err
+		}
 	}
 	refs, err := listWorkspaceRefs(repoRoot)
 	if err != nil {
@@ -611,6 +632,13 @@ func runCreate(args []string) error {
 		handle = strings.TrimSpace(positionals[0])
 		if err := validateWorkspaceHandle(handle); err != nil {
 			return err
+		}
+		if _, ok := inUse[handle]; ok && openExisting {
+			recreate, err := openExistingForCreate(repoRoot, cfg, project, handle, bookmark, revision, updateStale)
+			if err != nil || !recreate {
+				return err
+			}
+			delete(inUse, handle)
 		}
 		if _, ok := inUse[handle]; ok {
 			if disposable {
