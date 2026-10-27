@@ -251,6 +251,10 @@ func stackKey(s string) tea.KeyMsg {
 		return tea.KeyMsg{Type: tea.KeyDown}
 	case "up":
 		return tea.KeyMsg{Type: tea.KeyUp}
+	case "pgdown":
+		return tea.KeyMsg{Type: tea.KeyPgDown}
+	case "pgup":
+		return tea.KeyMsg{Type: tea.KeyPgUp}
 	case "ctrl+c":
 		return tea.KeyMsg{Type: tea.KeyCtrlC}
 	}
@@ -411,15 +415,16 @@ func TestStackGraphModelMoldsSelectionWithKeys(t *testing.T) {
 	if m.shape != "auto" {
 		t.Fatalf("shape did not wrap: %s", m.shape)
 	}
-	// tab zooms; esc clears the selection; enter without selection explains.
+	// tab zooms and back; esc clears the selection; enter without selection explains.
 	m = stackGraphDrive(t, m, stackKey("tab"))
 	if !m.zoom {
 		t.Fatal("tab did not zoom")
 	}
+	m = stackGraphDrive(t, m, stackKey("tab"))
 	m = m.cursorTo(t, id('a'))
 	m = stackGraphDrive(t, m, stackKeys(" ", "esc")...)
-	if len(m.selected) != 0 {
-		t.Fatalf("esc did not clear: %v", m.selected)
+	if len(m.selected) != 0 || m.quit {
+		t.Fatalf("esc did not clear: %v quit=%v", m.selected, m.quit)
 	}
 	m = stackGraphDrive(t, m, stackKey("enter"))
 	if m.mode != stackGraphEdit || !strings.Contains(m.msg, "select at least one") {

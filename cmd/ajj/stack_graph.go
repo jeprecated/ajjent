@@ -57,10 +57,14 @@ type stackGraphStyles struct {
 }
 
 func stackGraphStylesForWriter(w io.Writer) stackGraphStyles {
-	noColor := os.Getenv("NO_COLOR") != "" || !canColorWriter(w)
-	base := lipgloss.NewRenderer(w).NewStyle()
+	color := os.Getenv("NO_COLOR") == "" && canColorWriter(w)
+	return newStackGraphStyles(lipgloss.NewRenderer(w), color)
+}
+
+func newStackGraphStyles(r *lipgloss.Renderer, color bool) stackGraphStyles {
+	base := r.NewStyle()
 	s := stackGraphStyles{dim: base.Faint(true), bold: base.Bold(true), title: base.Bold(true), target: base.Bold(true), yellow: base, red: base.Bold(true), green: base, magenta: base.Bold(true), rule: base.Faint(true)}
-	if noColor {
+	if !color {
 		for i := 0; i < 5; i++ {
 			s.inputs = append(s.inputs, base.Bold(true))
 		}
@@ -121,13 +125,20 @@ type stackGraphModel struct {
 	// lines of work.
 	changeMode bool
 	// showEmpty shows the empty Workspaces, hidden by default.
-	showEmpty   bool
+	showEmpty bool
+	// nowOffset and afterOffset are the first rows the panes show; the now
+	// pane scrolls only as far as the cursor needs. helpOffset scrolls ?.
+	nowOffset   int
 	afterOffset int
-	zoom        bool
-	mode        stackGraphMode
-	force       bool
-	msg         string
-	busy        string
+	helpOffset  int
+	// zoom shows the after pane alone (tab); a short terminal shows one pane
+	// at a time, so there tab switches between them.
+	zoom  bool
+	help  bool
+	mode  stackGraphMode
+	force bool
+	msg   string
+	busy  string
 
 	// The jj-facing steps are seams so tests can drive the model without
 	// a repository; each receives the state it must act on.
@@ -162,7 +173,9 @@ type stackGraphModel struct {
 }
 
 func newStackGraphModel(req stackGraphRequest, st *stackGraphState, styles stackGraphStyles) stackGraphModel {
-	m := stackGraphModel{req: req, st: st, styles: styles, shape: normalizeStackGraphShape(req.Shape), width: 100, height: 40}
+	// The size stays unknown until the first WindowSizeMsg: a frame drawn at a
+	// guess would be redrawn at once.
+	m := stackGraphModel{req: req, st: st, styles: styles, shape: normalizeStackGraphShape(req.Shape)}
 	m.previewFn = func(st *stackGraphState, spec stackPreviewSpec) stackPreviewResult { return st.preview(spec) }
 	m.applyFn = func(st *stackGraphState, res stackPreviewResult, spec stackPreviewSpec) stackApplyResult {
 		return st.apply(res, spec)
@@ -500,7 +513,6 @@ func (m *stackGraphModel) requestPreview() tea.Cmd {
 	}
 	m.previewKey = key
 	m.previewID++
-	m.afterOffset = 0
 	if len(m.selected) == 0 {
 		m.preview = nil
 		return nil
@@ -531,6 +543,13 @@ func (m *stackGraphModel) startApply() tea.Cmd {
 }
 
 func (m stackGraphModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	out, cmd := m.update(msg)
+	next := out.(stackGraphModel)
+	next.settle()
+	return next, cmd
+}
+
+func (m stackGraphModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
@@ -710,6 +729,17 @@ func (m stackGraphModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key == "ctrl+c" {
 		return m.requestQuit()
 	}
+	if m.help {
+		switch key {
+		case "?", "esc", "q":
+			m.help = false
+		case "j", "down":
+			m.helpOffset++
+		case "k", "up":
+			m.helpOffset = max(0, m.helpOffset-1)
+		}
+		return m, nil
+	}
 	if m.busy != "" {
 		return m, nil
 	}
@@ -733,7 +763,34 @@ func (m stackGraphModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.msg = ""
+	if m.zoom {
+		// The after pane is alone on screen: the cursor keys scroll it, and
+		// keys that act on the hidden cursor's line say where it is.
+		switch key {
+		case "j", "down":
+			m.afterOffset++
+			return m, nil
+		case "k", "up":
+			m.afterOffset = max(0, m.afterOffset-1)
+			return m, nil
+		case "g", "home":
+			m.afterOffset = 0
+			return m, nil
+		case "G", "end":
+			m.afterOffset = m.afterTotal()
+			return m, nil
+		case " ", "J", "K", "t", "c", "m":
+			name := key
+			if key == " " {
+				name = "space"
+			}
+			m.msg = "tab back to the graph first: " + name + " acts on the line under the cursor"
+			return m, nil
+		}
+	}
 	switch key {
+	case "?":
+		m.help, m.helpOffset = true, 0
 	case "q", "esc":
 		if key == "esc" && len(m.selected) > 0 {
 			m.selected = nil
@@ -983,11 +1040,12 @@ func (m stackGraphModel) toggleUnderCursor() (tea.Model, tea.Cmd) {
 		}
 	}
 	if i := m.selectedIndex(l.Key); i >= 0 {
+		// The cursor stays, so a second Space puts the line back.
 		m.selected = append(m.selected[:i], m.selected[i+1:]...)
 	} else {
 		m.selected = append(m.selected, l.Key)
+		m.advanceToNextSelectable()
 	}
-	m.advanceToNextSelectable()
 	return m, m.requestPreview()
 }
 
@@ -1132,68 +1190,176 @@ func (m stackGraphModel) conflictSummary() string {
 	return fmt.Sprintf("%d commit(s)", len(m.preview.conflicts))
 }
 
-// View renders header, now pane, after pane, and footer within the terminal
-// height, scrolling the panes rather than overflowing.
+// stackGraphSplitMinHeight is the shortest terminal that shows the now and
+// after panes together; a shorter one (a popup) shows one at a time.
+const stackGraphSplitMinHeight = 22
+
+// stackGraphWideMinWidth is the narrowest terminal that gets the two-row
+// header with every toggle spelled out.
+const stackGraphWideMinWidth = 100
+
+func (m stackGraphModel) short() bool { return m.height < stackGraphSplitMinHeight }
+
+// stackGraphPanes is how the edit view divides the terminal's rows.
+type stackGraphPanes struct {
+	header []string
+	// split draws both pane rules and a closing rule above the footer.
+	split bool
+	// now and after are the rows each pane shows; 0 for a hidden pane.
+	now, after int
+}
+
+// panes depends only on the terminal size, tab, and the base graph (empty
+// Workspaces included, so e does not resize them), never on the preview or
+// the cursor, so nothing the user selects moves a pane.
+func (m stackGraphModel) panes() stackGraphPanes {
+	p := stackGraphPanes{header: m.headerLines(), split: !m.short()}
+	fixed := len(p.header) + 2 // a pane rule and the footer
+	if p.split {
+		fixed++ // the closing rule
+		if !m.zoom {
+			fixed++ // the second pane's rule
+		}
+	}
+	rows := max(0, m.height-fixed)
+	switch {
+	case m.zoom:
+		p.after = rows
+	case !p.split:
+		p.now = rows
+	default:
+		full := 0
+		for _, entry := range m.st.log {
+			full += len(entry.Lines)
+		}
+		p.now = min(full, (rows+1)/2)
+		p.after = rows - p.now
+	}
+	return p
+}
+
+// nowTotal is the number of rows of the now pane's graph.
+func (m stackGraphModel) nowTotal() int {
+	n := 0
+	for _, entry := range m.log() {
+		n += len(entry.Lines)
+	}
+	return n
+}
+
+// nowScroll keeps the now pane where it was unless the cursor's rows left
+// it, then scrolls just far enough to show them, head row first.
+func (m stackGraphModel) nowScroll(budget int) int {
+	first, last := m.cursorRowSpan()
+	return keepVisible(m.nowOffset, first, last, budget, m.nowTotal())
+}
+
+func keepVisible(offset, first, last, budget, total int) int {
+	if budget <= 0 || total <= budget {
+		return 0
+	}
+	// A line longer than the pane keeps its head row visible.
+	last = min(last, first+budget-1)
+	switch {
+	case first < offset:
+		offset = first
+	case last >= offset+budget:
+		offset = last - budget + 1
+	}
+	return clampOffset(offset, budget, total)
+}
+
+func clampOffset(offset, budget, total int) int {
+	return min(max(0, offset), max(0, total-budget))
+}
+
+// afterTotal is the number of scrollable rows of the after pane in the
+// current view.
+func (m stackGraphModel) afterTotal() int {
+	if m.mode == stackGraphDone && m.done != nil {
+		return len(m.doneRows())
+	}
+	_, rows := m.afterPane()
+	return len(rows)
+}
+
+// settle stores the scroll offsets this frame is drawn with, so the next
+// frame starts from them.
+func (m *stackGraphModel) settle() {
+	if m.width <= 0 || m.height <= 0 {
+		return
+	}
+	if m.help {
+		m.helpOffset = clampOffset(m.helpOffset, m.height-2, len(m.helpRows()))
+		return
+	}
+	if m.mode == stackGraphDone && m.done != nil {
+		top, rows, footer := m.doneParts()
+		m.afterOffset = clampOffset(m.afterOffset, m.height-len(top)-len(footer), len(rows))
+		return
+	}
+	p := m.panes()
+	m.nowOffset = m.nowScroll(p.now)
+	extras, rows := m.afterPane()
+	m.afterOffset = clampOffset(m.afterOffset, p.after-len(extras), len(rows))
+}
+
+// View draws exactly the terminal's rows with the footer on the last one;
+// the panes scroll rather than grow.
 func (m stackGraphModel) View() string {
 	if m.height <= 0 || m.width <= 0 {
 		return ""
 	}
+	if m.help {
+		return m.frame(m.helpView())
+	}
 	if m.mode == stackGraphDone && m.done != nil {
-		return m.doneView()
+		top, rows, footer := m.doneParts()
+		budget := max(0, m.height-len(top)-len(footer))
+		body := append(top, window(rows, clampOffset(m.afterOffset, budget, len(rows)), budget)...)
+		return m.frame(body, footer)
 	}
-	lines := m.lines()
-	header := m.headerLines()
-	var nowRows []string
+	p := m.panes()
+	body := append([]string{}, p.header...)
 	if !m.zoom {
-		nowRows = m.nowRows(lines)
+		body = append(body, m.nowRule())
+		rows := m.nowRows(m.lines())
+		body = append(body, pad(window(rows, m.nowScroll(p.now), p.now), p.now)...)
 	}
-	extras, afterRows := m.afterPane(lines)
-	footer := m.footerLine()
-	fixed := len(header) + 1 + len(extras) + 1 + 1
-	if !m.zoom {
-		fixed++
+	if p.split || m.zoom {
+		body = append(body, m.afterRule())
+		extras, rows := m.afterPane()
+		extras = extras[:min(len(extras), p.after)]
+		budget := p.after - len(extras)
+		body = append(body, extras...)
+		body = append(body, window(rows, clampOffset(m.afterOffset, budget, len(rows)), budget)...)
 	}
-	remaining := max(0, m.height-fixed)
-	nowBudget, afterBudget := 0, remaining
-	if !m.zoom {
-		nowWant, afterWant := len(nowRows), len(afterRows)
-		switch {
-		case nowWant+afterWant <= remaining:
-			nowBudget, afterBudget = nowWant, remaining-nowWant
-		default:
-			half := remaining / 2
-			nowBudget = min(nowWant, max(half, remaining-afterWant))
-			afterBudget = remaining - nowBudget
-		}
+	footer := []string{m.footerLine()}
+	if p.split {
+		footer = []string{m.rule("", ""), m.footerLine()}
 	}
-	out := append([]string{}, header...)
-	if !m.zoom {
-		hint := "j/k next line · space select · t target"
-		if m.changeMode {
-			hint = "j/k next change · space selects its line · t target"
-		}
-		out = append(out, m.rule("now", hint))
-		first, last := m.cursorRowSpan()
-		out = append(out, window(nowRows, scrollToShow(first, last, nowBudget, len(nowRows)), nowBudget)...)
-	}
-	summary := ""
-	if m.preview != nil && m.preview.err == nil {
-		summary = fmt.Sprintf("%d new · %d rewritten", len(m.preview.created), len(m.preview.rewritten))
-	}
-	title := "after · " + m.shape
-	if m.zoom {
-		title += " (tab: back)"
-	}
-	out = append(out, m.rule(title, summary))
-	out = append(out, extras...)
-	afterOffset := min(m.afterOffset, max(0, len(afterRows)-afterBudget))
-	out = append(out, window(afterRows, afterOffset, afterBudget)...)
-	out = append(out, m.rule("", ""))
-	out = append(out, footer)
+	return m.frame(body, footer)
+}
+
+// frame fills the rows above footer with body, blank-padded or cut, and clips
+// every row to the terminal width.
+func (m stackGraphModel) frame(body, footer []string) string {
+	rows := max(0, m.height-len(footer))
+	out := pad(body[:min(len(body), rows)], rows)
+	out = append(out, footer...)
+	out = out[len(out)-min(len(out), m.height):]
 	for i := range out {
 		out[i] = clipSelectorLine(out[i], m.width)
 	}
-	return strings.Join(out[:min(len(out), m.height)], "\n")
+	return strings.Join(out, "\n")
+}
+
+func pad(rows []string, n int) []string {
+	out := append([]string{}, rows...)
+	for len(out) < n {
+		out = append(out, "")
+	}
+	return out
 }
 
 func window(rows []string, offset, budget int) []string {
@@ -1203,18 +1369,6 @@ func window(rows []string, offset, budget int) []string {
 	offset = max(0, offset)
 	end := min(len(rows), offset+budget)
 	return rows[offset:end]
-}
-
-// scrollToShow returns the offset that keeps rows first..last visible inside
-// budget rows, centring the cursor entry when the pane must scroll.
-func scrollToShow(first, last, budget, total int) int {
-	if budget <= 0 || total <= budget {
-		return 0
-	}
-	// A line longer than the pane keeps its head row visible.
-	last = min(last, first+budget-1)
-	offset := first - (budget-(last-first+1))/2
-	return min(max(0, offset), max(0, total-budget))
 }
 
 func (m stackGraphModel) rule(title, right string) string {
@@ -1230,33 +1384,62 @@ func (m stackGraphModel) rule(title, right string) string {
 	return s.rule.Render(t+strings.Repeat("─", fill)) + s.dim.Render(r)
 }
 
+func (m stackGraphModel) nowRule() string {
+	if m.short() {
+		// The after pane is hidden: say what it holds.
+		right := "tab: after"
+		if badge := m.outcomeBadge(); badge != "" {
+			right += " · " + badge
+		}
+		return m.rule("now", right)
+	}
+	hint := "j/k next line · space select · t target"
+	if m.changeMode {
+		hint = "j/k next change · space selects its line · t target"
+	}
+	return m.rule("now", hint)
+}
+
+func (m stackGraphModel) afterRule() string {
+	right := m.outcomeSummary()
+	if m.zoom {
+		right = strings.TrimSuffix("tab: graph · "+right, " · ")
+	}
+	return m.rule("after · "+m.shape, right)
+}
+
+// outcomeSummary counts the preview's new and rewritten commits, or says a
+// newer one is being drawn.
+func (m stackGraphModel) outcomeSummary() string {
+	switch {
+	case len(m.selected) == 0:
+		return ""
+	case m.previewInFlight || m.preview == nil:
+		return "previewing…"
+	case m.preview.err != nil:
+		return ""
+	}
+	return fmt.Sprintf("%d new · %d rewritten", len(m.preview.created), len(m.preview.rewritten))
+}
+
+// outcomeBadge is the one-glance verdict of the preview for the now rule.
+func (m stackGraphModel) outcomeBadge() string {
+	summary := m.outcomeSummary()
+	switch {
+	case summary == "" && m.preview != nil && m.preview.err != nil:
+		return "✗ preview failed"
+	case summary == "" || summary == "previewing…":
+		return summary
+	case m.preview.hasConflicts():
+		return "✗ conflicts"
+	case m.preview.refusedBookmarkMove() != "":
+		return "✗ bookmark move refused"
+	}
+	return "✓ " + summary
+}
+
 func (m stackGraphModel) headerLines() []string {
 	s := m.styles
-	shapeChips := []string{}
-	for _, shape := range stackGraphShapes {
-		if shape == m.shape {
-			shapeChips = append(shapeChips, s.yellow.Bold(true).Render("["+shape+"]"))
-		} else {
-			shapeChips = append(shapeChips, s.dim.Render(shape))
-		}
-	}
-	target := s.dim.Render("target") + " " + s.target.Render("◉ "+m.st.target.Handle+"@")
-	if m.shape == "line" {
-		target = s.dim.Render("Line Stack: the first input keeps its base · target") + " " + s.target.Render(m.st.target.Handle+"@") + " " + s.dim.Render("is not an input")
-	}
-	line1 := s.title.Render("ajj stack") + "  " + target + "   " + s.dim.Render("shape") + " " + strings.Join(shapeChips, " ")
-	move := s.dim.Render("m") + " " + s.dim.Render("move bookmarks → top")
-	if len(m.moveBookmarks) > 0 {
-		move = s.dim.Render("m") + " " + s.yellow.Bold(true).Render("move "+strings.Join(m.moveBookmarks, ", ")+" → top")
-	}
-	tidy := s.dim.Render("x") + " " + s.dim.Render("tidy")
-	if m.tidy {
-		tidy = s.dim.Render("x") + " " + s.yellow.Bold(true).Render("tidy")
-	}
-	mode := s.dim.Render("c") + " " + s.dim.Render("by change")
-	if m.changeMode {
-		mode = s.dim.Render("c") + " " + s.yellow.Bold(true).Render("by change")
-	}
 	stack := s.dim.Render("nothing selected")
 	if len(m.selected) > 0 {
 		parts := []string{}
@@ -1268,6 +1451,54 @@ func (m stackGraphModel) headerLines() []string {
 			parts = append(parts, part)
 		}
 		stack = strings.Join(parts, s.dim.Render(" › "))
+	}
+	on := s.yellow.Bold(true)
+	if m.short() || m.width < stackGraphWideMinWidth {
+		// One row: the target, the shape, the toggles that are on, and the
+		// selection, most important first.
+		sep := s.dim.Render(" · ")
+		parts := []string{s.title.Render("ajj stack"), s.target.Render("◉ " + m.st.target.Handle + "@"), on.Render(m.shape)}
+		if m.shape == "line" {
+			parts = []string{s.title.Render("ajj stack"), on.Render("line")}
+		}
+		if m.changeMode {
+			parts = append(parts, on.Render("by change"))
+		}
+		if m.tidy {
+			parts = append(parts, on.Render("tidy"))
+		}
+		if m.showEmpty && len(m.st.emptyHandles) > 0 {
+			parts = append(parts, on.Render(fmt.Sprintf("%d empty shown", len(m.st.emptyHandles))))
+		}
+		if len(m.moveBookmarks) > 0 {
+			parts = append(parts, on.Render("move "+strings.Join(m.moveBookmarks, ", ")))
+		}
+		return []string{strings.Join(parts[:2], " ") + sep + strings.Join(append(parts[2:], stack), sep)}
+	}
+	shapeChips := []string{}
+	for _, shape := range stackGraphShapes {
+		if shape == m.shape {
+			shapeChips = append(shapeChips, on.Render("["+shape+"]"))
+		} else {
+			shapeChips = append(shapeChips, s.dim.Render(shape))
+		}
+	}
+	target := s.dim.Render("target") + " " + s.target.Render("◉ "+m.st.target.Handle+"@")
+	if m.shape == "line" {
+		target = s.dim.Render("Line Stack: the first input keeps its base · target") + " " + s.target.Render(m.st.target.Handle+"@") + " " + s.dim.Render("is not an input")
+	}
+	line1 := s.title.Render("ajj stack") + "  " + target + "   " + s.dim.Render("shape") + " " + strings.Join(shapeChips, " ")
+	move := s.dim.Render("m") + " " + s.dim.Render("move bookmarks → top")
+	if len(m.moveBookmarks) > 0 {
+		move = s.dim.Render("m") + " " + on.Render("move "+strings.Join(m.moveBookmarks, ", ")+" → top")
+	}
+	tidy := s.dim.Render("x") + " " + s.dim.Render("tidy")
+	if m.tidy {
+		tidy = s.dim.Render("x") + " " + on.Render("tidy")
+	}
+	mode := s.dim.Render("c") + " " + s.dim.Render("by change")
+	if m.changeMode {
+		mode = s.dim.Render("c") + " " + on.Render("by change")
 	}
 	empty := ""
 	if n := len(m.st.emptyHandles); n > 0 {
@@ -1444,9 +1675,13 @@ func (m stackGraphModel) cursorRowSpan() (int, int) {
 }
 
 // afterRows renders a projected or applied log with +/↻ markers and the
-// bar of the input each commit came from.
-func (m stackGraphModel) afterRows(lines []stackGraphLine, owners map[string]string, log []stackGraphLogEntry, heads map[string]string, created, rewritten map[string]bool, closing []string) []string {
+// bar of the input each commit came from, in selected's order.
+func (m stackGraphModel) afterRows(lines []stackGraphLine, owners map[string]string, selected []string, log []stackGraphLogEntry, heads map[string]string, created, rewritten map[string]bool, closing []string) []string {
 	s := m.styles
+	order := map[string]int{}
+	for i, key := range selected {
+		order[key] = i
+	}
 	headLine := map[string]string{}
 	for handle, change := range heads {
 		headLine[change] = handle + "@"
@@ -1473,8 +1708,8 @@ func (m stackGraphModel) afterRows(lines []stackGraphLine, owners map[string]str
 					if l, ok := stackGraphLineByKey(lines, key); ok {
 						if l.isTarget() {
 							bar = s.target.Render("┃")
-						} else if order := m.selectedIndex(key); order >= 0 {
-							bar = s.input(order).Render("┃")
+						} else if i, ok := order[key]; ok {
+							bar = s.input(i).Render("┃")
 						}
 					}
 				}
@@ -1510,7 +1745,7 @@ func (m stackGraphModel) outcomeLines(res *stackPreviewResult) []string {
 		}
 		out = append(out, "    "+s.magenta.Render(move.Name)+" "+s.dim.Render("moves")+" "+move.From+" "+s.dim.Render("→")+" "+move.To+" "+s.dim.Render("(top of the stack; not pushed)"))
 	}
-	if m.tidy {
+	if res.spec.tidy {
 		if len(res.tidyCloses) > 0 {
 			closes := []string{}
 			for _, h := range res.tidyCloses {
@@ -1528,31 +1763,36 @@ func (m stackGraphModel) outcomeLines(res *stackPreviewResult) []string {
 	return out
 }
 
-func (m stackGraphModel) afterPane(lines []stackGraphLine) ([]string, []string) {
+// afterPane is the outcome block (always shown) and the scrollable graph of
+// the latest landed preview. A preview still running keeps the previous one
+// on screen, drawn as that preview's own selection, until it lands.
+func (m stackGraphModel) afterPane() ([]string, []string) {
 	s := m.styles
 	switch {
 	case len(m.selected) == 0:
 		return nil, []string{"    " + s.dim.Render("select lines of work above; the graph after stacking is drawn here")}
-	case m.preview == nil || m.previewInFlight:
+	case m.preview == nil:
 		return nil, []string{"    " + s.dim.Render("previewing…")}
 	case m.preview.err != nil:
 		return nil, []string{"    " + s.red.Render("✗ "+sanitizeTidyPreview(m.preview.err.Error()))}
 	}
+	res, spec := m.preview, m.preview.spec
 	extras := []string{}
-	for _, note := range m.preview.notes {
+	for _, note := range res.notes {
 		extras = append(extras, "    "+s.yellow.Render(note))
 	}
-	extras = append(extras, m.outcomeLines(m.preview)...)
-	owners := stackGraphOwners(lines, m.payloads(), m.selected)
+	extras = append(extras, m.outcomeLines(res)...)
+	lines := m.st.lines(spec.shape)
+	owners := stackGraphOwners(lines, m.st.payloadsWithCuts(spec.cuts), spec.selected)
 	closing := []string(nil)
-	if m.tidy {
-		closing = m.preview.tidyCloses
+	if spec.tidy {
+		closing = res.tidyCloses
 	}
-	rows := m.afterRows(lines, owners, m.preview.log, m.preview.heads, m.preview.created, m.preview.rewritten, closing)
-	if m.tidy && len(m.preview.tidyGone) > 0 {
+	rows := m.afterRows(lines, owners, spec.selected, res.log, res.heads, res.created, res.rewritten, closing)
+	if spec.tidy && len(res.tidyGone) > 0 {
 		rows = append(rows, "", "    "+s.dim.Render("✂ gone after tidy"))
 		struck := s.dim.Strikethrough(true)
-		for _, entry := range m.preview.tidyGone {
+		for _, entry := range res.tidyGone {
 			for _, line := range entry.Lines {
 				rows = append(rows, "    "+struck.Render(stripANSI(line)))
 			}
@@ -1586,25 +1826,102 @@ func (m stackGraphModel) footerLine() string {
 		if m.force {
 			prompt += " " + s.red.Render("It will leave conflicts to resolve.")
 		}
-		return prompt + " " + s.bold.Render("[y/N]")
-	}
-	keys := []string{"space", "select", "J/K", "order", "a", "all", "t", "target", "s", "shape", "m", "move", "x", "tidy", "f", "fetch", "c", "by change", "e", "empty", "tab", "zoom", "enter", "apply", "q", "quit"}
-	parts := []string{}
-	for i := 0; i+1 < len(keys); i += 2 {
-		parts = append(parts, s.dim.Render(keys[i])+" "+keys[i+1])
+		// The answer stays on screen however narrow the terminal is.
+		answer := " " + s.bold.Render("[y/N]")
+		if room := m.width - lipgloss.Width(answer); lipgloss.Width(prompt) > room {
+			prompt = clipSelectorLine(prompt, max(0, room-1)) + "…"
+		}
+		return prompt + answer
 	}
 	if m.msg != "" {
 		// A message replaces the key legend so that it is not clipped; the
 		// legend returns with the next key.
 		return s.yellow.Render(sanitizeTidyPreview(m.msg))
 	}
-	return strings.Join(parts, " ")
+	return m.legend()
 }
 
-func (m stackGraphModel) doneView() string {
+// legend lists as many keys as fit, most used first, and always ? for the
+// full list.
+func (m stackGraphModel) legend() string {
 	s := m.styles
-	res := m.done
-	out := []string{}
+	tab := "after"
+	if m.zoom {
+		tab = "graph"
+	}
+	keys := [][2]string{{"space", "select"}, {"enter", "apply"}, {"tab", tab}, {"q", "quit"}, {"s", "shape"}, {"t", "target"}, {"c", "by change"}, {"e", "empty"}, {"J/K", "order"}, {"a", "all"}, {"m", "move"}, {"x", "tidy"}, {"f", "fetch"}}
+	help := s.dim.Render("?") + " keys"
+	width := lipgloss.Width(help)
+	parts := []string{}
+	for _, k := range keys {
+		part := s.dim.Render(k[0]) + " " + k[1]
+		if width+lipgloss.Width(part)+1 > m.width {
+			break
+		}
+		parts = append(parts, part)
+		width += lipgloss.Width(part) + 1
+	}
+	return strings.Join(append(parts, help), " ")
+}
+
+var stackGraphHelp = [][2]string{
+	{"j/k ↑/↓", "move between lines of work (by change: commits)"},
+	{"g/G", "first / last line"},
+	{"space", "select or deselect the line; selection order is input order"},
+	{"J/K", "move the selected line later / earlier"},
+	{"a", "select everything stack-relevant (as --all), again to clear"},
+	{"c", "by change: step commits; space stacks a line up to one"},
+	{"e", "show or hide the empty Workspaces"},
+	{"t", "make the Workspace under the cursor the target"},
+	{"s", "cycle the shape auto → merge → linear → line"},
+	{"m", "move the row's bookmarks (or trunk's) to the top"},
+	{"x", "tidy: close the stacked Workspaces afterwards"},
+	{"f", "jj git fetch and reload"},
+	{"tab", "show the after pane alone, and back"},
+	{"pgup/pgdn", "scroll the after pane"},
+	{"enter", "apply the preview (asks first)"},
+	{"!", "apply even with conflicts or a refused bookmark move"},
+	{"u", "undo the last Stack"},
+	{"esc", "clear the selection, or quit when it is empty"},
+	{"q", "quit"},
+	{"?", "close this help"},
+}
+
+func (m stackGraphModel) helpRows() []string {
+	s := m.styles
+	rows := []string{}
+	for _, k := range stackGraphHelp {
+		rows = append(rows, "  "+s.bold.Render(fmt.Sprintf("%-10s", k[0]))+" "+k[1])
+	}
+	return rows
+}
+
+func (m stackGraphModel) helpView() ([]string, []string) {
+	s := m.styles
+	rows := m.helpRows()
+	budget := max(0, m.height-2)
+	body := []string{s.title.Render("ajj stack") + s.dim.Render(" · keys")}
+	body = append(body, window(rows, clampOffset(m.helpOffset, budget, len(rows)), budget)...)
+	footer := s.dim.Render("? esc q") + " back"
+	if len(rows) > budget {
+		footer = s.dim.Render("j/k") + " scroll  " + footer
+	}
+	return body, []string{footer}
+}
+
+// doneRows is the applied log, drawn as the applied selection.
+func (m stackGraphModel) doneRows() []string {
+	created, rewritten := map[string]bool{}, map[string]bool{}
+	if m.applying != nil {
+		created, rewritten = m.applying.created, m.applying.rewritten
+	}
+	return m.afterRows(m.doneLines, m.doneOwners, m.doneSpec.selected, m.done.log, m.done.heads, created, rewritten, nil)
+}
+
+// doneParts is the result view: what ran, the scrollable applied log, and
+// the keys.
+func (m stackGraphModel) doneParts() (top, rows, footer []string) {
+	s := m.styles
 	what := s.dim.Render("into") + " " + s.target.Render(m.st.target.Handle+"@")
 	if m.doneSpec.shape == "line" {
 		what = s.dim.Render("as one line:") + " " + strings.Join(m.doneSpec.selected, s.dim.Render(" › "))
@@ -1613,35 +1930,25 @@ func (m stackGraphModel) doneView() string {
 	if !m.undoAvailable {
 		undoNote = s.red.Render("· undo not recorded")
 	}
-	out = append(out, s.green.Bold(true).Render("✔ Stacked")+" "+what+" "+undoNote)
-	for _, line := range res.lines {
+	top = append(top, s.green.Bold(true).Render("✔ Stacked")+" "+what+" "+undoNote)
+	for _, line := range m.done.lines {
 		if strings.HasPrefix(line, "✗") {
-			out = append(out, "    "+s.red.Render(line))
+			top = append(top, "    "+s.red.Render(line))
 		} else {
-			out = append(out, "    "+s.dim.Render(line))
+			top = append(top, "    "+s.dim.Render(line))
 		}
 	}
-	out = append(out, m.rule("jj log, after", ""))
-	created, rewritten := map[string]bool{}, map[string]bool{}
-	if m.applying != nil {
-		created, rewritten = m.applying.created, m.applying.rewritten
-	}
-	m.selected = m.doneSpec.selected
-	rows := m.afterRows(m.doneLines, m.doneOwners, res.log, res.heads, created, rewritten, nil)
-	legend := s.green.Render("+") + " " + s.dim.Render("new") + "  " + s.yellow.Render("↻") + " " + s.dim.Render("rewritten") + "  " + s.dim.Render("┃ input colour")
-	keysLine := s.dim.Render("u") + " undo   " + s.dim.Render("enter") + " keep stacking from here   " + s.dim.Render("q") + " quit (keeps the result)"
+	top = append(top, m.rule("jj log, after", ""))
+	keys := s.dim.Render("u") + " undo · " + s.dim.Render("enter") + " keep stacking · " + s.dim.Render("q") + " quit (keeps the result)"
 	if m.busy != "" {
-		keysLine = s.yellow.Render(m.busy)
+		keys = s.yellow.Render(m.busy)
 	} else if m.msg != "" {
-		keysLine += "   " + s.yellow.Render(sanitizeTidyPreview(m.msg))
+		keys += "   " + s.yellow.Render(sanitizeTidyPreview(m.msg))
 	}
-	fixed := len(out) + 1 + 2
-	budget := max(0, m.height-fixed)
-	offset := min(m.afterOffset, max(0, len(rows)-budget))
-	out = append(out, window(rows, offset, budget)...)
-	out = append(out, m.rule("", ""), legend, keysLine)
-	for i := range out {
-		out[i] = clipSelectorLine(out[i], m.width)
+	footer = []string{keys}
+	if !m.short() {
+		legend := s.green.Render("+") + " " + s.dim.Render("new") + "  " + s.yellow.Render("↻") + " " + s.dim.Render("rewritten") + "  " + s.dim.Render("┃ input colour")
+		footer = []string{m.rule("", ""), legend, keys}
 	}
-	return strings.Join(out[:min(len(out), m.height)], "\n")
+	return top, m.doneRows(), footer
 }
