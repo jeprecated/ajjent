@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -63,6 +64,49 @@ func updateStaleWorkspaces(repoPath string, targets []workspaceInfo) (map[string
 		reports[target.Ref.Handle] = staleUpdateReport{output: output, err: err}
 	}
 	return reports, nil
+}
+
+var requireFreshWorkingCopyFn = requireFreshWorkingCopy
+
+var workingCopyOperationRE = regexp.MustCompile(`Current operation: OperationId\("([0-9a-f]+)"\)`)
+
+// requireFreshWorkingCopy fails closed when the Workspace at path, which
+// Closing runs its jj mutations from, has a stale working copy: jj would refuse
+// them part-way through cleanup. It never snapshots, so a review stays pinned
+// and descendants of that Workspace's @ are not rebased. Like jj, it treats the
+// working copy as fresh when its recorded tree still matches @, and it never
+// recovers a stale one.
+func requireFreshWorkingCopy(path string) error {
+	jj := func(args ...string) (string, error) {
+		return commandCaptureFn("jj", append([]string{"-R", path, "--ignore-working-copy", "--color=never", "--no-pager"}, args...)...)
+	}
+	out, err := jj("debug", "working-copy")
+	if err != nil {
+		return fmt.Errorf("inspect working copy of %s: %w", path, err)
+	}
+	match := workingCopyOperationRE.FindStringSubmatch(out)
+	if match == nil {
+		return fmt.Errorf("inspect working copy of %s: no recorded operation in jj debug working-copy output", path)
+	}
+	current, err := currentOperationID(path)
+	if err != nil {
+		return err
+	}
+	if match[1] == current {
+		return nil
+	}
+	recorded, err := jj("--at-op="+match[1], "log", "--no-graph", "-r", "@", "-T", "commit_id")
+	if err != nil {
+		return fmt.Errorf("inspect working copy of %s: %w", path, err)
+	}
+	changed, err := jj("diff", "--from", strings.TrimSpace(recorded), "--to", "@", "--name-only")
+	if err != nil {
+		return fmt.Errorf("inspect working copy of %s: %w", path, err)
+	}
+	if strings.TrimSpace(changed) != "" {
+		return fmt.Errorf("%s has a stale working copy and Closing runs jj from it; nothing was changed. Run `jj -R %s workspace update-stale`, then retry", path, path)
+	}
+	return nil
 }
 
 func isStaleWorkingCopyError(err error) bool {
@@ -178,6 +222,9 @@ func revalidateCloseReview(repoPath string, targets []workspaceInfo, reviewedOpe
 		return nil
 	}
 	if err := unchanged(); err != nil {
+		return closeProtectionContext{}, err
+	}
+	if err := requireFreshWorkingCopyFn(repoPath); err != nil {
 		return closeProtectionContext{}, err
 	}
 	if err := snapshotCloseCandidates(repoPath, targets); err != nil {

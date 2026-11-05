@@ -161,6 +161,65 @@ func TestLifecycleFailsClosedOnRealStaleCandidate(t *testing.T) {
 	}
 }
 
+// Close and Tidy run their jj mutations from Main, and jj refuses to run them
+// from a stale working copy. A Main made stale from another Workspace must stop
+// the lifecycle before anything changes, not after confirmation mid-cleanup.
+func TestLifecycleFailsClosedOnStaleMainBeforeAnyChange(t *testing.T) {
+	for _, command := range []string{"close", "tidy"} {
+		t.Run(command, func(t *testing.T) {
+			mainPath, alphaPath, bravoPath := setupMutuallyRepresentedCloseRepo(t)
+			runJJ(t, "-R", mainPath, "new", "alpha@-")
+			markDisposableForTest(t, mainPath, "alpha", "bravo")
+			runJJ(t, "-R", bravoPath, "rebase", "-r", "default@", "-d", "root()")
+			before := currentOperationIDFullForTest(t, mainPath)
+			_, _, err := captureOutput(func() error {
+				if command == "close" {
+					return runClose([]string{"alpha", "--repo", mainPath, "--yes"})
+				}
+				return runTidy([]string{"--repo", mainPath, "--yes"})
+			})
+			if err == nil || !strings.Contains(err.Error(), "stale working copy") || !strings.Contains(err.Error(), "jj -R "+mainPath+" workspace update-stale`") {
+				t.Fatalf("stale Main must fail closed with its update-stale hint: %v", err)
+			}
+			if after := currentOperationIDFullForTest(t, mainPath); after != before {
+				t.Fatal("stale Main refusal changed graph")
+			}
+			for handle, path := range map[string]string{"alpha": alphaPath, "bravo": bravoPath} {
+				if !exists(path) || !workspaceRegistered(t, mainPath, handle) {
+					t.Fatalf("stale Main refusal closed %s", handle)
+				}
+			}
+			if _, err := commandCaptureFn("jj", "-R", mainPath, "--config=snapshot.auto-update-stale=false", "--color=never", "--no-pager", "status"); !isStaleWorkingCopyError(err) {
+				t.Fatalf("stale Main was recovered automatically: %v", err)
+			}
+		})
+	}
+}
+
+// jj itself treats a working copy as fresh when other Workspaces' operations
+// left its tree alone, so the read-only check must too.
+func TestRequireFreshWorkingCopyMatchesJJStaleness(t *testing.T) {
+	mainPath, _, bravoPath := setupMutuallyRepresentedCloseRepo(t)
+	if err := requireFreshWorkingCopy(mainPath); err != nil {
+		t.Fatalf("fresh Main: %v", err)
+	}
+	runJJ(t, "-R", bravoPath, "describe", "-r", "default@", "-m", "same tree, new commit")
+	if err := requireFreshWorkingCopy(mainPath); err != nil {
+		t.Fatalf("Main with an unchanged tree: %v", err)
+	}
+	runJJ(t, "-R", bravoPath, "rebase", "-r", "default@", "-d", "root()")
+	before := currentOperationIDFullForTest(t, mainPath)
+	if err := requireFreshWorkingCopy(mainPath); err == nil || !strings.Contains(err.Error(), "stale working copy") {
+		t.Fatalf("stale Main: %v", err)
+	}
+	if after := currentOperationIDFullForTest(t, mainPath); after != before {
+		t.Fatal("staleness check wrote an operation")
+	}
+	if _, err := commandCaptureFn("jj", "-R", mainPath, "--config=snapshot.auto-update-stale=false", "--color=never", "--no-pager", "status"); !isStaleWorkingCopyError(err) {
+		t.Fatalf("jj disagrees that Main is stale: %v", err)
+	}
+}
+
 func TestCancelledCloseSnapshotsButDoesNotAbandonOrRemove(t *testing.T) {
 	mainPath, humanPath, _ := setupMutuallyRepresentedCloseRepo(t)
 	path := filepath.Join(humanPath, "new-work.txt")

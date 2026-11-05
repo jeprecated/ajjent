@@ -1614,9 +1614,11 @@ func writeConfig(t *testing.T, repoRoot string, content string) {
 
 func withCommandCapture(t *testing.T, fn func(string, ...string) (string, error)) {
 	t.Helper()
-	orig := commandCaptureFn
+	orig, origFresh := commandCaptureFn, requireFreshWorkingCopyFn
 	commandCaptureFn = fn
-	t.Cleanup(func() { commandCaptureFn = orig })
+	// Stubbed jj has no working copy to inspect; real-jj tests cover staleness.
+	requireFreshWorkingCopyFn = func(string) error { return nil }
+	t.Cleanup(func() { commandCaptureFn, requireFreshWorkingCopyFn = orig, origFresh })
 }
 
 func withCommandToStderr(t *testing.T, fn func(string, ...string) error) {

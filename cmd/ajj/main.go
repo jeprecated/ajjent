@@ -1277,6 +1277,11 @@ func loadTidyReview(repoRoot string, cfg config, project string) ([]workspaceInf
 			candidates = append(candidates, info)
 		}
 	}
+	if main, ok := mapInfosByHandle(infos)[cfg.MainWorkspace]; ok && !main.Missing {
+		if err := requireFreshWorkingCopyFn(main.Path); err != nil {
+			return nil, "", err
+		}
+	}
 	// A stale candidate is excluded from selection (never recovered
 	// automatically or closed) instead of aborting the whole batch; other
 	// snapshot failures still abort.
@@ -1592,6 +1597,9 @@ func runClose(args []string) error {
 	graphRepoPath := repoRoot
 	if main, ok := mapInfosByHandle(infos)[cfg.MainWorkspace]; ok && !main.Missing {
 		graphRepoPath = main.Path
+	}
+	if err := requireFreshWorkingCopyFn(graphRepoPath); err != nil {
+		return err
 	}
 	if err := snapshotCloseCandidates(graphRepoPath, candidates); err != nil {
 		return err
